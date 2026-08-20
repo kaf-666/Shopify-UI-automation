@@ -1,0 +1,22 @@
+# Phase 2: minimal browser runtime config
+default_site: mondressy
+
+base_url: "@url:`https://mondressy.com`"
+
+# Shared explicit proxy for both desktop and mobile (Phase 2.2)
+proxy:
+  enabled: true
+  server: "@url:`http://127.0.0.1:7897`"
+  username:
+  password:
+
+browsers:
+  desktop:
+    engine: chromium
+    viewport:
+      width: 1440
+      height: 900
+
+  mobile:
+    engine: webkit
+    device: iPhone 14

@@ -1,0 +1,366 @@
+# Mondressy site config — Phase 3 selector freeze
+# Theme: Shopify Brooklyn (theme_store_id 857) + SPB custom options + cbb recommendations
+site: mondressy
+base_url: "@url:`https://mondressy.com`"
+
+access:
+  type: signed_request
+  secret_file: 'C:\Users\33797\.shopify-monitor\mondressy-secrets.ps1'
+  allowed_hosts:
+    - mondressy.com
+    - www.mondressy.com
+
+pages:
+  home:
+    url: /
+
+    selectors:
+      logo:
+        by: css
+        value: "h1.site-header__logo"
+        stability: HIGH
+        notes: Brooklyn theme logo container, count=1 visible=1
+
+      search:
+        desktop:
+          by: css
+          value: "a.js-search-header:not(.medium-up--hide)"
+          stability: HIGH
+          notes: theme JS hook; mobile-only duplicate excluded
+        mobile:
+          by: css
+          value: "a.js-search-header.medium-up--hide"
+          stability: HIGH
+          notes: mobile-only search trigger
+
+      cart:
+        by: css
+        value: "a.js-drawer-open-cart"
+        stability: HIGH
+        notes: opens #CartDrawer ajax cart
+
+  search:
+    url: /search
+
+    selectors:
+      container:
+        by: css
+        value: ".site-header__search-container"
+        stability: HIGH
+        notes: 头部内联搜索容器；is-active 类表示打开（关闭过渡期 is_visible 会误报，按 class 判定）
+      input:
+        by: css
+        value: "input#Search"
+        stability: HIGH
+        notes: type=search name=q role=combobox；打开时自动聚焦，Enter 提交
+      submit:
+        by: css
+        value: "button.btn--search"
+        stability: HIGH
+        notes: type=submit；与 Enter 等价（正式 Case 用真实 Enter 提交）
+      close:
+        by: css
+        value: "button.btn--close-search"
+        stability: HIGH
+        notes: 关闭搜索容器（不清空输入值）
+      clear:
+        # 本主题无独立 Clear 控件（输入框内无清除按钮）；桌面端 Escape 会清空并关闭
+      predictive_results:
+        by: css
+        value: "#predictive-search"
+        stability: MEDIUM
+        notes: 输入后出现的建议容器（search__results）；含搜索词建议与商品链接
+      predictive_product:
+        by: css
+        value: "#predictive-search a[href*='/products/']"
+        stability: MEDIUM
+        notes: predictive 商品链接（Phase 8B 仅作观察，不作为结果判定）
+      results_grid:
+        by: css
+        value: "#CollectionAjaxContent"
+        stability: HIGH
+        notes: /search 结果网格（Brooklyn 集合网格结构，38 卡片/页）
+      result_card:
+        by: css
+        value: "#CollectionAjaxContent .grid-product"
+        stability: HIGH
+        notes: 结果商品卡片（推荐位 / 页脚链接不在此容器内）
+      result_link:
+        by: css
+        value: "#CollectionAjaxContent a.grid-product__link"
+        stability: HIGH
+        notes: 卡片主链接；target=_blank 在新标签页打开 PDP
+      no_results:
+        by: css
+        value: ".search-content"
+        stability: MEDIUM
+        notes: 搜索内容容器；0 结果时显示 "0 results found for ..." 且无结果网格
+
+  navigation:
+    smoke_collection:
+      name: Wedding Guest Dresses
+      path: /collections/wedding-guest-dresses
+      notes: 正式导航目标；真实菜单文案为 "Wedding Guest Dresses NEW"（含 NEW 徽标）
+
+    selectors:
+      header:
+        by: css
+        value: "header#SiteHeader"
+        stability: HIGH
+        notes: Brooklyn 站点头部（含 logo / 导航 / 搜索 / 购物车入口）
+
+      desktop_menu:
+        by: css
+        value: "ul.site-nav.gm-menu"
+        stability: HIGH
+        notes: 桌面端主导航（Gm mega menu 应用）；small--hide 仅桌面显示
+
+      desktop_menu_item:
+        by: css
+        value: "ul.site-nav.gm-menu > li.gm-item"
+        stability: HIGH
+        notes: 顶层菜单项（gm-level-0）；含 mega 子菜单（gm-submenu gm-mega）
+
+      desktop_submenu:
+        by: css
+        value: "ul.site-nav.gm-menu li.gm-level-0 .gm-submenu"
+        stability: MEDIUM
+        notes: mega 子菜单容器；真实 hover 顶层项后出现（hover 触发不稳定，需重试）
+
+      mobile_trigger:
+        by: css
+        value: "button.js-drawer-open-nav"
+        stability: HIGH
+        notes: 移动端汉堡按钮（aria-controls=NavDrawer）
+
+      mobile_drawer:
+        by: css
+        value: "#NavDrawer"
+        stability: HIGH
+        notes: 移动端导航抽屉；drawer--is-open 类表示打开（过渡期 is_visible 会误报）
+
+      mobile_menu:
+        by: css
+        value: "#NavDrawer .gm-menu-mobile"
+        stability: HIGH
+        notes: 抽屉内 Gm 移动菜单（click_toggle：点击顶层项展开子菜单）
+
+      mobile_menu_item:
+        by: css
+        value: "#NavDrawer .gm-menu-mobile > li.gm-item"
+        stability: HIGH
+        notes: 抽屉内顶层菜单项
+
+      mobile_close:
+        by: css
+        value: "#NavDrawer button.drawer__close-button"
+        stability: HIGH
+        notes: 抽屉关闭按钮（js-drawer-close）
+
+      target_collection:
+        by: css
+        value: "a.gm-target[href*='/collections/wedding-guest-dresses']"
+        stability: HIGH
+        notes: 目标 Collection 链接（双端菜单内均存在；按稳定 pathname 匹配，不依赖文本层级）
+
+  collection:
+    url: /collections/wedding-guest-dresses
+
+    selectors:
+      product_grid:
+        by: css
+        value: ".collection-grid__wrapper .grid--uniform"
+        stability: MEDIUM
+        notes: main product grid container (skip gm-* mega menu grids)
+
+      product_card:
+        by: css
+        value: ".grid-product"
+        stability: MEDIUM
+        notes: Brooklyn card wrapper; must match multiple cards
+
+      filter:
+        by: css
+        value: ".collection-filter"
+        stability: MEDIUM
+        notes: inline filter panel on BOTH viewports (drawer trigger stays hidden on mobile too); contains 2 native selects
+
+      color_filter_group:
+        by: css
+        value: "color-family#style-color-family"
+        stability: MEDIUM
+        notes: two-level color quick filter; families hover(desktop)/click(mobile) to reveal concrete color links
+
+      color_family_options:
+        by: css
+        value: ".color-family-item"
+        stability: MEDIUM
+        notes: family items; class contains family-<Name> and optional family-active
+
+      color_family_name:
+        by: css
+        value: ".color-family-item .color-name"
+        stability: MEDIUM
+
+      color_options:
+        by: css
+        value: "a.option_circle"
+        stability: MEDIUM
+        notes: concrete color links (visible after family expand); href = ?filter.v.option.color=<Name>
+
+      color_selected_indicator:
+        by: css
+        value: ".color-family-item .selected-color-box"
+        stability: MEDIUM
+        notes: check icon block inside family item; observed not visible even with active filter
+
+      price_filter:
+        by: css
+        value: "select#price-filter"
+        stability: HIGH
+        notes: native select (probe only in Phase 8A, no formal case)
+
+      sort:
+        by: css
+        value: "select#SortBy"
+        stability: HIGH
+        notes: native select, name=SortBy
+
+  product:
+    url: /products/a-line-princess-scoop-lace-embroidery-mother-of-the-bride-dresses-floral-ankle-length-short-sleeves-mon2313179
+
+    selectors:
+      title:
+        by: css
+        value: ".product-single__title"
+        stability: HIGH
+        notes: h1, count=1 visible=1
+
+      price:
+        by: css
+        value: ".product__price"
+        stability: HIGH
+        notes: regular price span inside .product-block--price
+
+      gallery:
+        by: css
+        value: ".product-slideshow"
+        stability: MEDIUM
+        notes: flickity slideshow container (id contains random section id, avoided)
+
+      color:
+        by: css
+        value: "fieldset[name=\"Color\"]"
+        stability: HIGH
+        notes: radio swatch group; options = input[type=radio][name=Color].variant__input--color-swatch
+
+      size:
+        by: css
+        value: "input[name=\"properties[Size]\"][type=\"radio\"]"
+        stability: MEDIUM
+        notes: SPB app radio option group (size options); Free Custom Size adds Bust/Waist/Hips text inputs
+
+      add_to_cart:
+        by: css
+        value: "form.product-single__form button[name=\"add\"]"
+        stability: HIGH
+        notes: main submit button, excludes cbb recommendation buttons
+
+  cart:
+    url: /cart
+
+    selectors:
+      drawer:
+        by: css
+        value: "#CartDrawer"
+        stability: HIGH
+        notes: drawer--right, present on all pages, hidden until opened
+
+      cart_item:
+        by: css
+        value: ".cart__item"
+        stability: MEDIUM
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Brooklyn cart page line item; unverifiable with empty cart
+
+      quantity:
+        by: css
+        value: "input[name=\"updates[]\"]"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Shopify standard cart quantity input; unverifiable with empty cart
+
+      remove:
+        by: css
+        value: "a[href*=\"/cart/change\"]"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Shopify standard remove link; unverifiable with empty cart
+
+      quantity_input:
+        by: css
+        value: "input[name=\"updates[]\"]"
+        stability: HIGH
+        notes: 数量输入框（js-qty__num，type=text，min=0，非 readonly）；作用域为当前 cart item
+
+      quantity_plus:
+        by: css
+        value: "button.js-qty__adjust--plus"
+        stability: HIGH
+        notes: 数量 + 按钮（aria-label=Increase item quantity by one）；点击触发 POST /cart/change.js
+
+      quantity_minus:
+        by: css
+        value: "button.js-qty__adjust--minus"
+        stability: HIGH
+        notes: 数量 - 按钮（aria-label=Reduce item quantity by one）；quantity=1 时保持启用（主题行为）
+
+      subtotal:
+        by: css
+        value: "#CartDrawer .drawer__footer .money.done"
+        stability: MEDIUM
+        notes: 抽屉底部价格元素；最后一个为 Subtotal 金额（仅辅助观察，不作唯一 PASS 依据）
+
+      checkout_button:
+        by: css
+        value: "#CartDrawer button[name=\"checkout\"]"
+        stability: HIGH
+        notes: 标准 Checkout 按钮（btn cart__checkout，name=checkout；排除快捷支付控件）
+
+  checkout:
+    selectors:
+      root:
+        by: css
+        value: "main#checkout-main"
+        stability: HIGH
+        notes: Shopify Checkout 根容器（稳定 id，非 hash class）
+
+      contact:
+        by: css
+        value: "h2#contact"
+        stability: HIGH
+        notes: Contact 区块标题（稳定 id）
+
+      delivery:
+        by: css
+        value: "h2#deliveryAddress"
+        stability: HIGH
+        notes: Delivery / 配送地址区块标题（稳定 id）
+
+      shipping_form:
+        by: css
+        value: "#shippingAddressForm"
+        stability: HIGH
+        notes: 配送地址表单容器（存在性验证，不填写）
+
+      email:
+        by: css
+        value: "input#email"
+        stability: HIGH
+        notes: 邮箱输入（存在性验证，不填写）
+
+      express:
+        by: css
+        value: "#express-checkout-heading"
+        stability: HIGH
+        notes: 快捷支付区块标题（仅观察存在性，绝不点击）
