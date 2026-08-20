@@ -1,0 +1,45 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# IDE
+.idea/
+.vscode/
+
+# Runtime artifacts
+artifacts/
+playwright-report/
+test-results/
+screenshots/
+videos/
+
+# Cache / temporary
+.pytest_cache/
+.mypy_cache/
+.cache/
+*.tmp
+*.log
+
+# Local secrets
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+cookies.txt
+*.pem
+*.key
+*.p12
+*.pfx
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup
+*.bak
+*.backup
