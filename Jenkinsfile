@@ -93,6 +93,12 @@ pipeline {
                         sh '''
                             if [ "$(id -u)" -eq 0 ]; then
                                 .venv/bin/python -m playwright install --with-deps chromium webkit
+                            elif command -v sudo >/dev/null 2>&1; then
+                                if sudo -n true >/dev/null 2>&1; then
+                                    sudo -n .venv/bin/python -m playwright install --with-deps chromium webkit
+                                else
+                                    .venv/bin/python -m playwright install chromium webkit
+                                fi
                             else
                                 .venv/bin/python -m playwright install chromium webkit
                             fi

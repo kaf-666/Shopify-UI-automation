@@ -135,8 +135,9 @@ runs the offline/runtime/site-access gates, executes one Website Smoke V1 target
 validates the resulting schema, and always archives `artifacts/**`.
 
 On Unix agents the browser stage uses `--with-deps` only when the agent process
-is running as root; otherwise it performs the unprivileged browser install and
-lets missing host libraries fail as an explicit environment gate.
+is running as root or has passwordless `sudo`; otherwise it performs the
+unprivileged browser install and lets missing host libraries fail as an explicit
+environment gate.
 
 The default/final target is `SMOKE_VIEWPORT=both`; `desktop` and `mobile` are
 available for isolated diagnosis. The pipeline binds the three Secret Text
