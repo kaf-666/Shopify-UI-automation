@@ -260,9 +260,9 @@ pages:
 
       size:
         by: css
-        value: "input[name=\"properties[Size]\"][type=\"radio\"]"
+        value: "input[name=\"properties[Size]\"][type=\"radio\"]:not([value=\"\"])"
         stability: MEDIUM
-        notes: SPB app radio option group (size options); Free Custom Size adds Bust/Waist/Hips text inputs
+        notes: SPB app radio option group; excludes the hidden empty placeholder radio; Free Custom Size adds Bust/Waist/Hips text inputs
 
       add_to_cart:
         by: css
