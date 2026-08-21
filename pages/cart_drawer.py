@@ -144,23 +144,34 @@ class CartDrawer(BasePage):
         return self._item(index).locator(sel).first
 
     def increase_quantity(self, index: int = 0) -> None:
-        """真实 UI 点击 + 并等待数量 input 变化（后端响应后主题更新 DOM）。"""
+        """真实 UI 点击 + 并等待数量更新请求完成与 DOM 变化。"""
         btn = self.quantity_increase_button(index)
         if not (btn.count() and btn.is_visible() and btn.is_enabled()):
             raise RuntimeError("quantity increase button not available")
         before = self.get_item_quantity(index)
-        btn.click()
-        self._wait_quantity_change(index, before)
+        self._click_quantity_control(btn, index, before)
 
     def decrease_quantity(self, index: int = 0) -> None:
-        """真实 UI 点击 - 并等待数量 input 变化。"""
+        """真实 UI 点击 - 并等待数量更新请求完成与 DOM 变化。"""
         btn = self.quantity_decrease_button(index)
         if not (btn.count() and btn.is_visible()):
             raise RuntimeError("quantity decrease button not available")
         if btn.is_disabled():
             raise RuntimeError("quantity decrease button is disabled")
         before = self.get_item_quantity(index)
-        btn.click()
+        self._click_quantity_control(btn, index, before)
+
+    def _click_quantity_control(self, btn, index: int, before: str) -> None:
+        """等待 Shopify 的 change 请求完成，避免只读到乐观更新的 DOM。"""
+        with self.page.expect_response(
+            lambda response: "/cart/change" in response.url
+            and response.request.method == "POST",
+            timeout=15_000,
+        ) as response_info:
+            btn.click()
+        response = response_info.value
+        if response.status != 200:
+            raise RuntimeError(f"/cart/change.js returned HTTP {response.status}")
         self._wait_quantity_change(index, before)
 
     def wait_quantity(self, index: int = 0, expected: int = 1, timeout_ms: int = 10_000) -> None:
