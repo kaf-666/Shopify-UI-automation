@@ -42,14 +42,30 @@ pipeline {
         stage('Environment') {
             steps {
                 script {
-                    env.PYTHON_BIN = isUnix() ? '.venv/bin/python' : '.venv\\Scripts\\python.exe'
                     echo 'Signed Request: configured by Jenkins Credentials Binding (values redacted)'
                     echo env.SHOPIFY_PROXY_SERVER?.trim() ?
                         'Proxy: configured through the Jenkins environment (server value redacted)' :
                         'Proxy: direct mode; SHOPIFY_PROXY_SERVER is not configured'
                     if (isUnix()) {
-                        sh 'python --version'
+                        env.SYSTEM_PYTHON = sh(
+                            returnStdout: true,
+                            script: '''
+                                if command -v python3 >/dev/null 2>&1; then
+                                    command -v python3
+                                elif command -v python >/dev/null 2>&1; then
+                                    command -v python
+                                else
+                                    echo "No Python interpreter found on this Jenkins Agent" >&2
+                                    exit 127
+                                fi
+                            '''
+                        ).trim()
+                        env.PYTHON_BIN = '.venv/bin/python'
+                        sh "${env.SYSTEM_PYTHON} --version"
                     } else {
+                        env.SYSTEM_PYTHON = 'python'
+                        env.PYTHON_BIN = '.venv\\Scripts\\python.exe'
+                        bat 'where python'
                         bat 'python --version'
                     }
                 }
@@ -60,7 +76,7 @@ pipeline {
             steps {
                 script {
                     if (isUnix()) {
-                        sh 'python -m venv .venv'
+                        sh "${env.SYSTEM_PYTHON} -m venv .venv"
                         sh '.venv/bin/python -m pip install --no-input -r requirements.lock.txt'
                     } else {
                         bat 'python -m venv .venv'
