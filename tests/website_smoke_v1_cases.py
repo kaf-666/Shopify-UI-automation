@@ -49,7 +49,7 @@ from pages.home_page import HomePage
 from pages.navigation import NavigationPage
 from pages.product_page import ProductPage
 from pages.search_page import SearchPage
-from utils.result import CaseResult, iso_now
+from utils.result import CaseResult, iso_now, write_results_json
 from utils.screenshots import capture_case_failure
 
 STATUS_PASS = "PASS"
@@ -119,10 +119,62 @@ class WebsiteSmokeV1Runner:
     def _capture_evidence(self, case_id: str) -> tuple[List[dict], Optional[str]]:
         if self.artifact_dir is None:
             return [], None
+        evidence: List[dict] = []
+        capture_errors: List[str] = []
         rel = capture_case_failure(self.page, self.artifact_dir, self.viewport, case_id)
-        if rel is None:
-            return [], "screenshot capture failed"
-        return [{"type": "screenshot", "path": rel}], None
+        if rel is not None:
+            evidence.append({"type": "screenshot", "path": rel})
+        else:
+            capture_errors.append("screenshot capture failed")
+
+        if case_id == "WSMOKE-CART-03":
+            drawer = self.flow.state.get("drawer")
+            diagnostics = drawer.quantity_diagnostics() if isinstance(drawer, CartDrawer) else []
+            if diagnostics:
+                diag_rel = f"{self.viewport}/{case_id}-quantity-timeline.json"
+                runtime = self.runtime.metadata()
+                payload = {
+                    "case_id": case_id,
+                    "viewport": self.viewport,
+                    "browser_engine": runtime.get("engine"),
+                    "device": runtime.get("device"),
+                    "viewport_size": runtime.get("viewport_size"),
+                    "quantity_operations": diagnostics,
+                }
+                try:
+                    write_results_json(payload, self.artifact_dir / diag_rel)
+                except Exception as exc:
+                    capture_errors.append(f"quantity diagnostic capture failed: {type(exc).__name__}")
+                else:
+                    evidence.append({"type": "quantity_timeline", "path": diag_rel})
+
+        if evidence:
+            return evidence, None
+        return [], "; ".join(capture_errors) or "evidence capture failed"
+
+    @staticmethod
+    def _quantity_diagnostic_detail(drawer: CartDrawer) -> str:
+        """生成可安全进入 failure detail 的紧凑数量时间线。"""
+        diagnostics = drawer.quantity_diagnostics()
+        if not diagnostics:
+            return "quantity_diagnostic=unavailable"
+        diagnostic = diagnostics[-1]
+        after_api = diagnostic.get("quantity_after_cart_api_read_snapshot") or {}
+        return (
+            f"quantity_before={diagnostic.get('quantity_before')} "
+            f"quantity_immediate_after_click={diagnostic.get('quantity_immediate_after_click')} "
+            f"quantity_after_change_response={diagnostic.get('quantity_after_change_response')} "
+            f"quantity_after_dom_wait={diagnostic.get('quantity_after_dom_wait')} "
+            f"quantity_before_cart_api_read={diagnostic.get('quantity_before_cart_api_read')} "
+            f"quantity_after_cart_api_read={diagnostic.get('quantity_after_cart_api_read')} "
+            f"value_attribute_after_api={after_api.get('value_attribute')} "
+            f"input_value_after_api={after_api.get('input_value')} "
+            f"backend_quantity={diagnostic.get('backend_quantity')} "
+            f"cart_change_http_status={diagnostic.get('cart_change_http_status')} "
+            f"response_item_count={diagnostic.get('response_item_count')} "
+            f"response_target_line_quantity={diagnostic.get('response_target_line_quantity')} "
+            f"same_cart_line_verified={diagnostic.get('same_cart_line_verified')}"
+        )
 
     def _mark_cf(self) -> None:
         self.cf_interruption = True
@@ -627,7 +679,8 @@ class WebsiteSmokeV1Runner:
             if ui_after_inc != "2" or backend_after_inc != "2":
                 raise FlowError(
                     "CART_QUANTITY_STATE_MISMATCH",
-                    f"ui={ui_after_inc} backend={backend_after_inc}",
+                    f"ui={ui_after_inc} backend={backend_after_inc} | "
+                    f"{self._quantity_diagnostic_detail(drawer)}",
                 )
             subtotal_mid = drawer.get_subtotal()
             drawer.decrease_quantity(0)
@@ -637,7 +690,8 @@ class WebsiteSmokeV1Runner:
             if ui_after_dec != "1" or backend_after_dec != "1":
                 raise FlowError(
                     "CART_QUANTITY_STATE_MISMATCH",
-                    f"ui={ui_after_dec} backend={backend_after_dec}",
+                    f"ui={ui_after_dec} backend={backend_after_dec} | "
+                    f"{self._quantity_diagnostic_detail(drawer)}",
                 )
         except FlowError:
             raise

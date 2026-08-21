@@ -11,7 +11,6 @@ ShoppingFlow.run()（完整链入口）与 Smoke Cases 调用同一批步骤方�
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from pages.cart_drawer import CartDrawer
@@ -42,6 +41,13 @@ def titles_match(pdp_title, cart_title) -> bool:
     return p == c or p.endswith(c)
 
 
+def sanitized_cart_line(item: object) -> dict:
+    """仅保留购物车行身份与数量字段，避免商品/客户数据进入产物。"""
+    if not isinstance(item, dict):
+        return {}
+    return {key: item.get(key) for key in ("key", "variant_id", "quantity")}
+
+
 class ShoppingFlow:
     """购物车抽屉购物流程：以可复用步骤组织完整购物链，供 run() 与 Smoke Cases 共用。"""
 
@@ -58,28 +64,16 @@ class ShoppingFlow:
         policy = self.access_policy
         return policy.request_headers(url) if policy is not None else {}
 
-    def _cart_read_headers(self, url: str) -> dict:
-        """为只读购物车状态请求禁用中间缓存，保持签名头不变。"""
-        return {
-            **self._api_headers(url),
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        }
-
-    def _cart_read_url(self) -> str:
-        """为 /cart.js 只读校验生成一次性 URL，绕过站点自定义缓存键。"""
-        return f"{self.base}/cart.js?smoke_cache_bust={time.time_ns()}"
-
     def pre_clean_cart(self) -> None:
         """测试前置条件（不属于被测行为）。
 
         最小化 API 调用：先 GET /cart.js 检查，仅当购物车确实有商品时才 POST /cart/clear.js。
         """
-        cart_url = self._cart_read_url()
+        cart_url = f"{self.base}/cart.js"
         try:
             resp = self.page.request.get(
                 cart_url,
-                headers=self._cart_read_headers(cart_url),
+                headers=self._api_headers(cart_url),
                 timeout=15000,
             )
         except Exception as exc:
@@ -139,12 +133,13 @@ class ShoppingFlow:
 
     def _cart_json(self) -> dict:
         self.page.wait_for_timeout(3000)  # 拉长 cart API 调用间隔
-        cart_url = self._cart_read_url()
+        cart_url = f"{self.base}/cart.js"
         resp = self.page.request.get(
             cart_url,
-            headers=self._cart_read_headers(cart_url),
+            headers=self._api_headers(cart_url),
             timeout=15000,
         )
+        self.state["_last_cart_read_diagnostic"] = {"cart_js_http_status": resp.status}
         if resp.status == 429:
             raise FlowError(
                 "CART_PRECONDITION_UNVERIFIED",
@@ -156,9 +151,19 @@ class ShoppingFlow:
                 f"/cart.js returned HTTP {resp.status}",
             )
         try:
-            return resp.json()
+            data = resp.json()
         except Exception as exc:
             raise FlowError("CART_STATE_VERIFICATION_UNAVAILABLE", "/cart.js response was not valid JSON") from exc
+        if isinstance(data, dict):
+            items = data.get("items") or []
+            self.state["_last_cart_read_diagnostic"].update(
+                {
+                    "item_count": data.get("item_count"),
+                    "items_length": len(items),
+                    "items_0": sanitized_cart_line(items[0]) if items else {},
+                }
+            )
+        return data
 
     def cart_state_quantity(self, index: int = 0) -> Optional[str]:
         """读取后端购物车第 index 个商品的数量（/cart.js 只读验证）。
@@ -167,6 +172,14 @@ class ShoppingFlow:
         429）时抛出 CART_STATE_VERIFICATION_UNAVAILABLE，由 Case 区分
         验证基础设施问题与真实状态不一致。
         """
+        drawer = self.state.get("drawer")
+        before_snapshot = None
+        assertion_before = ""
+        before_elapsed_ms = 0
+        if isinstance(drawer, CartDrawer) and drawer.quantity_diagnostics():
+            before_snapshot = drawer.get_item_quantity_snapshot(index)
+            assertion_before = drawer.get_item_quantity(index)
+            before_elapsed_ms = drawer.quantity_diagnostic_elapsed_ms()
         try:
             data = self._cart_json()
         except FlowError as exc:
@@ -177,11 +190,30 @@ class ShoppingFlow:
         items = data.get("items") or []
         if index >= len(items):
             return None
-        qty = items[index].get("quantity")
+        target_line = sanitized_cart_line(items[index])
+        qty = target_line.get("quantity")
         if qty is None:
             raise FlowError(
                 "CART_STATE_VERIFICATION_UNAVAILABLE",
                 "cart item quantity is missing",
+            )
+        if before_snapshot is not None:
+            after_snapshot = drawer.get_item_quantity_snapshot(index)
+            assertion_after = drawer.get_item_quantity(index)
+            cart_js_result = {
+                **self.state.get("_last_cart_read_diagnostic", {}),
+                "target_index": index,
+                "target_line": target_line,
+            }
+            drawer.record_cart_api_read(
+                index=index,
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                assertion_quantity_before=assertion_before,
+                assertion_quantity_after=assertion_after,
+                cart_js_result=cart_js_result,
+                before_elapsed_ms=before_elapsed_ms,
+                after_elapsed_ms=drawer.quantity_diagnostic_elapsed_ms(),
             )
         return str(qty)
 

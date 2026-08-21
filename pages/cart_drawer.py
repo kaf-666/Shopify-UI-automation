@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Optional
+from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
 
@@ -85,6 +87,45 @@ class CartDrawer(BasePage):
         if qty.count() == 0:
             return ""
         return qty.get_attribute("value") or qty.input_value()
+
+    def get_item_quantity_snapshot(self, index: int = 0) -> dict:
+        """同时读取静态 value attribute 与实时 input value property。"""
+        qty = self.quantity_input(index)
+        if qty.count() == 0:
+            return {"value_attribute": None, "input_value": ""}
+        return {
+            "value_attribute": qty.get_attribute("value"),
+            "input_value": qty.input_value(),
+        }
+
+    def get_item_identity(self, index: int = 0) -> dict:
+        """读取购物车行的脱敏身份线索，不记录标题或完整 URL。"""
+        item = self._item(index)
+        qty = self.quantity_input(index)
+        identity = {"ui_index": index}
+        for prefix, locator in (("row", item), ("input", qty)):
+            for attr in (
+                "id",
+                "data-id",
+                "data-key",
+                "data-line-key",
+                "data-cart-item-key",
+                "data-variant-id",
+            ):
+                value = locator.get_attribute(attr)
+                if value:
+                    identity[f"{prefix}_{attr.replace('-', '_')}"] = value
+
+        product_link = item.locator("a[href*='/products/']").first
+        if product_link.count():
+            href = product_link.get_attribute("href") or ""
+            parsed = urlparse(href)
+            if parsed.path:
+                identity["product_path"] = parsed.path
+            variant = (parse_qs(parsed.query).get("variant") or [None])[0]
+            if variant:
+                identity["product_url_variant_id"] = variant
+        return identity
 
     @staticmethod
     def _parse_label_value(text: str) -> str:
@@ -162,21 +203,216 @@ class CartDrawer(BasePage):
         self._click_quantity_control(btn, index, before)
 
     def _click_quantity_control(self, btn, index: int, before: str) -> None:
-        """等待 Shopify 的 change 请求完成，避免只读到乐观更新的 DOM。"""
-        with self.page.expect_response(
-            lambda response: "/cart/change" in response.url
-            and response.request.method == "POST",
-            timeout=15_000,
-        ) as response_info:
-            btn.click()
-        response = response_info.value
-        if response.status != 200:
-            raise RuntimeError(f"/cart/change.js returned HTTP {response.status}")
-        self._wait_quantity_change(index, before)
+        """等待 change response，并记录不改变业务行为的数量时间线。"""
+        started = time.perf_counter()
+        diagnostic = {
+            "_started_monotonic": started,
+            "operation": "increase" if "plus" in (btn.get_attribute("class") or "") else "decrease",
+            "ui_index": index,
+            "ui_identity": self.get_item_identity(index),
+            "events": [],
+        }
+        diagnostics = getattr(self, "_quantity_diagnostics", None)
+        if diagnostics is None:
+            diagnostics = []
+            self._quantity_diagnostics = diagnostics
+        diagnostics.append(diagnostic)
+
+        before_handle = self.quantity_input(index).element_handle()
+
+        def record(field: str) -> dict:
+            snapshot = self.get_item_quantity_snapshot(index)
+            diagnostic[field] = snapshot["input_value"]
+            diagnostic[f"{field}_snapshot"] = snapshot
+            diagnostic["events"].append(
+                {
+                    "event": field,
+                    "elapsed_ms": int((time.perf_counter() - started) * 1000),
+                    **snapshot,
+                }
+            )
+            return snapshot
+
+        def record_replacement(field: str) -> None:
+            current_handle = self.quantity_input(index).element_handle()
+            try:
+                same_node = bool(
+                    current_handle
+                    and before_handle
+                    and current_handle.evaluate("(node, before) => node === before", before_handle)
+                )
+            finally:
+                if current_handle is not None:
+                    current_handle.dispose()
+            diagnostic[field] = not same_node
+
+        record("quantity_before")
+        try:
+            with self.page.expect_response(
+                lambda response: "/cart/change" in response.url
+                and response.request.method == "POST",
+                timeout=15_000,
+            ) as response_info:
+                btn.click()
+                record("quantity_immediate_after_click")
+                record_replacement("input_replaced_immediate_after_click")
+
+            response = response_info.value
+            diagnostic["cart_change_http_status"] = response.status
+            request_data = {}
+            try:
+                request_data = response.request.post_data_json or {}
+            except Exception:
+                request_data = {}
+            if isinstance(request_data, dict):
+                for key in ("line", "quantity", "id"):
+                    value = request_data.get(key)
+                    if isinstance(value, (str, int, float)):
+                        diagnostic[f"request_{key}"] = value
+
+            try:
+                payload = response.json()
+            except Exception as exc:
+                diagnostic["response_json_readable"] = False
+                diagnostic["response_json_error"] = type(exc).__name__
+                payload = {}
+            else:
+                diagnostic["response_json_readable"] = isinstance(payload, dict)
+
+            if isinstance(payload, dict):
+                response_items = payload.get("items") or []
+                diagnostic["response_item_count"] = payload.get("item_count")
+                diagnostic["response_items_length"] = len(response_items)
+                line = request_data.get("line") if isinstance(request_data, dict) else None
+                try:
+                    target_index = int(line) - 1 if line is not None else index
+                except (TypeError, ValueError):
+                    target_index = index
+                if 0 <= target_index < len(response_items):
+                    target = response_items[target_index]
+                    if isinstance(target, dict):
+                        diagnostic["response_target_line"] = {
+                            key: target.get(key) for key in ("key", "variant_id", "quantity")
+                        }
+                        diagnostic["response_target_line_quantity"] = target.get("quantity")
+
+            record("quantity_after_change_response")
+            record_replacement("input_replaced_after_change_response")
+            if response.status != 200:
+                raise RuntimeError(f"/cart/change.js returned HTTP {response.status}")
+            self._wait_quantity_change(index, before)
+            record("quantity_after_change_wait")
+            record_replacement("input_replaced_after_change_wait")
+        finally:
+            if before_handle is not None:
+                before_handle.dispose()
 
     def wait_quantity(self, index: int = 0, expected: int = 1, timeout_ms: int = 10_000) -> None:
         """等待第 index 个商品行数量 input 达到期望值。"""
         expect(self.quantity_input(index)).to_have_value(str(expected), timeout=timeout_ms)
+        diagnostics = getattr(self, "_quantity_diagnostics", None) or []
+        if diagnostics:
+            diagnostic = diagnostics[-1]
+            snapshot = self.get_item_quantity_snapshot(index)
+            diagnostic["quantity_after_dom_wait"] = snapshot["input_value"]
+            diagnostic["quantity_after_dom_wait_snapshot"] = snapshot
+            diagnostic["events"].append(
+                {
+                    "event": "quantity_after_dom_wait",
+                    "elapsed_ms": int(
+                        (
+                            time.perf_counter()
+                            - diagnostic.get("_started_monotonic", time.perf_counter())
+                        )
+                        * 1000
+                    ),
+                    **snapshot,
+                }
+            )
+
+    def quantity_diagnostics(self) -> list[dict]:
+        """返回本 Drawer 会话中已采集的脱敏数量诊断。"""
+        return [
+            {key: value for key, value in diagnostic.items() if not key.startswith("_")}
+            for diagnostic in (getattr(self, "_quantity_diagnostics", None) or [])
+        ]
+
+    def quantity_diagnostic_elapsed_ms(self) -> int:
+        """返回最近一次数量操作开始后的毫秒数。"""
+        diagnostics = getattr(self, "_quantity_diagnostics", None) or []
+        if not diagnostics:
+            return 0
+        started = diagnostics[-1].get("_started_monotonic", time.perf_counter())
+        return int((time.perf_counter() - started) * 1000)
+
+    def record_cart_api_read(
+        self,
+        index: int,
+        before_snapshot: dict,
+        after_snapshot: dict,
+        assertion_quantity_before: str,
+        assertion_quantity_after: str,
+        cart_js_result: dict,
+        before_elapsed_ms: int,
+        after_elapsed_ms: int,
+    ) -> None:
+        """将 /cart.js 的脱敏行状态关联到最近一次真实数量点击。"""
+        diagnostics = getattr(self, "_quantity_diagnostics", None) or []
+        if not diagnostics:
+            return
+        diagnostic = diagnostics[-1]
+        diagnostic["quantity_before_cart_api_read"] = before_snapshot.get("input_value")
+        diagnostic["quantity_before_cart_api_read_snapshot"] = before_snapshot
+        diagnostic["quantity_after_cart_api_read"] = after_snapshot.get("input_value")
+        diagnostic["quantity_after_cart_api_read_snapshot"] = after_snapshot
+        diagnostic["assertion_quantity_before_cart_api_read"] = assertion_quantity_before
+        diagnostic["assertion_quantity_after_cart_api_read"] = assertion_quantity_after
+        diagnostic["backend_quantity"] = cart_js_result.get("target_line", {}).get("quantity")
+        diagnostic["cart_js"] = cart_js_result
+
+        diagnostic["events"].extend(
+            [
+                {
+                    "event": "quantity_before_cart_api_read",
+                    "elapsed_ms": before_elapsed_ms,
+                    **before_snapshot,
+                },
+                {
+                    "event": "quantity_after_cart_api_read",
+                    "elapsed_ms": after_elapsed_ms,
+                    **after_snapshot,
+                },
+            ]
+        )
+
+        response_line = diagnostic.get("response_target_line") or {}
+        cart_line = cart_js_result.get("target_line") or {}
+        try:
+            request_line_matches_ui = int(diagnostic.get("request_line")) == index + 1
+        except (TypeError, ValueError):
+            request_line_matches_ui = False
+        request_id = diagnostic.get("request_id")
+        request_id_matches_response = bool(request_id) and str(request_id) in {
+            str(response_line.get("key")),
+            str(response_line.get("variant_id")),
+        }
+        key_matches = bool(response_line.get("key")) and str(response_line.get("key")) == str(
+            cart_line.get("key")
+        )
+        variant_matches = bool(response_line.get("variant_id")) and str(
+            response_line.get("variant_id")
+        ) == str(cart_line.get("variant_id"))
+        diagnostic["same_cart_line_verified"] = bool(
+            (request_line_matches_ui or request_id_matches_response)
+            and key_matches
+            and variant_matches
+        )
+        diagnostic["same_cart_line_evidence"] = {
+            "request_line_matches_ui_row": request_line_matches_ui,
+            "request_id_matches_response_line": request_id_matches_response,
+            "response_key_matches_cart_js": key_matches,
+            "response_variant_id_matches_cart_js": variant_matches,
+        }
 
     def _wait_quantity_change(self, index: int, before: str, timeout_ms: int = 10_000) -> None:
         """等待数量 input 值相对变化（数量更新由 AJAX 响应驱动）。"""
