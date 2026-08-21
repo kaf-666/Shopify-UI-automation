@@ -9,8 +9,14 @@
 pipeline {
     agent any
 
+    triggers {
+        // Hashed minute avoids synchronized starts when more sites are added.
+        cron('H */3 * * *')
+    }
+
     options {
         skipDefaultCheckout(true)
+        disableConcurrentBuilds()
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
         buildDiscarder(logRotator(numToKeepStr: '25', artifactNumToKeepStr: '25'))
@@ -20,7 +26,7 @@ pipeline {
         choice(
             name: 'SMOKE_VIEWPORT',
             choices: ['both', 'desktop', 'mobile'],
-            description: 'Run one Website Smoke V1 target. Use both for the formal gate.'
+            description: 'Run one Website Smoke V1 target. Default/scheduled target is both.'
         )
     }
 
@@ -30,6 +36,9 @@ pipeline {
         MONDRESSY_US_SHOPIFY_SIGNATURE = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE')
         MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT')
         MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT')
+        STABILITY_SECRET_GATE = 'NOT_RUN'
+        STABILITY_SCHEMA_GATE = 'NOT_RUN'
+        STABILITY_PYTHON_EXIT_CODE = 'UNKNOWN'
     }
 
     stages {
@@ -140,10 +149,21 @@ pipeline {
                     // Keep the build failed on Exit 1/2 while allowing result
                     // validation and post(always) artifact archiving to run.
                     catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                        int smokeExitCode
                         if (isUnix()) {
-                            sh ".venv/bin/python scripts/run_website_smoke_v1.py --viewport ${params.SMOKE_VIEWPORT}"
+                            smokeExitCode = sh(
+                                returnStatus: true,
+                                script: ".venv/bin/python scripts/run_website_smoke_v1.py --viewport ${params.SMOKE_VIEWPORT}"
+                            )
                         } else {
-                            bat ".venv\\Scripts\\python.exe scripts\\run_website_smoke_v1.py --viewport ${params.SMOKE_VIEWPORT}"
+                            smokeExitCode = bat(
+                                returnStatus: true,
+                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_v1.py --viewport ${params.SMOKE_VIEWPORT}"
+                            )
+                        }
+                        env.STABILITY_PYTHON_EXIT_CODE = "${smokeExitCode}"
+                        if (smokeExitCode != 0) {
+                            error("Website Smoke V1 exited with code ${smokeExitCode}")
                         }
                     }
                 }
@@ -158,6 +178,7 @@ pipeline {
                     } else {
                         bat '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
                     }
+                    env.STABILITY_SECRET_GATE = 'PASS'
                 }
             }
         }
@@ -170,6 +191,7 @@ pipeline {
                     } else {
                         bat '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_v1'
                     }
+                    env.STABILITY_SCHEMA_GATE = 'PASS'
                 }
             }
         }
@@ -177,6 +199,34 @@ pipeline {
 
     post {
         always {
+            script {
+                // Use only the safe, supported causes API. If a Jenkins
+                // installation does not expose it, the record uses UNKNOWN.
+                try {
+                    def causeText = "${currentBuild.getBuildCauses()}"
+                    if (causeText.contains('TimerTriggerCause')) {
+                        env.STABILITY_TRIGGER = 'TIMER'
+                    } else if (causeText.contains('SCMTriggerCause')) {
+                        env.STABILITY_TRIGGER = 'SCM'
+                    } else if (causeText.contains('UserIdCause')) {
+                        env.STABILITY_TRIGGER = 'MANUAL'
+                    } else {
+                        env.STABILITY_TRIGGER = 'OTHER'
+                    }
+                } catch (ignored) {
+                    env.STABILITY_TRIGGER = 'UNKNOWN'
+                }
+                env.STABILITY_JENKINS_RESULT = currentBuild.currentResult ?: 'UNKNOWN'
+                // Stability collection is observational. A collection error
+                // must not change the functional build result or exit contract.
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    if (isUnix()) {
+                        sh '.venv/bin/python scripts/record_stability.py'
+                    } else {
+                        bat '.venv\\Scripts\\python.exe scripts\\record_stability.py'
+                    }
+                }
+            }
             archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
         }
     }

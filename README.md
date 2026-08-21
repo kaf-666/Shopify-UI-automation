@@ -150,6 +150,34 @@ credentials whose IDs match the Signed Request environment variable names. Proxy
 variables remain optional and are inherited from the Jenkins environment; when
 `SHOPIFY_PROXY_SERVER` is absent, the framework uses direct mode.
 
-The pipeline uses Jenkins `catchError` only to continue to result validation and
-artifact archiving; Python Exit 1/2 still sets the Jenkins build to FAILURE. No
-credential values are stored in this repository.
+The pipeline uses Jenkins `catchError` to continue to result validation and
+artifact archiving; the stability collector is observational and cannot change
+the functional result. Python Exit 1/2 still sets the Jenkins build to FAILURE.
+No credential values are stored in this repository.
+
+## Stability tracking
+
+Jenkins schedules the complete Website Smoke V1 gate with the hashed cron
+`H */3 * * *`. `disableConcurrentBuilds()` keeps the same Job from running two
+samples at once, and the first `SMOKE_VIEWPORT` choice (`both`) is the default
+used by scheduled builds. The Job currently retains 25 Builds and 25 Build
+artifact sets, which covers the ten-build stability window.
+
+After a `both` run, the pipeline archives a safe
+`artifacts/website-smoke-v1/<run_id>/stability_record.json` and atomically
+updates the ignored runtime cache
+`artifacts/website-smoke-v1/stability-history.jsonl`. The per-Build
+`results.json` and `stability_record.json` archives remain the source of truth;
+the JSONL file is only a workspace cache and may be absent after a cleanup.
+
+Offline summary and validation commands:
+
+```powershell
+python scripts/summarize_stability.py --last 10
+python scripts/validate_stability.py
+```
+
+The summary selects one baseline commit and reports `COLLECTING`, `STABLE`,
+`ACCESS_UNSTABLE`, `FLAKY`, `UNSTABLE`, or `MIXED_BASELINE`. Stability status is
+observational: it does not change the existing Website Smoke V1 exit-code or
+Jenkins result contract.
