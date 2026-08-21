@@ -209,18 +209,8 @@ class DirectPdpCaseRunner:
                 "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",
                 f"title={title[:40]!r} price={price!r}",
             )
-        # 购买区就绪等待：SPB 尺码选项与加购按钮异步渲染，轮询至就绪（≤15s）
-        color_count = size_count = 0
-        atc_available = False
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline:
-            color_count = sum(1 for _ in prod._available_options(prod.color_options()))
-            size_count = sum(1 for _ in prod._available_options(prod.size_options()))
-            atc = prod.add_to_cart_button()
-            atc_available = bool(atc.count() and atc.is_visible() and atc.is_enabled())
-            if color_count > 0 and size_count > 0 and atc_available:
-                break
-            self.page.wait_for_timeout(500)
+        # 购买区就绪等待下沉到 ProductPage，Tests 层只编排 Case。
+        color_count, size_count, atc_available = prod.wait_purchase_ready()
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",

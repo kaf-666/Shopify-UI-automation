@@ -1,6 +1,6 @@
 """页面对象基类。
 
-职责：持有 page、加载站点配置（configs/sites/mondressy.yaml）、
+职责：持有 page、加载 settings.default_site 指定的站点配置、
 解析页面级选择器配置（含 desktop / mobile 分端）、拼接页面 URL、
 统一创建 Locator 并提供 open() / wait 辅助。
 """
@@ -10,12 +10,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-import yaml
-
-from utils.browser import PAGE_NAV_TIMEOUT_MS, resolve_template
+from utils.browser import PAGE_NAV_TIMEOUT_MS, SITES_DIR, load_settings
+from utils.config import load_yaml_mapping, resolve_url, site_config_path
+from utils.errors import CliConfigError
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SITE_CFG_PATH = PROJECT_ROOT / "configs" / "sites" / "mondressy.yaml"
 
 
 class SelectorNotFoundError(KeyError):
@@ -33,18 +32,20 @@ class BasePage:
 
     # ------------------------------------------------------------------- 配置
     @staticmethod
-    def load_site_config(path: Optional[str] = None) -> dict:
-        cfg_path = Path(path) if path else SITE_CFG_PATH
-        if not cfg_path.exists():
-            raise FileNotFoundError(f"site config not found: {cfg_path}")
-        with open(cfg_path, "r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
-        if not isinstance(data, dict):
-            raise ValueError(f"site config must be a mapping: {cfg_path}")
-        return data
+    def load_site_config(path: Optional[str] = None, site_name: Optional[str] = None) -> dict:
+        """加载显式 site；未传 site 时遵循 settings.default_site。"""
+        if path:
+            return load_yaml_mapping(Path(path), "site config")
+        settings = load_settings()
+        selected = site_name or str(settings.get("default_site") or "")
+        try:
+            cfg_path = site_config_path(SITES_DIR, selected)
+            return load_yaml_mapping(cfg_path, "site config")
+        except CliConfigError:
+            raise
 
     def base_url(self) -> str:
-        return resolve_template(str(self.site_config.get("base_url") or ""), "base_url")
+        return resolve_url(self.site_config.get("base_url"), "site.base_url")
 
     def page_config(self) -> dict:
         pages = self.site_config.get("pages") or {}
@@ -77,12 +78,35 @@ class BasePage:
             return self.page.locator(value)
         if by == "xpath":
             return self.page.locator(f"xpath={value}")
+        if by == "testid":
+            return self.page.get_by_test_id(sel.get("value") or sel.get("name"))
+        if by == "label":
+            return self.page.get_by_label(
+                sel.get("value") or sel.get("name"),
+                exact=bool(sel.get("exact", False)),
+            )
+        if by == "placeholder":
+            return self.page.get_by_placeholder(
+                sel.get("value") or sel.get("name"),
+                exact=bool(sel.get("exact", False)),
+            )
         if by == "text":
-            return self.page.get_by_text(value)
+            return self.page.get_by_text(
+                sel.get("value") or sel.get("text"),
+                exact=bool(sel.get("exact", False)),
+            )
         if by == "role":
-            parts = str(value).split(" ", 1)
-            kwargs = {"name": parts[1]} if len(parts) > 1 else {}
-            return self.page.get_by_role(parts[0], **kwargs)
+            role = sel.get("role")
+            name = sel.get("name")
+            if not role:
+                # backward compatibility for the old "button Checkout" form
+                parts = str(value).split(" ", 1)
+                role = parts[0]
+                name = name or (parts[1] if len(parts) > 1 else None)
+            kwargs = {"name": name} if name else {}
+            if "exact" in sel:
+                kwargs["exact"] = bool(sel["exact"])
+            return self.page.get_by_role(str(role), **kwargs)
         raise ValueError(f"unsupported selector 'by' type: {by}")
 
     def wait_visible(self, name: str, timeout: Optional[int] = None) -> None:

@@ -23,6 +23,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from flows.shopping_flow import FlowError, ShoppingFlow
 from pages.base_page import BasePage
 from utils.browser import close_browser, create_browser
+from utils.suite_runner import guarded_main
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "shopping-smoke"
 
@@ -105,4 +106,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main(main))

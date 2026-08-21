@@ -1,2 +1,2 @@
-playwright
-PyYAML
+playwright==1.62.0
+PyYAML==6.0.3

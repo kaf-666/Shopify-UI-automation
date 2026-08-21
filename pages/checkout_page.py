@@ -16,9 +16,11 @@ DOM 说明：Shopify Checkout 使用 hash class，不稳定；
 from __future__ import annotations
 
 import re
-import time
 from typing import List, Optional
 from urllib.parse import urlparse
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 
@@ -119,15 +121,7 @@ class CheckoutPage(BasePage):
         Shopify Checkout 为 React 应用：URL/根容器先出现，
         表单与折叠控件随后渲染；过早交互会被渲染窗口吞掉。
         """
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            try:
-                if self.contact_section().count() and self.contact_section().is_visible():
-                    return
-            except Exception:
-                pass
-            self.page.wait_for_timeout(300)
-        raise TimeoutError("checkout page did not settle (contact section not visible)")
+        expect(self.contact_section()).to_be_visible(timeout=timeout_ms)
 
     def ensure_order_summary_visible(self) -> None:
         """必要时通过真实 UI 展开 Order Summary（移动端默认折叠）。
@@ -142,11 +136,11 @@ class CheckoutPage(BasePage):
             raise RuntimeError("order summary not visible and no toggle found")
         for _attempt in range(2):
             toggle.click()
-            deadline = time.monotonic() + 6
-            while time.monotonic() < deadline:
-                if self.cells_visible():
-                    return
-                self.page.wait_for_timeout(250)
+            try:
+                expect(self._cells().filter(visible=True).first).to_be_visible(timeout=6_000)
+                return
+            except PlaywrightTimeoutError:
+                pass
         raise TimeoutError("order summary did not expand after toggle click")
 
     def order_summary_text(self) -> str:
@@ -247,12 +241,10 @@ class CheckoutPage(BasePage):
     # ------------------------------------------------------------------ 等待
     def wait_checkout_context(self, timeout_ms: int = 25_000) -> None:
         """等待进入 Checkout 上下文：URL 含 /checkout 且根容器出现。"""
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            url = self.page.url
-            if "/checkout" in url and self.checkout_root().count():
-                return
-            self.page.wait_for_timeout(300)
-        raise TimeoutError(
-            f"checkout context not reached (url={self.page.url[:120]})"
-        )
+        try:
+            self.page.wait_for_url(lambda url: "/checkout" in str(url), timeout=timeout_ms)
+            expect(self.checkout_root()).to_be_attached(timeout=timeout_ms)
+        except PlaywrightTimeoutError as exc:
+            raise TimeoutError(
+                f"checkout context not reached (url={self.page.url[:120]})"
+            ) from exc

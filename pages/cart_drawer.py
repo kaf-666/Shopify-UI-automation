@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
-import time
+import re
 from typing import Optional
+
+from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 
@@ -37,13 +39,7 @@ class CartDrawer(BasePage):
 
     def wait_open(self, timeout: int = DRAWER_OPEN_TIMEOUT_MS) -> None:
         """等待抽屉真正打开（以 drawer--is-open class 为准）。"""
-        self.page.wait_for_function(
-            """() => {
-                const d = document.querySelector('#CartDrawer');
-                return !!d && d.classList.contains('drawer--is-open');
-            }""",
-            timeout=timeout,
-        )
+        expect(self.drawer()).to_have_class(re.compile(r"(?:^|\s)drawer--is-open(?:\s|$)"), timeout=timeout)
 
     # ----------------------------------------------------------------- 商品项
     def cart_items(self):
@@ -169,23 +165,11 @@ class CartDrawer(BasePage):
 
     def wait_quantity(self, index: int = 0, expected: int = 1, timeout_ms: int = 10_000) -> None:
         """等待第 index 个商品行数量 input 达到期望值。"""
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            if self.get_item_quantity(index) == str(expected):
-                return
-            self.page.wait_for_timeout(200)
-        raise TimeoutError(
-            f"cart quantity did not reach {expected} (current={self.get_item_quantity(index)!r})"
-        )
+        expect(self.quantity_input(index)).to_have_value(str(expected), timeout=timeout_ms)
 
     def _wait_quantity_change(self, index: int, before: str, timeout_ms: int = 10_000) -> None:
         """等待数量 input 值相对变化（数量更新由 AJAX 响应驱动）。"""
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            if self.get_item_quantity(index) != before:
-                return
-            self.page.wait_for_timeout(200)
-        raise TimeoutError(f"cart quantity did not change from {before!r}")
+        expect(self.quantity_input(index)).not_to_have_value(before, timeout=timeout_ms)
 
     # ------------------------------------------------------------ Subtotal
     def subtotal(self):
@@ -211,10 +195,4 @@ class CartDrawer(BasePage):
 
     def wait_empty(self, timeout: int = 10_000) -> None:
         """等待抽屉商品行全部消失。"""
-        self.page.wait_for_function(
-            """() => {
-                const d = document.querySelector('#CartDrawer');
-                return !!d && d.querySelectorAll('.cart__item').length === 0;
-            }""",
-            timeout=timeout,
-        )
+        expect(self.cart_items()).to_have_count(0, timeout=timeout)

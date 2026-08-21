@@ -27,6 +27,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from pages.base_page import BasePage
 from tests.smoke_cases import SmokeCaseRunner
 from utils.browser import close_browser, create_browser
+from utils.config import resolve_url
+from utils.errors import sanitize_message
 from utils.result import (
     ResultWriteError,
     RunResult,
@@ -35,6 +37,7 @@ from utils.result import (
     make_run_id,
     write_results_json,
 )
+from utils.suite_runner import guarded_main, runtime_metadata
 
 CART_JS = "https://mondressy.com/cart.js"
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "smoke"
@@ -55,13 +58,8 @@ def residual_cart_items(runtime) -> int:
 def run_viewport(viewport: str, artifact_dir: Path) -> Tuple[List, SmokeCaseRunner, int, dict]:
     runtime = create_browser(viewport)
     try:
-        runtime_meta = {
-            "proxy_enabled": bool(runtime.proxy_server),
-            "site_access_policy": (
-                runtime.access_policy.type_name if runtime.access_policy else "none"
-            ),
-        }
-        site = BasePage.load_site_config()
+        runtime_meta = runtime_metadata(runtime)
+        site = runtime.site_config or BasePage.load_site_config(site_name=runtime.site_name)
         runner = SmokeCaseRunner(runtime, site, viewport, artifact_dir=artifact_dir)
         results = runner.run_all()
         residual_after = residual_cart_items(runtime)
@@ -101,12 +99,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        print(f"ARTIFACT_DIRECTORY_FAILURE: {exc}")
-        return 1
+        print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
+        return 2
 
     site_cfg = BasePage.load_site_config()
     site = str(site_cfg.get("site") or "mondressy")
-    base_url = str(site_cfg.get("base_url") or "")
+    base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
     run_started_ts = iso_now()
@@ -134,10 +132,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         vp_results.append(
             ViewportResult(
                 viewport=vp,
-                browser={
-                    "engine": "chromium" if vp == "desktop" else "webkit",
-                    "device": None if vp == "desktop" else "iPhone 14",
-                },
+                browser=runtime_meta,
                 status=vp_status,
                 started_at=vp_started_ts,
                 finished_at=iso_now(),
@@ -180,7 +175,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         write_results_json(run_result.to_dict(), json_path)
     except ResultWriteError as exc:
-        print(f"RESULT_WRITE_FAILURE: {exc}")
+        print(f"RESULT_WRITE_FAILURE: {sanitize_message(exc)}")
         return 1
 
     print("=== Summary ===")
@@ -205,4 +200,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main(main))

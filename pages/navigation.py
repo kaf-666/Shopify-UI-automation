@@ -12,15 +12,19 @@
     Desktop 子菜单：gm-submenu 容器可见。
     Mobile 抽屉：drawer--is-open 类（过渡期 is_visible 会误报，按 class 判定）。
 
-目标 Collection 按稳定 pathname（/collections/wedding-guest-dresses）定位，
+目标 Collection 按 site config 中的稳定 pathname / selector 定位，
 不依赖文本层级或 nth-child。
 """
 
 from __future__ import annotations
 
 import time
+import re
 from typing import List, Optional
 from urllib.parse import urlparse
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 
@@ -75,25 +79,21 @@ class NavigationPage(BasePage):
 
     def target_link(self):
         """返回目标 Collection 链接定位器（按稳定 pathname 匹配）。"""
-        return self.primary_menu().locator(
-            "a.gm-target[href*='/collections/wedding-guest-dresses']"
-        )
+        return self.primary_menu().locator(self.resolve_selector("target_collection")["value"])
 
     def _target_top_li(self):
-        """返回目标链接所在顶层菜单项（li.gm-level-0）的 JSHandle；找不到返回 None。"""
-        return self.page.evaluate_handle(
-            """(scope) => {
-                const a = document.querySelector(
-                    scope + ' a.gm-target[href*="/collections/wedding-guest-dresses"]'
-                );
-                if (!a) return null;
+        """返回目标链接所在顶层菜单项的 JSHandle；找不到返回 None。"""
+        target = self.target_link().first
+        if target.count() == 0:
+            return None
+        return target.evaluate_handle(
+            """(a) => {
                 let n = a;
                 while (n && !(n.classList && n.classList.contains('gm-level-0'))) {
                     n = n.parentElement;
                 }
                 return n;
-            }""",
-            self._menu_scope(),
+            }"""
         )
 
     def _target_top_link(self):
@@ -137,12 +137,7 @@ class NavigationPage(BasePage):
         return bool(target.count() and target.is_visible())
 
     def _wait_target_visible(self, timeout_ms: int = 5_000) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            if self._target_visible():
-                return
-            self.page.wait_for_timeout(200)
-        raise TimeoutError("target collection link did not become visible")
+        expect(self.target_link().filter(visible=True).first).to_be_visible(timeout=timeout_ms)
 
     def open_menu(self) -> None:
         """按当前端真实交互打开商品导航层级并使目标链接可见。
@@ -201,12 +196,9 @@ class NavigationPage(BasePage):
         close_btn = self.locator("mobile_close").first
         if close_btn.count() and close_btn.is_visible():
             close_btn.click()
-            deadline = time.monotonic() + 10
-            while time.monotonic() < deadline:
-                if not self.is_menu_open():
-                    return
-                self.page.wait_for_timeout(200)
-            raise TimeoutError("mobile drawer did not close")
+            expect(self.locator("mobile_drawer").first).not_to_have_class(
+                re.compile(r"(?:^|\s)drawer--is-open(?:\s|$)"), timeout=10_000
+            )
 
     # ------------------------------------------------------------ 目标导航
     def target_path(self) -> str:
@@ -214,16 +206,22 @@ class NavigationPage(BasePage):
         cfg = self.page_config()
         return str((cfg.get("smoke_collection") or {}).get("path") or "")
 
+    def wait_ready(self, timeout_ms: int = 12_000) -> None:
+        """等待当前端导航容器和入口完成渲染。"""
+        expect(self.header()).to_be_visible(timeout=timeout_ms)
+        if self.viewport == "desktop":
+            expect(self.primary_items().first).to_be_visible(timeout=timeout_ms)
+        else:
+            expect(self.menu_trigger()).to_be_visible(timeout=timeout_ms)
+
     def _wait_url_path(self, path: str, timeout_ms: int = 15_000) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            try:
-                if urlparse(self.page.url).path == path:
-                    return
-            except Exception:
-                pass
-            self.page.wait_for_timeout(200)
-        raise TimeoutError(f"navigation to {path} not observed (url={self.page.url[:100]})")
+        try:
+            self.page.wait_for_url(
+                lambda url: urlparse(str(url)).path == path,
+                timeout=timeout_ms,
+            )
+        except PlaywrightTimeoutError as exc:
+            raise TimeoutError(f"navigation to {path} not observed (url={self.page.url[:100]})") from exc
 
     def open_collection(self) -> str:
         """真实 UI 导航到目标 Collection 并返回最终 URL。

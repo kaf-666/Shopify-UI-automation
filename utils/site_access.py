@@ -13,9 +13,12 @@ from __future__ import annotations
 import re
 import time
 from datetime import datetime, timezone
+import os
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
 from urllib.parse import urlparse
+
+from utils.errors import CliConfigError
 
 SECRET_VAR_MAP = {
     "MONDRESSY_US_SHOPIFY_SIGNATURE": "Signature",
@@ -26,12 +29,11 @@ DEFAULT_ALLOWED_HOSTS = ("mondressy.com", "www.mondressy.com")
 EXPIRY_WARN_SECONDS = 7 * 24 * 3600
 
 
-class SiteAccessError(Exception):
+class SiteAccessError(CliConfigError):
     """站点访问策略失败，携带失败分类代码。"""
 
     def __init__(self, category: str, message: str):
-        super().__init__(message)
-        self.category = category
+        super().__init__(message, category=category)
 
 
 def parse_expires(signature_input: str) -> Optional[int]:
@@ -44,16 +46,43 @@ def parse_secret_file(path) -> Dict[str, str]:
     """以文本方式读取 .ps1 环境文件（绝不执行）→ {请求头: 值}。"""
     p = Path(path)
     if not p.exists():
-        raise SiteAccessError("SIGNED_REQUEST_SECRET_FILE_NOT_FOUND", f"secret file not found: {p}")
+        raise SiteAccessError("SIGNED_REQUEST_SECRET_FILE_NOT_FOUND", "secret file not found")
     headers: Dict[str, str] = {}
     try:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        raise SiteAccessError("SIGNED_REQUEST_PARSE_FAILURE", str(exc)) from exc
+        raise SiteAccessError("SIGNED_REQUEST_PARSE_FAILURE", "secret file could not be read") from exc
     for var, header in SECRET_VAR_MAP.items():
         m = re.search(rf"\$env:{var}\s*=\s*'([^']*)'", text)
         if m:
             headers[header] = m.group(1)
+    return headers
+
+
+def parse_env_headers(
+    environ: Optional[Mapping[str, str]] = None,
+    env_names: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """从进程环境读取 Signed Request，不回显任何凭证值。"""
+
+    env = environ if environ is not None else os.environ
+    configured = dict(env_names or {})
+    names = {
+        header: str(
+            configured.get(header)
+            or configured.get(header.lower())
+            or configured.get(var)
+            or var
+        )
+        for var, header in SECRET_VAR_MAP.items()
+    }
+    headers = {header: str(env.get(name) or "") for header, name in names.items()}
+    missing = [name for header, name in names.items() if not headers.get(header)]
+    if missing:
+        raise SiteAccessError(
+            "SIGNED_REQUEST_MISSING",
+            "required environment variables missing: " + ", ".join(missing),
+        )
     return headers
 
 
@@ -62,7 +91,7 @@ def validate_signature_headers(headers: Dict[str, str]) -> Optional[int]:
     required = ["Signature", "Signature-Input", "Signature-Agent"]
     missing = [k for k in required if not headers.get(k)]
     if missing:
-        raise SiteAccessError("SIGNED_REQUEST_INCOMPLETE", "Missing:\n" + "\n".join(missing))
+        raise SiteAccessError("SIGNED_REQUEST_INCOMPLETE", "required headers missing: " + ", ".join(missing))
     expires = parse_expires(headers["Signature-Input"])
     if expires is not None and time.time() >= expires:
         fmt = datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()
@@ -103,10 +132,12 @@ class SignedRequestPolicy(SiteAccessPolicy):
         headers: Dict[str, str],
         allowed_hosts: List[str],
         expires: Optional[int] = None,
+        source: str = "env",
     ):
         self._headers = dict(headers)
         self._allowed_hosts = tuple(h.lower() for h in allowed_hosts)
         self._expires = expires
+        self._source = source
         self.stats = {"injected": 0, "untouched": 0}
 
     def _host_allowed(self, url: str) -> bool:
@@ -135,6 +166,7 @@ class SignedRequestPolicy(SiteAccessPolicy):
             "type": self.type_name,
             "allowed_hosts": sorted(self._allowed_hosts),
             "credentials": "loaded",
+            "source": self._source,
             "expires": (
                 datetime.fromtimestamp(self._expires, tz=timezone.utc).isoformat()
                 if self._expires
@@ -143,24 +175,72 @@ class SignedRequestPolicy(SiteAccessPolicy):
         }
 
 
+def _validate_allowed_hosts(raw_hosts) -> List[str]:
+    """只接受 exact hostname allowlist，不接受通配符或 suffix 匹配。"""
+
+    if not isinstance(raw_hosts, (list, tuple)) or not raw_hosts:
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "allowed_hosts must be a non-empty list")
+    hosts: List[str] = []
+    for raw in raw_hosts:
+        host = str(raw or "").strip().lower()
+        if (
+            not host
+            or "*" in host
+            or "/" in host
+            or ":" in host
+            or host.startswith(".")
+            or host.endswith(".")
+        ):
+            raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "allowed_hosts contains an invalid exact host")
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
 def create_site_access_policy(site_name: str, site_config: dict) -> SiteAccessPolicy:
     """工厂方法：站点配置 → 策略实例（唯一分发点）。"""
     access = site_config.get("access") or {}
+    if not isinstance(access, dict):
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "access config must be a mapping")
     policy_type = str(access.get("type") or "none").lower()
     if policy_type != "signed_request":
         return NoAccessPolicy()
-    secret_file = access.get("secret_file") or access.get("secret_env")
-    allowed_hosts = access.get("allowed_hosts") or list(DEFAULT_ALLOWED_HOSTS)
-    if not secret_file:
-        raise SiteAccessError(
-            "SITE_ACCESS_CONFIG_FAILURE",
-            "signed_request 类型缺少 secret_file/secret_env 配置",
+    allowed_hosts = _validate_allowed_hosts(
+        access.get("allowed_hosts") or list(DEFAULT_ALLOWED_HOSTS)
+    )
+    source = str(access.get("source") or "").strip().lower()
+    secret_file = access.get("secret_file")
+    if not source:
+        # 兼容旧开发配置，但新配置必须显式使用 source: env。
+        source = "file" if secret_file else "env"
+
+    if source in ("env", "environment"):
+        headers = parse_env_headers(
+            env_names=access.get("env") or access.get("environment") or {}
         )
-    headers = parse_secret_file(secret_file)
+    elif source in ("file", "secret_file"):
+        if not secret_file:
+            raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "file source requires an explicit secret_file")
+        headers = parse_secret_file(secret_file)
+    elif source in ("env_or_file", "environment_or_file"):
+        if secret_file:
+            try:
+                headers = parse_env_headers(
+                    env_names=access.get("env") or access.get("environment") or {}
+                )
+            except SiteAccessError:
+                headers = parse_secret_file(secret_file)
+        else:
+            headers = parse_env_headers(
+                env_names=access.get("env") or access.get("environment") or {}
+            )
+    else:
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", f"unsupported signed_request source: {source}")
+
     expires = validate_signature_headers(headers)
     if expires is not None and (expires - time.time()) <= EXPIRY_WARN_SECONDS:
         print(
             "[site_access] 凭证即将过期："
             f"expires={datetime.fromtimestamp(expires, tz=timezone.utc).isoformat()}"
         )
-    return SignedRequestPolicy(headers, allowed_hosts, expires=expires)
+    return SignedRequestPolicy(headers, allowed_hosts, expires=expires, source=source)

@@ -21,8 +21,10 @@ from utils.browser import (
     close_browser,
     create_browser,
     load_settings,
-    resolve_base_url,
+    load_site_config,
 )
+from utils.config import resolve_url
+from utils.errors import CliConfigError, sanitize_message
 
 
 def _safe_proxy_display(server: str) -> str:
@@ -52,27 +54,32 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         settings = load_settings()
-        raw_base_url = str(settings.get("base_url") or "")
-        base_url = resolve_base_url(raw_base_url)
         site = str(settings.get("default_site") or "")
-    except (BrowserConfigError, OSError) as exc:
-        print(f"Config load: FAIL ({exc})")
+        site_config = load_site_config(site)
+        base_url = resolve_url(site_config.get("base_url"), "site.base_url")
+    except (CliConfigError, BrowserConfigError, OSError) as exc:
+        print(f"Config load: FAIL ({sanitize_message(exc)})")
         print()
         print("浏览器运行时验证: FAIL")
-        return 1
+        return 2
 
     print("=== Shopify UI Automation ===")
     print()
     print(f"Site: {site}")
     print(f"Viewport: {viewport}")
-    print(f"URL: {raw_base_url}")
+    print(f"URL: {base_url}")
     print()
 
     runtime = None
     try:
         runtime = create_browser(viewport, settings)
+    except CliConfigError as exc:
+        print(f"Browser launch: CONFIG FAIL ({getattr(exc, 'category', 'CONFIG_ERROR')})")
+        print()
+        print("浏览器运行时验证: FAIL")
+        return 2
     except Exception as exc:
-        print(f"Browser launch: FAIL ({type(exc).__name__}: {exc})")
+        print(f"Browser launch: FAIL ({type(exc).__name__}: {sanitize_message(exc)})")
         print()
         print("浏览器运行时验证: FAIL")
         return 1
@@ -86,7 +93,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"Viewport Size: {runtime.viewport_size[0]}x{runtime.viewport_size[1]}")
         if runtime.proxy_server:
             print("Explicit Proxy: enabled")
-            print(f"Proxy Server: {_safe_proxy_display(runtime.proxy_server)}")
+            print(f"Proxy Server: {runtime.proxy_server}")
         else:
             print("Explicit Proxy: disabled")
         print()
@@ -103,7 +110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if response is not None and not response.ok:
             print(f"HTTP status: {response.status}")
     except Exception as exc:
-        print(f"Navigation: FAIL ({type(exc).__name__}: {exc})")
+        print(f"Navigation: FAIL ({type(exc).__name__}: {sanitize_message(exc)})")
         try:
             final_url = runtime.page.url
             if final_url:
@@ -115,7 +122,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             close_browser(runtime)
             print("Cleanup: PASS")
         except Exception as exc:
-            print(f"Cleanup: FAIL ({exc})")
+            print(f"Cleanup: FAIL ({sanitize_message(exc)})")
             return 1
 
     print()

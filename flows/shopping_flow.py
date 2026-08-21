@@ -16,6 +16,8 @@ from typing import Optional
 from pages.cart_drawer import CartDrawer
 from pages.collection_page import CollectionPage
 from pages.product_page import ProductPage
+from utils.config import resolve_url
+from utils.errors import sanitize_message
 
 MAX_PRODUCT_CANDIDATES = 5
 
@@ -24,7 +26,7 @@ class FlowError(Exception):
     """购物流程失败，携带失败分类代码。"""
 
     def __init__(self, category: str, message: str):
-        super().__init__(message)
+        super().__init__(sanitize_message(message))
         self.category = category
 
 
@@ -47,7 +49,7 @@ class ShoppingFlow:
         self.site_config = site_config
         self.viewport = viewport
         self.access_policy = access_policy
-        self.base = str(site_config.get("base_url") or "").replace("@url:`", "").replace("`", "")
+        self.base = resolve_url(site_config.get("base_url"), "site.base_url")
         self.state: dict = {}
 
     def _api_headers(self, url: str) -> dict:
@@ -69,11 +71,20 @@ class ShoppingFlow:
         except Exception as exc:
             raise FlowError("CLEANUP_FAILURE", f"/cart.js check failed: {exc}") from exc
         if resp.status == 429:
-            # cart API 被 Cloudflare 限流时跳过检查；ATC 后抽屉 item_count==1 的 UI 断言仍会兜底。
-            return
+            # 无法确认购物车状态时绝不能默认它是干净的。
+            raise FlowError(
+                "CART_PRECONDITION_UNVERIFIED",
+                "/cart.js returned HTTP 429; cart state is unverified",
+            )
         if resp.status != 200:
             raise FlowError("CLEANUP_FAILURE", f"/cart.js check returned HTTP {resp.status}")
-        if resp.json().get("item_count", 0) == 0:
+        try:
+            cart = resp.json()
+        except Exception as exc:
+            raise FlowError("CART_PRECONDITION_UNVERIFIED", "/cart.js response was not valid JSON") from exc
+        item_count = int(cart.get("item_count", 0) or 0)
+        self.state["pre_clean_item_count"] = item_count
+        if item_count == 0:
             return  # 购物车已干净，零副作用
         self.page.wait_for_timeout(5000)  # 拉长 API 调用间隔
         resp = self.page.request.post(
@@ -88,6 +99,14 @@ class ShoppingFlow:
 
     def cleanup_cart(self) -> None:
         """仅用于异常后的兜底清理；正常路径通过 UI Remove 完成。"""
+        # 先验证状态，避免空购物车再次 POST /cart/clear.js。
+        try:
+            current = self._cart_json()
+        except FlowError:
+            raise
+        if int(current.get("item_count", 0) or 0) == 0:
+            return
+
         for attempt in range(2):
             try:
                 self.page.wait_for_timeout(3000)
@@ -111,9 +130,20 @@ class ShoppingFlow:
             headers=self._api_headers(f"{self.base}/cart.js"),
             timeout=15000,
         )
+        if resp.status == 429:
+            raise FlowError(
+                "CART_PRECONDITION_UNVERIFIED",
+                "/cart.js returned HTTP 429; cart state is unverified",
+            )
         if resp.status != 200:
-            raise FlowError("CART_ITEM_NOT_FOUND", f"/cart.js returned HTTP {resp.status}")
-        return resp.json()
+            raise FlowError(
+                "CART_STATE_VERIFICATION_UNAVAILABLE",
+                f"/cart.js returned HTTP {resp.status}",
+            )
+        try:
+            return resp.json()
+        except Exception as exc:
+            raise FlowError("CART_STATE_VERIFICATION_UNAVAILABLE", "/cart.js response was not valid JSON") from exc
 
     def cart_state_quantity(self, index: int = 0) -> Optional[str]:
         """读取后端购物车第 index 个商品的数量（/cart.js 只读验证）。
@@ -126,14 +156,19 @@ class ShoppingFlow:
             data = self._cart_json()
         except FlowError as exc:
             raise FlowError(
-                "CART_STATE_VERIFICATION_UNAVAILABLE",
+                exc.category,
                 f"/cart.js read failed: {exc}",
             ) from exc
         items = data.get("items") or []
         if index >= len(items):
             return None
         qty = items[index].get("quantity")
-        return str(qty) if qty is not None else None
+        if qty is None:
+            raise FlowError(
+                "CART_STATE_VERIFICATION_UNAVAILABLE",
+                "cart item quantity is missing",
+            )
+        return str(qty)
 
     def _safe_open(self, page_obj) -> None:
         try:

@@ -57,7 +57,6 @@ STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
 POSITIVE_QUERY = "dress"
-TARGET_PATH = "/collections/wedding-guest-dresses"
 
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 
@@ -80,6 +79,7 @@ class WebsiteSmokeV1Runner:
         self.pre_clean_error = ""
         self.cleanup_status = "PASS"
         self.cleanup_error = ""
+        self.cleanup_detail = "context_disposed_after_checkout"
         self.search_recovery_used = False
         self.cf_interruption = False
         self._extra_pages: List = []
@@ -195,16 +195,27 @@ class WebsiteSmokeV1Runner:
     def _journey_cleanup(self) -> None:
         """Journey 结束后兜底清理：抽屉有残留时 API 清空（不影响 Case 结论）。"""
         try:
-            self.flow.cart_state_quantity(0)
-            has_item = True
-        except Exception:
-            has_item = False
-        if not has_item:
+            quantity = self.flow.cart_state_quantity(0)
+        except FlowError as exc:
+            self.cleanup_status = "BLOCKED" if exc.category == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
+            self.cleanup_error = f"{exc.category}: {exc}"
+            return
+        except Exception as exc:
+            self.cleanup_status = "FAIL"
+            self.cleanup_error = f"{type(exc).__name__}: {exc}"
+            return
+
+        # cart_state_quantity() 的 None 只表示没有第一个 item；不能把
+        # None 当作“有残留”而无条件 POST /cart/clear.js。
+        if quantity is None or quantity == "0":
+            self.cleanup_detail = "cart_already_empty_no_clear_request"
             return
         try:
             self.flow.cleanup_cart()
+            self.cleanup_detail = "api_clear_after_verified_residual_item"
         except Exception as exc:
-            self.cleanup_error += f" | journey cleanup: {type(exc).__name__}"
+            self.cleanup_status = "BLOCKED" if getattr(exc, "category", "") == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
+            self.cleanup_error = f"journey cleanup: {type(exc).__name__}: {exc}"
 
     # ------------------------------------------------------------ 一致性辅助
     def _capture_selected_variant(self) -> None:
@@ -219,25 +230,6 @@ class WebsiteSmokeV1Runner:
             )
         self.flow.state["color"] = color
         self.flow.state["size"] = size
-
-    def _wait_purchase_ready(self, prod: ProductPage, timeout_s: int = 15) -> tuple:
-        """等待购买区就绪：SPB 尺码控件与加购按钮异步渲染（有界轮询）。
-
-        站点行为：标题先渲染，尺码选项 / ATC 随后异步初始化；
-        瞬时断言会误报购买区不可用。
-        """
-        color_count = size_count = 0
-        atc_available = False
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            color_count = sum(1 for _ in prod._available_options(prod.color_options()))
-            size_count = sum(1 for _ in prod._available_options(prod.size_options()))
-            atc = prod.add_to_cart_button()
-            atc_available = bool(atc.count() and atc.is_visible() and atc.is_enabled())
-            if color_count > 0 and size_count > 0 and atc_available:
-                break
-            self.page.wait_for_timeout(500)
-        return color_count, size_count, atc_available
 
     def _cart_consistency(self, mismatch_prefix: str, stored_title: str) -> str:
         """验证购物车与 PDP 状态一致（商品/颜色/尺码/数量=1）。
@@ -289,8 +281,10 @@ class WebsiteSmokeV1Runner:
         try:
             self.flow.pre_clean_cart()
         except FlowError as exc:
-            self.pre_clean_status = "FAIL"
-            self.pre_clean_error = str(exc)
+            self.pre_clean_status = "BLOCKED" if exc.category == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
+            self.pre_clean_error = f"{exc.category}: {exc}"
+            self._block_all_cases("pre-clean")
+            return list(self.results.values())
 
         # 执行顺序：Direct -> Search -> Browse（Browse 最后进入 Checkout 后销毁 Context）
         self._run_journey("direct")
@@ -308,6 +302,23 @@ class WebsiteSmokeV1Runner:
                 pass
         self._extra_pages = []
         return list(self.results.values())
+
+    def _block_all_cases(self, blocked_by: str) -> None:
+        """前置清理无法确认时阻止所有 Case，避免在未知购物车状态上运行。"""
+        ts = iso_now()
+        classification = "CART_PRECONDITION_UNVERIFIED" if self.pre_clean_status == "BLOCKED" else "PRECONDITION_CART_CLEAN_FAILURE"
+        for case_id, (name, _deps, _journey, _fn) in self._cases.items():
+            self.results[case_id] = CaseResult(
+                case_id,
+                name,
+                STATUS_BLOCKED,
+                ts,
+                ts,
+                0,
+                detail=self.pre_clean_error or "pre-clean failed",
+                failure_classification=classification,
+                blocked_by=[blocked_by],
+            )
 
     # ============================================================ Journey Direct
     def _c_direct01(self) -> str:
@@ -332,7 +343,7 @@ class WebsiteSmokeV1Runner:
             price = ""
         if not title or not price:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", f"title={title[:40]!r} price={price!r}")
-        color_count, size_count, atc_available = self._wait_purchase_ready(prod)
+        color_count, size_count, atc_available = prod.wait_purchase_ready()
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",
@@ -462,7 +473,7 @@ class WebsiteSmokeV1Runner:
     def _c_search04(self) -> str:
         """Search Product Purchase：搜索结果商品完整进入购买链，随后 UI 移除。"""
         prod = self.state["search_prod"]
-        color_count, size_count, atc_available = self._wait_purchase_ready(prod)
+        color_count, size_count, atc_available = prod.wait_purchase_ready()
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "SEARCH_PURCHASE_AREA_NOT_AVAILABLE",
@@ -485,28 +496,6 @@ class WebsiteSmokeV1Runner:
         return f"color={color} size={size} {detail} remove=True empty=True"
 
     # ============================================================ Journey Browse
-    def _wait_home_core(self, timeout_s: int = 12) -> tuple:
-        """等待首页核心元素稳定（Header/Logo/导航入口）。
-
-        站点抗干扰：托管挑战可能在加载后同 URL 重载页面（短暂空壳），
-        轮询等待真实核心元素重新出现。
-        """
-        nav = NavigationPage(self.page, self.site_config, self.viewport)
-        home = HomePage(self.page, self.site_config, self.viewport)
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            header = nav.header()
-            logo = home.logo()
-            if self.viewport == "desktop":
-                entry = nav.primary_items().count() > 0
-            else:
-                trigger = nav.menu_trigger()
-                entry = bool(trigger.count() and trigger.is_visible())
-            if header.count() and header.is_visible() and logo.count() and logo.is_visible() and entry:
-                return True, nav, entry
-            self.page.wait_for_timeout(400)
-        return False, nav, entry
-
     def _c_home01(self) -> str:
         """Homepage Core Available：首页核心元素（Header/Logo/导航入口）。"""
         try:
@@ -519,9 +508,17 @@ class WebsiteSmokeV1Runner:
                     "AUTOMATION_ACCESS: Cloudflare Stability Failure | home open",
                 ) from exc
             raise FlowError("HOME_CORE_NOT_AVAILABLE", f"{type(exc).__name__}: {exc}") from exc
-        ok, nav, entry = self._wait_home_core()
-        if not ok:
-            raise FlowError("HOME_CORE_NOT_AVAILABLE", "header/logo/navigation entry not stable")
+        home = HomePage(self.page, self.site_config, self.viewport)
+        try:
+            home.wait_core_ready()
+        except Exception as exc:
+            raise FlowError("HOME_CORE_NOT_AVAILABLE", f"home readiness: {type(exc).__name__}: {exc}") from exc
+        nav = NavigationPage(self.page, self.site_config, self.viewport)
+        try:
+            nav.wait_ready()
+        except Exception as exc:
+            raise FlowError("HOME_CORE_NOT_AVAILABLE", f"navigation readiness: {type(exc).__name__}: {exc}") from exc
+        entry = True
         self.state["nav"] = nav
         return f"header_present=True logo_present=True navigation_entry={entry}"
 
@@ -544,8 +541,9 @@ class WebsiteSmokeV1Runner:
                     "AUTOMATION_ACCESS: Cloudflare Stability Failure | navigation",
                 ) from exc
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"{type(exc).__name__}: {exc}") from exc
-        if urlparse(url).path != TARGET_PATH:
-            raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"url={url[:120]}")
+        target_path = nav.target_path()
+        if urlparse(url).path != target_path:
+            raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"url={url[:120]} expected_path={target_path}")
         coll = CollectionPage(self.page, self.site_config, self.viewport)
         try:
             grid = coll.product_grid()
@@ -556,7 +554,7 @@ class WebsiteSmokeV1Runner:
         if not grid_ok:
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", "product grid not visible")
         self.state["coll"] = coll
-        return f"mode={mode} path={TARGET_PATH} grid=True"
+        return f"mode={mode} path={target_path} grid=True"
 
     def _c_plp01(self) -> str:
         """Collection Product Opens PDP：第一个稳定商品卡真实点击进入 PDP。"""
@@ -582,7 +580,7 @@ class WebsiteSmokeV1Runner:
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""
         prod = self.state["browse_prod"]
-        color_count, size_count, atc_available = self._wait_purchase_ready(prod)
+        color_count, size_count, atc_available = prod.wait_purchase_ready()
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "PURCHASE_AREA_FAILURE",

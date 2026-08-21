@@ -14,7 +14,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-SCHEMA_VERSION = "1.0"
+from utils.errors import sanitize_message
+
+SCHEMA_VERSION = "1.1"
+
+
+def _safe_mapping(value: dict) -> dict:
+    """对结果中的浅层 metadata / state detail 做字符串脱敏。"""
+    return {
+        key: sanitize_message(item) if isinstance(item, str) else item
+        for key, item in dict(value or {}).items()
+    }
 
 
 def iso_now() -> str:
@@ -41,6 +51,13 @@ class CaseResult:
     evidence: List[dict] = field(default_factory=list)
     evidence_capture_error: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        # Case detail is printed by several legacy runners before serialization.
+        # Sanitize at construction time so console and JSON follow the same rule.
+        self.detail = sanitize_message(self.detail)
+        if self.evidence_capture_error:
+            self.evidence_capture_error = sanitize_message(self.evidence_capture_error)
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -49,10 +66,15 @@ class CaseResult:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
-            "detail": self.detail,
+            "detail": sanitize_message(self.detail),
             "failure_classification": self.failure_classification,
             "blocked_by": list(self.blocked_by),
             "evidence": list(self.evidence),
+            "evidence_capture_error": (
+                sanitize_message(self.evidence_capture_error)
+                if self.evidence_capture_error
+                else None
+            ),
         }
 
 
@@ -73,14 +95,14 @@ class ViewportResult:
     def to_dict(self) -> dict:
         return {
             "viewport": self.viewport,
-            "browser": dict(self.browser),
+            "browser": _safe_mapping(self.browser),
             "status": self.status,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
             "summary": dict(self.summary),
-            "pre_clean": dict(self.pre_clean),
-            "cleanup": dict(self.cleanup),
+            "pre_clean": _safe_mapping(self.pre_clean),
+            "cleanup": _safe_mapping(self.cleanup),
             "cases": [c.to_dict() for c in self.cases],
         }
 
@@ -99,20 +121,30 @@ class RunResult:
     summary: dict
     viewports: List[ViewportResult] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
+    fatal_error: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "site": self.site,
+            # URL 已由统一 resolver 禁止 userinfo；保留真实可诊断的站点 URL。
             "base_url": self.base_url,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "duration_ms": self.duration_ms,
             "overall_status": self.overall_status,
-            "runtime": dict(self.runtime),
+            "runtime": _safe_mapping(self.runtime),
             "summary": dict(self.summary),
             "viewports": [v.to_dict() for v in self.viewports],
+            "fatal_error": (
+                {
+                    "classification": self.fatal_error.get("classification", "RUNTIME_ERROR"),
+                    "message": sanitize_message(self.fatal_error.get("message", "")),
+                }
+                if self.fatal_error
+                else None
+            ),
         }
 
 

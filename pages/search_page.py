@@ -11,9 +11,13 @@ is_visible() 会误报，不能作为打开信号。
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 from pages.home_page import HomePage
@@ -37,7 +41,7 @@ class SearchPage(BasePage):
         """
         home = HomePage(self.page, self.site_config, self.viewport)
         home.open()
-        self.page.wait_for_timeout(2500)
+        home.wait_core_ready()
         home.open_search()
         self.wait_open()
 
@@ -81,13 +85,11 @@ class SearchPage(BasePage):
         self._wait_class("is-active", present=False, timeout_ms=timeout_ms)
 
     def _wait_class(self, token: str, present: bool, timeout_ms: int) -> None:
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            if (token in (self.container().get_attribute("class") or "").split()) == present:
-                return
-            self.page.wait_for_timeout(200)
-        state = "open" if present else "closed"
-        raise TimeoutError(f"Search container did not reach {state} state")
+        pattern = re.compile(rf"(?:^|\s){re.escape(token)}(?:\s|$)")
+        if present:
+            expect(self.container()).to_have_class(pattern, timeout=timeout_ms)
+        else:
+            expect(self.container()).not_to_have_class(pattern, timeout=timeout_ms)
 
     # ------------------------------------------------------------- 输入 / 提交
     def fill_query(self, query: str) -> None:
@@ -160,15 +162,11 @@ class SearchPage(BasePage):
 
     def _watch_navigation(self, timeout_ms: int = 8_000) -> bool:
         """等待提交后的 /search 导航；未导航返回 False（调用方走恢复路径）。"""
-        deadline = time.monotonic() + timeout_ms / 1000
-        while time.monotonic() < deadline:
-            try:
-                if "/search" in self.page.url:
-                    return True
-            except Exception as exc:
-                raise SearchSessionReloaded(f"page reloaded: {type(exc).__name__}") from exc
-            self.page.wait_for_timeout(200)
-        return False
+        try:
+            self.page.wait_for_url(lambda url: "/search" in url, timeout=timeout_ms)
+            return True
+        except PlaywrightTimeoutError:
+            return False
 
     def _reopen_session(self) -> None:
         """重建 Search 会话：等待页面稳定后回到首页并打开 Search。
@@ -246,9 +244,10 @@ class SearchPage(BasePage):
         with self.page.context.expect_page(timeout=15_000) as new_page_info:
             link.click()
         new_page = new_page_info.value
-        deadline = time.monotonic() + 15
-        while time.monotonic() < deadline and "/products/" not in new_page.url:
-            new_page.wait_for_timeout(200)
+        try:
+            new_page.wait_for_url(lambda url: "/products/" in url, timeout=15_000)
+        except PlaywrightTimeoutError as exc:
+            raise TimeoutError(f"search result did not open a product page: {new_page.url[:120]}") from exc
         return new_page
 
     def no_result_state(self) -> Optional[str]:

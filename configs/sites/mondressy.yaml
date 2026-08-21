@@ -5,7 +5,11 @@ base_url: "@url:`https://mondressy.com`"
 
 access:
   type: signed_request
-  secret_file: 'C:\Users\33797\.shopify-monitor\mondressy-secrets.ps1'
+  source: env
+  env:
+    Signature: MONDRESSY_US_SHOPIFY_SIGNATURE
+    Signature-Input: MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT
+    Signature-Agent: MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT
   allowed_hosts:
     - mondressy.com
     - www.mondressy.com

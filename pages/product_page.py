@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from playwright.sync_api import expect
+
 from pages.base_page import BasePage
 
 FREE_SIZE_MARKER = "free custom size"
@@ -86,7 +88,7 @@ class ProductPage(BasePage):
             or ""
         ).strip()
 
-    def _available_options(self, options):
+    def available_options(self, options):
         """返回 [(值, radio)]：可见、可用且值非空的选项。"""
         result = []
         total = options.count()
@@ -103,23 +105,49 @@ class ProductPage(BasePage):
             result.append((value, radio))
         return result
 
+    def available_color_count(self) -> int:
+        """返回当前可见、可用且有值的颜色选项数。"""
+        return len(self.available_options(self.color_options()))
+
+    def available_size_count(self) -> int:
+        """返回当前可见、可用且有值的尺码选项数。"""
+        return len(self.available_options(self.size_options()))
+
+    def wait_purchase_ready(self, timeout_ms: int = 15_000) -> tuple[int, int, bool]:
+        """等待购买区核心控件就绪并返回颜色数、尺码数、ATC 状态。
+
+        页面异步初始化逻辑由 POM 持有；Tests 层只编排业务 Case，不自行
+        轮询 DOM。Playwright expect 会在有界 timeout 内等待 DOM 状态。
+        """
+        expect(self.title()).to_be_visible(timeout=timeout_ms)
+        atc = self.add_to_cart_button()
+        expect(atc).to_be_visible(timeout=timeout_ms)
+        expect(atc).to_be_enabled(timeout=timeout_ms)
+        expect(self.color_options().first).to_be_visible(timeout=timeout_ms)
+        expect(self.size_options().first).to_be_visible(timeout=timeout_ms)
+        return (
+            self.available_color_count(),
+            self.available_size_count(),
+            bool(atc.is_visible() and atc.is_enabled()),
+        )
+
     def _find_option(self, options, value: str, missing_msg: str):
         """按值查找可用选项，找不到抛出明确异常。"""
-        for v, radio in self._available_options(options):
+        for v, radio in self.available_options(options):
             if v == value:
                 return radio
         raise LookupError(missing_msg)
 
     def first_available_color(self) -> str:
         """返回第一个可见可用且当前未选中的颜色选项值。"""
-        for v, radio in self._available_options(self.color_options()):
+        for v, radio in self.available_options(self.color_options()):
             if not radio.is_checked():
                 return v
         raise RuntimeError("No available color option to select")
 
     def first_available_size(self) -> str:
         """返回第一个可见可用的普通尺码值（排除 Free Custom Size）。"""
-        for v, radio in self._available_options(self.size_options()):
+        for v, radio in self.available_options(self.size_options()):
             if v.lower() == FREE_SIZE_MARKER:
                 continue
             if not radio.is_checked():

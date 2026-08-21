@@ -25,6 +25,7 @@ from utils.site_access import (
     SignedRequestPolicy,
     validate_signature_headers,
 )
+from utils.suite_runner import guarded_main
 
 CART_JS = "https://mondressy.com/cart.js"
 
@@ -129,4 +130,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main(main))

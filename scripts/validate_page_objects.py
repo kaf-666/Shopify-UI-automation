@@ -26,6 +26,7 @@ from pages.collection_page import CollectionPage
 from pages.home_page import HomePage
 from pages.product_page import ProductPage
 from utils.browser import close_browser, create_browser
+from utils.suite_runner import guarded_main
 
 
 class Check:
@@ -40,7 +41,7 @@ def run_viewport(viewport: str) -> Tuple[List[Check], dict]:
     runtime = create_browser(viewport)
     try:
         page = runtime.page
-        site = BasePage.load_site_config()
+        site = runtime.site_config or BasePage.load_site_config(site_name=runtime.site_name)
 
         # ------------------------------------------------------------- 首页
         home = HomePage(page, site, viewport)
@@ -153,4 +154,4 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(guarded_main(main))

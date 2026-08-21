@@ -19,6 +19,9 @@ pip install -r requirements.txt
 playwright install chromium webkit
 ```
 
+`requirements.txt` pins the direct dependencies; `requirements.lock.txt` records the
+verified `.venv` dependency set used by this repository.
+
 ## Website Smoke V1
 
 Website Smoke V1 covers three primary journeys:
@@ -80,6 +83,27 @@ All viewport-aware runners accept `--viewport desktop`, `--viewport mobile`, or 
 
 Runtime secrets are not stored in this repository. Mondressy Signed Request credentials must be injected or provided externally at runtime. Credential values, cookies, private keys, proxy credentials, and signed-request values must never be committed.
 
+The default Signed Request source is the process environment:
+
+```text
+MONDRESSY_US_SHOPIFY_SIGNATURE
+MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT
+MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT
+```
+
+The default proxy is disabled. Jenkins or local CI can opt in with:
+
+```text
+SHOPIFY_PROXY_SERVER
+SHOPIFY_PROXY_USERNAME
+SHOPIFY_PROXY_PASSWORD
+SHOPIFY_PROXY_ENABLED=true   # optional; a server value also enables the proxy
+```
+
+Proxy credentials are passed to Playwright in memory and are never written to
+console output or result artifacts. Signed Request headers are injected only for
+the exact hosts in `configs/sites/mondressy.yaml`.
+
 ## Checkout safety boundary
 
 Checkout automation validates checkout entry and core checkout state only. It does not:
@@ -103,12 +127,19 @@ Checkout automation validates checkout entry and core checkout state only. It do
 
 The frozen scope covers Direct PDP Purchase, Search Purchase, and Browse Purchase across desktop and mobile profiles.
 
-## Jenkins next step
+## Jenkins readiness
 
-The next infrastructure step is Jenkins integration. The planned pipeline will cover Git checkout, Python environment bootstrap, Playwright installation, runtime secret injection, proxy configuration, Website Smoke V1 execution, artifact archive, exit-code build result, and scheduling.
+`Jenkinsfile` is the orchestration entry point. It checks out the repository,
+creates `.venv`, installs `requirements.lock.txt`, installs Chromium and WebKit,
+runs the offline/runtime/site-access gates, executes one Website Smoke V1 target,
+validates the resulting schema, and always archives `artifacts/**`.
 
-`Jenkinsfile` is intentionally not included in this baseline; Jenkins design and integration are the next phase.
+The default/final target is `SMOKE_VIEWPORT=both`; `desktop` and `mobile` are
+available for isolated diagnosis. The pipeline binds the three Secret Text
+credentials whose IDs match the Signed Request environment variable names. Proxy
+variables remain optional and are inherited from the Jenkins environment; when
+`SHOPIFY_PROXY_SERVER` is absent, the framework uses direct mode.
 
-### JENKINS_PORTABILITY_TODO
-
-The current local Signed Request secret source and proxy settings are environment-specific. The Jenkins phase must replace local machine assumptions with injected credentials and CI-managed proxy configuration without changing the frozen Website Smoke business cases.
+The pipeline uses Jenkins `catchError` only to continue to result validation and
+artifact archiving; Python Exit 1/2 still sets the Jenkins build to FAILURE. No
+credential values are stored in this repository.

@@ -37,9 +37,6 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
-TARGET_PATH = "/collections/wedding-guest-dresses"
-
-
 class NavigationCaseRunner:
     """针对单个 BrowserRuntime 执行 5 个 Home + Navigation Cases。"""
 
@@ -122,40 +119,16 @@ class NavigationCaseRunner:
         home = HomePage(self.page, self.site_config, self.viewport)
         try:
             home.open()
-            # 站点抗干扰：托管挑战可能在加载后同 URL 重载页面，
-            # 短暂停留后以状态轮询等待核心元素同时稳定（不重试导航）。
-            self.page.wait_for_timeout(2500)
+            home.wait_core_ready()
         except Exception as exc:
             raise FlowError(
                 "HOME_CORE_NOT_AVAILABLE",
                 f"{type(exc).__name__}: {exc} | page_title={self.page.title()[:60]!r}",
             ) from exc
         nav = self._nav()
-        # 状态轮询：Header / Logo / 导航入口在重载窗口后仍须全部就绪
-        deadline = time.monotonic() + 12
-        header_present = logo_present = menu_ok = False
-        while time.monotonic() < deadline:
-            try:
-                header_present = bool(nav.header().count() and nav.header().is_visible())
-                logo_present = bool(home.logo().count() and home.logo().is_visible())
-                if self.viewport == "desktop":
-                    menu_ok = bool(nav.primary_menu().count() and nav.primary_menu().is_visible())
-                else:
-                    trigger = nav.menu_trigger()
-                    menu_ok = bool(trigger.count() and trigger.is_visible())
-            except Exception:
-                header_present = logo_present = menu_ok = False
-            if header_present and logo_present and menu_ok:
-                break
-            self.page.wait_for_timeout(400)
-        if not header_present:
-            raise FlowError("HOME_CORE_NOT_AVAILABLE", "header not present/visible")
-        if not logo_present:
-            raise FlowError("HOME_CORE_NOT_AVAILABLE", "logo not present/visible")
-        if not menu_ok:
-            raise FlowError("HOME_CORE_NOT_AVAILABLE", "primary navigation entry missing")
+        nav.wait_ready()
         self.state["nav"] = nav
-        return f"header_present={header_present} logo_present={logo_present} navigation_entry=True"
+        return "header_present=True logo_present=True navigation_entry=True"
 
     def _case_nav01(self) -> str:
         """Primary Navigation Available：至少一个有效商品发现入口可操作。"""
@@ -192,8 +165,9 @@ class NavigationCaseRunner:
             raise FlowError("NAVIGATION_TARGET_NOT_FOUND", str(exc)) from exc
         except TimeoutError as exc:
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", str(exc)) from exc
-        if TARGET_PATH not in url:
-            raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"url={url[:120]}")
+        target_path = nav.target_path()
+        if target_path not in url:
+            raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"url={url[:120]} expected_path={target_path}")
         # Collection 页面主体已加载（商品列表有效性由 NAV-04 验证）；
         # URL pathname 先于渲染完成，等待网格真实可见（状态等待，不固定 sleep）。
         coll = CollectionPage(self.page, self.site_config, self.viewport)
@@ -210,7 +184,7 @@ class NavigationCaseRunner:
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", "product grid not visible")
         self.state["collection_url"] = url
         self.state["coll"] = coll
-        return f"path={TARGET_PATH} url={url[:90]} grid=True"
+        return f"path={target_path} url={url[:90]} grid=True"
 
     def _case_nav04(self) -> str:
         """Collection Product List Available：商品网格与卡片真实可用（复用 CollectionPage）。"""

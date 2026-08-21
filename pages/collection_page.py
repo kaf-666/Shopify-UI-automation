@@ -192,7 +192,6 @@ class CollectionPage(BasePage):
         except Exception:
             pass
         self.page.locator(".grid-product").first.wait_for(state="visible", timeout=15000)
-        self.page.wait_for_timeout(800)
 
     @staticmethod
     def classify_color_behavior(

@@ -1,14 +1,18 @@
 # Phase 2: minimal browser runtime config
 default_site: mondressy
 
-base_url: "@url:`https://mondressy.com`"
-
-# Shared explicit proxy for both desktop and mobile (Phase 2.2)
+# Jenkins-portable proxy configuration. Local proxy is opt-in; CI can inject
+# SHOPIFY_PROXY_SERVER / SHOPIFY_PROXY_USERNAME / SHOPIFY_PROXY_PASSWORD.
 proxy:
-  enabled: true
-  server: "@url:`http://127.0.0.1:7897`"
+  enabled: false
+  server:
   username:
   password:
+  env:
+    server: SHOPIFY_PROXY_SERVER
+    username: SHOPIFY_PROXY_USERNAME
+    password: SHOPIFY_PROXY_PASSWORD
+    enabled: SHOPIFY_PROXY_ENABLED
 
 browsers:
   desktop:
