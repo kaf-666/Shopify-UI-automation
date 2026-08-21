@@ -11,6 +11,7 @@ ShoppingFlow.run()（完整链入口）与 Smoke Cases 调用同一批步骤方�
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 from pages.cart_drawer import CartDrawer
@@ -65,12 +66,16 @@ class ShoppingFlow:
             "Pragma": "no-cache",
         }
 
+    def _cart_read_url(self) -> str:
+        """为 /cart.js 只读校验生成一次性 URL，绕过站点自定义缓存键。"""
+        return f"{self.base}/cart.js?smoke_cache_bust={time.time_ns()}"
+
     def pre_clean_cart(self) -> None:
         """测试前置条件（不属于被测行为）。
 
         最小化 API 调用：先 GET /cart.js 检查，仅当购物车确实有商品时才 POST /cart/clear.js。
         """
-        cart_url = f"{self.base}/cart.js"
+        cart_url = self._cart_read_url()
         try:
             resp = self.page.request.get(
                 cart_url,
@@ -134,7 +139,7 @@ class ShoppingFlow:
 
     def _cart_json(self) -> dict:
         self.page.wait_for_timeout(3000)  # 拉长 cart API 调用间隔
-        cart_url = f"{self.base}/cart.js"
+        cart_url = self._cart_read_url()
         resp = self.page.request.get(
             cart_url,
             headers=self._cart_read_headers(cart_url),
