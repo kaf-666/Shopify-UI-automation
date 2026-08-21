@@ -161,6 +161,12 @@ pages:
         stability: HIGH
         notes: 抽屉关闭按钮（js-drawer-close）
 
+      mobile_target_parent:
+        by: css
+        value: "a.gm-target[href*='/collections/new-collection']"
+        stability: MEDIUM
+        notes: Wedding Guest Dresses 位于 New In 折叠菜单；目标链接展开后才插入移动端 DOM
+
       target_collection:
         by: css
         value: "a.gm-target[href*='/collections/wedding-guest-dresses']"

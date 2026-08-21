@@ -100,6 +100,14 @@ class NavigationPage(BasePage):
         """返回目标顶层菜单项的直接链接定位器（hover / 点击展开用）。"""
         handle = self._target_top_li()
         if handle is None:
+            if self.viewport == "mobile":
+                # 移动端菜单可能先只渲染折叠的父级，目标链接要在父级
+                # 展开后才插入 DOM；此时用站点配置的父级入口打开它。
+                try:
+                    selector = self.resolve_selector("mobile_target_parent")["value"]
+                except KeyError:
+                    return None
+                return self.primary_menu().locator(selector).first
             return None
         link = handle.as_element().query_selector(":scope > a")
         return link
