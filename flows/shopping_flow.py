@@ -57,15 +57,24 @@ class ShoppingFlow:
         policy = self.access_policy
         return policy.request_headers(url) if policy is not None else {}
 
+    def _cart_read_headers(self, url: str) -> dict:
+        """为只读购物车状态请求禁用中间缓存，保持签名头不变。"""
+        return {
+            **self._api_headers(url),
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+
     def pre_clean_cart(self) -> None:
         """测试前置条件（不属于被测行为）。
 
         最小化 API 调用：先 GET /cart.js 检查，仅当购物车确实有商品时才 POST /cart/clear.js。
         """
+        cart_url = f"{self.base}/cart.js"
         try:
             resp = self.page.request.get(
-                f"{self.base}/cart.js",
-                headers=self._api_headers(f"{self.base}/cart.js"),
+                cart_url,
+                headers=self._cart_read_headers(cart_url),
                 timeout=15000,
             )
         except Exception as exc:
@@ -125,9 +134,10 @@ class ShoppingFlow:
 
     def _cart_json(self) -> dict:
         self.page.wait_for_timeout(3000)  # 拉长 cart API 调用间隔
+        cart_url = f"{self.base}/cart.js"
         resp = self.page.request.get(
-            f"{self.base}/cart.js",
-            headers=self._api_headers(f"{self.base}/cart.js"),
+            cart_url,
+            headers=self._cart_read_headers(cart_url),
             timeout=15000,
         )
         if resp.status == 429:
