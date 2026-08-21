@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from playwright.sync_api import sync_playwright
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -21,11 +23,58 @@ from utils.site_access import (
     parse_env_headers,
     validate_signature_headers,
 )
+from pages.cart_drawer import CartDrawer
 
 
 def check(ok: bool, label: str) -> bool:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}")
     return ok
+
+
+def validate_quantity_property_regression() -> bool:
+    """验证 CartDrawer 业务读取不会回退到静态 value attribute。"""
+    site_config = {
+        "base_url": "https://example.invalid",
+        "pages": {
+            "cart": {
+                "url": "/cart",
+                "selectors": {"cart_item": {"by": "css", "value": ".cart__item"}},
+            }
+        },
+    }
+    browser = None
+    playwright = None
+    try:
+        playwright = sync_playwright().start()
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.set_content(
+            '<div id="CartDrawer"><div class="cart__item">'
+            '<input id="qty" name="updates[]" value="1">'
+            "</div></div>"
+        )
+        drawer = CartDrawer(page, site_config, "desktop")
+        before = drawer.get_item_quantity(0)
+        page.locator("#qty").evaluate("(el) => { el.value = '2'; }")
+        value_attribute = page.locator("#qty").get_attribute("value")
+        input_value = page.locator("#qty").input_value()
+        business_quantity = drawer.get_item_quantity(0)
+        return all(
+            (
+                before == "1",
+                value_attribute == "1",
+                input_value == "2",
+                business_quantity == "2",
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — validator reports a compact failure
+        print(f"  FAIL  quantity property regression: {type(exc).__name__}")
+        return False
+    finally:
+        if browser is not None:
+            browser.close()
+        if playwright is not None:
+            playwright.stop()
 
 
 def main() -> int:
@@ -107,10 +156,14 @@ def main() -> int:
     ok = check("evidence_capture_error" in case_dict, "evidence_capture_error persists") and ok
     ok = check(fatal_dict["fatal_error"]["classification"] == "CONFIG_ERROR", "fatal_error schema persists") and ok
 
+    ok = check(
+        validate_quantity_property_regression(),
+        "CartDrawer reads live quantity property when attribute is stale",
+    ) and ok
+
     print(f"Runtime Contract Validation: {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

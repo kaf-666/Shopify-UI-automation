@@ -81,12 +81,12 @@ class CartDrawer(BasePage):
         return self._variant_part(self._item(index), "size")
 
     def get_item_quantity(self, index: int = 0) -> str:
-        """返回第 index 个商品行的数量（input[name=updates[]] 的值）。"""
+        """返回第 index 个商品行的实时数量 property。"""
         item = self._item(index)
         qty = item.locator('input[name="updates[]"]').first
         if qty.count() == 0:
             return ""
-        return qty.get_attribute("value") or qty.input_value()
+        return qty.input_value()
 
     def get_item_quantity_snapshot(self, index: int = 0) -> dict:
         """同时读取静态 value attribute 与实时 input value property。"""
