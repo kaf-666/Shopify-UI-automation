@@ -90,7 +90,13 @@ pipeline {
             steps {
                 script {
                     if (isUnix()) {
-                        sh '.venv/bin/python -m playwright install chromium webkit'
+                        sh '''
+                            if [ "$(id -u)" -eq 0 ]; then
+                                .venv/bin/python -m playwright install --with-deps chromium webkit
+                            else
+                                .venv/bin/python -m playwright install chromium webkit
+                            fi
+                        '''
                     } else {
                         bat '.venv\\Scripts\\python.exe -m playwright install chromium webkit'
                     }
