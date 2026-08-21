@@ -134,9 +134,10 @@ creates `.venv`, installs `requirements.lock.txt`, installs Chromium and WebKit,
 runs the offline/runtime/site-access gates, executes one Website Smoke V1 target,
 validates the resulting schema, and always archives `artifacts/**`.
 
-The `Secret Leakage Check` stage scans checked-out text, configuration, results
-and artifact metadata for the actual injected secret values; it reports only
-variable names and safe paths. Jenkins credential masking protects the console.
+The `Secret Leakage Check` stage runs after Website Smoke V1 and scans persisted
+result, metadata, error and artifact output for the actual injected secret
+values; it reports only variable names and safe paths. Jenkins credential
+masking protects the console.
 
 The Jenkins Agent is expected to provide the OS libraries required by Chromium
 and WebKit. The pipeline only performs the unprivileged project-level browser

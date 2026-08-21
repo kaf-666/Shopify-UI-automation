@@ -122,18 +122,6 @@ pipeline {
             }
         }
 
-        stage('Secret Leakage Check') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '.venv/bin/python scripts/validate_ci_safe_outputs.py'
-                    } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
-                    }
-                }
-            }
-        }
-
         stage('Signed Request / Site Access') {
             steps {
                 script {
@@ -157,6 +145,18 @@ pipeline {
                         } else {
                             bat ".venv\\Scripts\\python.exe scripts\\run_website_smoke_v1.py --viewport ${params.SMOKE_VIEWPORT}"
                         }
+                    }
+                }
+            }
+        }
+
+        stage('Secret Leakage Check') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                    } else {
+                        bat '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
                     }
                 }
             }

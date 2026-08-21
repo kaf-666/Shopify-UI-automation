@@ -1,9 +1,9 @@
-"""Scan workspace text outputs for values of injected CI secrets.
+"""Scan persisted CI outputs for values of injected CI secrets.
 
 This validator intentionally prints only variable names and safe file counts.
 It never prints the value that matched. Jenkins credential masking protects the
-console; this scan covers checked-out text, configuration, results and artifact
-metadata that may be persisted by a build.
+console; this scan covers result, metadata, error and artifact files persisted
+by a build. Source and test fixtures are not output surfaces and are excluded.
 """
 
 from __future__ import annotations
@@ -20,18 +20,31 @@ from utils.errors import SENSITIVE_ENV_NAMES
 
 
 SKIP_PARTS = {".git", ".venv", "node_modules", "__pycache__"}
-TEXT_SUFFIXES = {
-    ".csv", ".groovy", ".html", ".ini", ".json", ".log", ".md", ".py",
-    ".rst", ".txt", ".yaml", ".yml", ".xml", ".properties",
+OUTPUT_DIRS = {"artifacts", "playwright-report", "test-results"}
+ROOT_OUTPUT_NAMES = {
+    "console.log",
+    "error.json",
+    "error.log",
+    "error.txt",
+    "metadata.json",
+    "results.json",
 }
-TEXT_NAMES = {"Jenkinsfile", "Dockerfile", "Makefile"}
+TEXT_SUFFIXES = {
+    ".csv", ".html", ".json", ".log", ".txt", ".xml",
+}
 
 
 def text_files(root: Path):
     for path in root.rglob("*"):
         if not path.is_file() or any(part in SKIP_PARTS for part in path.parts):
             continue
-        if path.name in TEXT_NAMES or path.suffix.lower() in TEXT_SUFFIXES:
+        relative = path.relative_to(root)
+        in_output_dir = any(part in OUTPUT_DIRS for part in relative.parts)
+        is_root_output = len(relative.parts) == 1 and (
+            path.name.lower() in ROOT_OUTPUT_NAMES
+            or path.name.lower().startswith(("error-", "metadata-", "result-"))
+        )
+        if (in_output_dir or is_root_output) and path.suffix.lower() in TEXT_SUFFIXES:
             yield path
 
 
