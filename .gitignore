@@ -18,6 +18,7 @@ screenshots/
 videos/
 
 # Cache / temporary
+.firecrawl/
 .pytest_cache/
 .mypy_cache/
 .cache/

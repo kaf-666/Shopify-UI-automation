@@ -138,10 +138,10 @@ The `Secret Leakage Check` stage scans checked-out text, configuration, results
 and artifact metadata for the actual injected secret values; it reports only
 variable names and safe paths. Jenkins credential masking protects the console.
 
-On Unix agents the browser stage uses `--with-deps` only when the agent process
-is running as root or has passwordless `sudo`; otherwise it performs the
-unprivileged browser install and lets missing host libraries fail as an explicit
-environment gate.
+The Jenkins Agent is expected to provide the OS libraries required by Chromium
+and WebKit. The pipeline only performs the unprivileged project-level browser
+install (`playwright install chromium webkit`); it does not use `sudo`, apt, or
+`--with-deps`.
 
 The default/final target is `SMOKE_VIEWPORT=both`; `desktop` and `mobile` are
 available for isolated diagnosis. The pipeline binds the three Secret Text
