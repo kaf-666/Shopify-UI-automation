@@ -69,7 +69,7 @@ def run_viewport(viewport: str) -> tuple[bool, List[str]]:
         summary = policy.masked_summary()
         lines.append(f"  Site: mondressy")
         lines.append(f"  Policy Type: {summary.get('type')}")
-        lines.append(f"  Secret Source: {summary.get('secret_file')}")
+        lines.append(f"  Secret Source: {summary.get('source', 'not_applicable')}")
         lines.append(f"  Credentials: {summary.get('credentials')}")
         lines.append(f"  Expires: {summary.get('expires')}")
         lines.append(f"  Allowed Hosts: {', '.join(summary.get('allowed_hosts', []))}")

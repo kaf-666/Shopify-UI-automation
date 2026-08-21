@@ -134,6 +134,10 @@ creates `.venv`, installs `requirements.lock.txt`, installs Chromium and WebKit,
 runs the offline/runtime/site-access gates, executes one Website Smoke V1 target,
 validates the resulting schema, and always archives `artifacts/**`.
 
+The `Secret Leakage Check` stage scans checked-out text, configuration, results
+and artifact metadata for the actual injected secret values; it reports only
+variable names and safe paths. Jenkins credential masking protects the console.
+
 On Unix agents the browser stage uses `--with-deps` only when the agent process
 is running as root or has passwordless `sudo`; otherwise it performs the
 unprivileged browser install and lets missing host libraries fail as an explicit

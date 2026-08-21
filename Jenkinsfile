@@ -134,6 +134,18 @@ pipeline {
             }
         }
 
+        stage('Secret Leakage Check') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                    } else {
+                        bat '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                    }
+                }
+            }
+        }
+
         stage('Signed Request / Site Access') {
             steps {
                 script {
