@@ -118,7 +118,9 @@ def _safe_playwright_version() -> str:
 
 def _read_commit(environ: Optional[dict[str, str]] = None) -> str:
     env = environ if environ is not None else os.environ
-    for name in ("GIT_COMMIT", "GIT_COMMIT_SHA", "CHANGE_SHA"):
+    # GIT_COMMIT_SHA is captured explicitly from this workspace's checkout.
+    # Prefer it over ambient Jenkins/plugin variables that may be absent or stale.
+    for name in ("GIT_COMMIT_SHA", "GIT_COMMIT", "CHANGE_SHA"):
         value = str(env.get(name) or "").strip()
         if value:
             return value
@@ -298,6 +300,10 @@ def build_stability_record(
     env = environ if environ is not None else os.environ
     viewport = _source_viewport(results, requested_viewport)
     eligible, eligibility_reason = _eligible(results, viewport)
+    commit_sha = _read_commit(env)
+    if not commit_sha:
+        eligible = False
+        eligibility_reason = f"{eligibility_reason}; commit_sha is missing"
     overall_status = str(results.get("overall_status") or "FAIL").upper()
     vps = {
         name: _counts((_viewport_by_name(results, name) or {}).get("summary"))
@@ -322,7 +328,7 @@ def build_stability_record(
         "eligible": eligible,
         "eligibility_reason": eligibility_reason,
         "build_number": _build_number(env),
-        "commit_sha": _read_commit(env),
+        "commit_sha": commit_sha,
         "viewport": viewport,
         "trigger": trigger_from_environment(env),
         "started_at": str(results.get("started_at") or ""),
@@ -396,6 +402,8 @@ def _record_failures(record: dict) -> list[dict[str, str]]:
 
 def is_record_eligible(record: dict) -> bool:
     """Return whether a record may enter the stability window."""
+    if not str(record.get("commit_sha") or "").strip():
+        return False
     if "eligible" in record:
         return bool(record.get("eligible")) and record.get("viewport") == "both"
     return record.get("viewport") == "both" and record.get("suite") == "website-smoke-v1"

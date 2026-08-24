@@ -19,6 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.stability import (
     STABILITY_SCHEMA_VERSION,
     atomic_write_json,
+    build_stability_record,
     case_stability,
     contains_forbidden_marker,
     load_history,
@@ -102,6 +103,117 @@ def _record(
     }
 
 
+def _metadata_results() -> dict[str, Any]:
+    """Return one complete synthetic both result for metadata contract checks."""
+    viewports = []
+    for viewport in ("desktop", "mobile"):
+        viewports.append(
+            {
+                "viewport": viewport,
+                "status": "PASS",
+                "summary": {"pass": 15, "fail": 0, "blocked": 0, "total": 15},
+                "pre_clean": {"status": "PASS"},
+                "cleanup": {"status": "PASS"},
+                "cases": [],
+            }
+        )
+    return {
+        "run_id": "metadata-contract",
+        "started_at": "2026-08-21T00:00:00+08:00",
+        "finished_at": "2026-08-21T00:01:00+08:00",
+        "duration_ms": 60_000,
+        "overall_status": "PASS",
+        "summary": {"pass": 30, "fail": 0, "blocked": 0, "total": 30},
+        "viewports": viewports,
+        "fatal_error": None,
+    }
+
+
+def validate_metadata_contract() -> bool:
+    """Validate commit and Jenkins gate state preservation without Jenkins."""
+    ok = True
+    result_path = (
+        PROJECT_ROOT
+        / "artifacts"
+        / "website-smoke-v1"
+        / "metadata-contract"
+        / "results.json"
+    )
+    results = _metadata_results()
+
+    record = build_stability_record(
+        results,
+        result_path,
+        requested_viewport="both",
+        environ={
+            "GIT_COMMIT": "ambient-stale-sha",
+            "GIT_COMMIT_SHA": "abc123",
+            "STABILITY_SCHEMA_GATE": "PASS",
+            "STABILITY_SECRET_GATE": "PASS",
+        },
+    )
+    ok = check(
+        record["commit_sha"] == "abc123",
+        "Metadata A: explicit checkout SHA is preserved",
+    ) and ok
+    ok = check(
+        record["schema_gate"] == "PASS" and record["secret_gate"] == "PASS",
+        "Metadata B: PASS gates are preserved",
+    ) and ok
+
+    not_run = build_stability_record(
+        results,
+        result_path,
+        requested_viewport="both",
+        environ={
+            "GIT_COMMIT_SHA": "abc123",
+            "STABILITY_SCHEMA_GATE": "NOT_RUN",
+            "STABILITY_SECRET_GATE": "NOT_RUN",
+        },
+    )
+    ok = check(
+        not_run["schema_gate"] == "NOT_RUN" and not_run["secret_gate"] == "NOT_RUN",
+        "Metadata C: NOT_RUN gates are not promoted",
+    ) and ok
+
+    failed = build_stability_record(
+        results,
+        result_path,
+        requested_viewport="both",
+        environ={
+            "GIT_COMMIT_SHA": "abc123",
+            "STABILITY_SCHEMA_GATE": "FAIL",
+            "STABILITY_SECRET_GATE": "FAIL",
+        },
+    )
+    ok = check(
+        failed["schema_gate"] == "FAIL" and failed["secret_gate"] == "FAIL",
+        "Metadata D: FAIL gates are not overwritten",
+    ) and ok
+
+    missing_commit = build_stability_record(
+        results,
+        result_path,
+        requested_viewport="both",
+        environ={
+            "STABILITY_SCHEMA_GATE": "PASS",
+            "STABILITY_SECRET_GATE": "PASS",
+        },
+    )
+    missing_summary = summarize_records([missing_commit], last=1)
+    legacy_blank_commit = _record(1, commit="")
+    legacy_blank_commit["eligible"] = True
+    legacy_summary = summarize_records([legacy_blank_commit], last=1)
+    ok = check(
+        missing_commit["commit_sha"] == ""
+        and missing_commit["eligible"] is False
+        and missing_summary["eligible_builds"] == 0
+        and legacy_summary["eligible_builds"] == 0,
+        "Metadata E: missing commit is excluded from a formal baseline",
+    ) and ok
+    return ok
+
+
 def validate_record_shape(record: dict) -> bool:
     required = {
         "schema_version", "suite", "run_id", "eligible", "build_number", "commit_sha",
@@ -121,6 +233,9 @@ def validate_record_shape(record: dict) -> bool:
 def main() -> int:
     ok_all = True
     print("=== Stability Record / History / Summary Validation ===")
+    print()
+
+    ok_all = validate_metadata_contract() and ok_all
     print()
 
     stable_records = [_record(index) for index in range(1, 11)]

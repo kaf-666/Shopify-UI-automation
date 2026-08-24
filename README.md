@@ -170,6 +170,14 @@ updates the ignored runtime cache
 `results.json` and `stability_record.json` archives remain the source of truth;
 the JSONL file is only a workspace cache and may be absent after a cleanup.
 
+The stability metadata contract uses the actual checked-out workspace HEAD:
+Jenkins captures `checkout scm`'s `GIT_COMMIT` (with `git rev-parse HEAD` as a
+workspace-only fallback) into `GIT_COMMIT_SHA` and passes it explicitly to the
+collector. A record with no commit SHA is retained for diagnosis but is not
+eligible for a formal baseline. Schema and secret gates are initialized as
+`NOT_RUN`, then set to `PASS` or `FAIL` from their real process exit status;
+the collector never promotes `NOT_RUN` or overwrites `FAIL`.
+
 Offline summary and validation commands:
 
 ```powershell

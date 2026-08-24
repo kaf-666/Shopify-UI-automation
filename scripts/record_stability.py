@@ -54,6 +54,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--artifacts-root", default=str(WEBSITE_ARTIFACT_ROOT))
     parser.add_argument("--history", help="JSONL history path")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"])
+    parser.add_argument("--commit-sha", help="checked-out workspace HEAD SHA")
+    parser.add_argument("--schema-gate", choices=["PASS", "FAIL", "NOT_RUN"])
+    parser.add_argument("--secret-gate", choices=["PASS", "FAIL", "NOT_RUN"])
     args = parser.parse_args(argv)
 
     artifacts_root = Path(args.artifacts_root)
@@ -64,12 +67,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         print("STABILITY_STATUS=COLLECTING")
         return 0
 
+    record_env = dict(os.environ)
+    if args.commit_sha is not None:
+        record_env["GIT_COMMIT_SHA"] = args.commit_sha
+    if args.schema_gate is not None:
+        record_env["STABILITY_SCHEMA_GATE"] = args.schema_gate
+    if args.secret_gate is not None:
+        record_env["STABILITY_SECRET_GATE"] = args.secret_gate
+
     try:
         results = _load_results(result_path)
         record = build_stability_record(
             results,
             result_path,
             requested_viewport=requested_viewport,
+            environ=record_env,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Stability Record: unable to read results ({type(exc).__name__})")
@@ -109,4 +121,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

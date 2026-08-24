@@ -36,15 +36,39 @@ pipeline {
         MONDRESSY_US_SHOPIFY_SIGNATURE = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE')
         MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT')
         MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT = credentials('MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT')
-        STABILITY_SECRET_GATE = 'NOT_RUN'
-        STABILITY_SCHEMA_GATE = 'NOT_RUN'
-        STABILITY_PYTHON_EXIT_CODE = 'UNKNOWN'
     }
 
     stages {
         stage('Checkout') {
             steps {
-                checkout scm
+                script {
+                    // These values must remain mutable. Declarative environment
+                    // entries cannot be reliably overridden with env.* later.
+                    env.STABILITY_SECRET_GATE = 'NOT_RUN'
+                    env.STABILITY_SCHEMA_GATE = 'NOT_RUN'
+                    env.STABILITY_PYTHON_EXIT_CODE = 'UNKNOWN'
+
+                    def scmVars = checkout scm
+                    def checkoutSha = "${scmVars?.GIT_COMMIT ?: ''}".trim()
+                    if (!checkoutSha) {
+                        if (isUnix()) {
+                            checkoutSha = sh(
+                                returnStdout: true,
+                                script: 'git rev-parse HEAD'
+                            ).trim()
+                        } else {
+                            checkoutSha = bat(
+                                returnStdout: true,
+                                script: '@git rev-parse HEAD'
+                            ).trim()
+                        }
+                    }
+                    if (!checkoutSha) {
+                        error('Unable to determine the checked-out workspace HEAD SHA')
+                    }
+                    env.GIT_COMMIT_SHA = checkoutSha
+                    echo "Checkout SHA: ${checkoutSha}"
+                }
             }
         }
 
@@ -173,12 +197,22 @@ pipeline {
         stage('Secret Leakage Check') {
             steps {
                 script {
+                    int gateExitCode
                     if (isUnix()) {
-                        sh '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                        gateExitCode = sh(
+                            returnStatus: true,
+                            script: '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                        )
                     } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                        gateExitCode = bat(
+                            returnStatus: true,
+                            script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                        )
                     }
-                    env.STABILITY_SECRET_GATE = 'PASS'
+                    env.STABILITY_SECRET_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
+                    if (gateExitCode != 0) {
+                        error("Secret Leakage Check exited with code ${gateExitCode}")
+                    }
                 }
             }
         }
@@ -186,12 +220,22 @@ pipeline {
         stage('Result Validation') {
             steps {
                 script {
+                    int gateExitCode
                     if (isUnix()) {
-                        sh '.venv/bin/python scripts/validate_result_schema.py --suite website_smoke_v1'
+                        gateExitCode = sh(
+                            returnStatus: true,
+                            script: '.venv/bin/python scripts/validate_result_schema.py --suite website_smoke_v1'
+                        )
                     } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_v1'
+                        gateExitCode = bat(
+                            returnStatus: true,
+                            script: '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_v1'
+                        )
                     }
-                    env.STABILITY_SCHEMA_GATE = 'PASS'
+                    env.STABILITY_SCHEMA_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
+                    if (gateExitCode != 0) {
+                        error("Result Validation exited with code ${gateExitCode}")
+                    }
                 }
             }
         }
@@ -220,10 +264,13 @@ pipeline {
                 // Stability collection is observational. A collection error
                 // must not change the functional build result or exit contract.
                 catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    def commitSha = env.GIT_COMMIT_SHA ?: ''
+                    def schemaGate = env.STABILITY_SCHEMA_GATE ?: 'NOT_RUN'
+                    def secretGate = env.STABILITY_SECRET_GATE ?: 'NOT_RUN'
                     if (isUnix()) {
-                        sh '.venv/bin/python scripts/record_stability.py'
+                        sh ".venv/bin/python scripts/record_stability.py --commit-sha \"${commitSha}\" --schema-gate \"${schemaGate}\" --secret-gate \"${secretGate}\""
                     } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\record_stability.py'
+                        bat ".venv\\Scripts\\python.exe scripts\\record_stability.py --commit-sha \"${commitSha}\" --schema-gate \"${schemaGate}\" --secret-gate \"${secretGate}\""
                     }
                 }
             }
