@@ -26,7 +26,7 @@ from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 from flows.shopping_flow import FlowError, ShoppingFlow, normalize, titles_match
-from pages.product_page import ProductPage
+from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from utils.result import CaseResult, iso_now
 from utils.screenshots import capture_case_failure
 
@@ -210,7 +210,10 @@ class DirectPdpCaseRunner:
                 f"title={title[:40]!r} price={price!r}",
             )
         # 购买区就绪等待下沉到 ProductPage，Tests 层只编排 Case。
-        color_count, size_count, atc_available = prod.wait_purchase_ready()
+        try:
+            color_count, size_count, atc_available = prod.wait_purchase_ready()
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",

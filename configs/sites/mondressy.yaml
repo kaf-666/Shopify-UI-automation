@@ -240,6 +240,12 @@ pages:
     url: /products/a-line-princess-scoop-lace-embroidery-mother-of-the-bride-dresses-floral-ankle-length-short-sleeves-mon2313179
 
     selectors:
+      purchase_area:
+        by: css
+        value: "form.product-single__form"
+        stability: HIGH
+        notes: 主商品购买表单；用于 bounded purchase-area readiness
+
       title:
         by: css
         value: ".product-single__title"

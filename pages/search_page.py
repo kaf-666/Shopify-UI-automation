@@ -27,6 +27,14 @@ class SearchSessionReloaded(Exception):
     """Search 会话被站点中断（页面重载 / predictive 遮罩异常）。"""
 
 
+class SearchResultNavigationError(TimeoutError):
+    """搜索结果未进入合法 PDP，并保留实际业务 Page 供失败证据使用。"""
+
+    def __init__(self, message: str, *, actual_page=None):
+        super().__init__(message)
+        self.actual_page = actual_page
+
+
 class SearchPage(BasePage):
     """Search 页面对象：头部内联搜索入口、提交、结果页与空态操作。"""
 
@@ -234,21 +242,78 @@ class SearchPage(BasePage):
         """返回结果卡片数量（无结果页为 0）。"""
         return self.result_cards().count()
 
-    def open_result(self, index: int = 0):
-        """真实点击第 index 个结果卡片主链接。
+    @staticmethod
+    def _is_product_url(url: str) -> bool:
+        return urlparse(url).path.startswith("/products/")
 
-        卡片链接 target=_blank，PDP 在新标签页打开；
-        等待新页 URL 进入 /products/ 后返回其 Page 对象（调用方负责关闭）。
-        """
+    @staticmethod
+    def _safe_diagnostic_url(url: str) -> str:
+        """去除 query/fragment，避免诊断信息携带请求参数。"""
+        parsed = urlparse(str(url or ""))
+        if parsed.scheme or parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        return parsed.path
+
+    def open_result(self, index: int = 0, timeout_ms: int = 15_000):
+        """点击结果并返回实际 PDP Page，支持 same-page 与 new-page。"""
+        current_page = self.page
+        context = current_page.context
         link = self.locator("result_link").nth(index)
-        with self.page.context.expect_page(timeout=15_000) as new_page_info:
-            link.click()
-        new_page = new_page_info.value
+        source_page_url = self._safe_diagnostic_url(current_page.url)
+        target_href = self._safe_diagnostic_url(link.get_attribute("href") or "")
+        created_pages = []
+
+        def capture_page(page) -> None:
+            if page is not current_page:
+                created_pages.append(page)
+
+        context.on("page", capture_page)
+        deadline = time.monotonic() + timeout_ms / 1000
+        actual_page = None
         try:
-            new_page.wait_for_url(lambda url: "/products/" in url, timeout=15_000)
-        except PlaywrightTimeoutError as exc:
-            raise TimeoutError(f"search result did not open a product page: {new_page.url[:120]}") from exc
-        return new_page
+            link.click()
+
+            if created_pages:
+                actual_page = created_pages[-1]
+            elif self._is_product_url(current_page.url):
+                return current_page
+            else:
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                try:
+                    current_page.wait_for_url(
+                        self._is_product_url,
+                        wait_until="commit",
+                        timeout=remaining_ms,
+                    )
+                    return current_page
+                except PlaywrightTimeoutError:
+                    if created_pages:
+                        actual_page = created_pages[-1]
+                    else:
+                        raise
+
+            if self._is_product_url(actual_page.url):
+                return actual_page
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            actual_page.wait_for_url(
+                self._is_product_url,
+                wait_until="commit",
+                timeout=remaining_ms,
+            )
+            return actual_page
+        except Exception as exc:
+            if actual_page is None and created_pages:
+                actual_page = created_pages[-1]
+            evidence_page = actual_page or current_page
+            actual_url = self._safe_diagnostic_url(evidence_page.url)
+            message = (
+                f"source_page_url={source_page_url} target_href={target_href} "
+                f"new_page_created={bool(created_pages)} actual_page_url={actual_url} "
+                f"actual_page_count={len(context.pages)}"
+            )
+            raise SearchResultNavigationError(message, actual_page=evidence_page) from exc
+        finally:
+            context.remove_listener("page", capture_page)
 
     def no_result_state(self) -> Optional[str]:
         """返回空态文案（"0 results found ..." 行），无空态返回 None。"""

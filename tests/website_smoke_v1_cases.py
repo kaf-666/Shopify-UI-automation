@@ -47,8 +47,8 @@ from pages.checkout_page import CheckoutPage
 from pages.collection_page import CollectionPage
 from pages.home_page import HomePage
 from pages.navigation import NavigationPage
-from pages.product_page import ProductPage
-from pages.search_page import SearchPage
+from pages.product_page import ProductPage, PurchaseAreaReadinessError
+from pages.search_page import SearchPage, SearchResultNavigationError
 from utils.result import CaseResult, iso_now, write_results_json
 from utils.screenshots import capture_case_failure
 
@@ -178,6 +178,20 @@ class WebsiteSmokeV1Runner:
 
     def _mark_cf(self) -> None:
         self.cf_interruption = True
+
+    def _adopt_business_page(self, actual_page) -> None:
+        """切换当前业务 Page；保留旧 Page 到 Context 生命周期结束时清理。"""
+        if actual_page is None or actual_page.is_closed():
+            return
+        if actual_page is not self.page:
+            self._extra_pages.append(self.page)
+        self.page = actual_page
+        self.flow = ShoppingFlow(
+            actual_page,
+            self.site_config,
+            self.viewport,
+            access_policy=self.runtime.access_policy,
+        )
 
     def _run_case(self, case_id: str, name: str, deps: List[str], fn: Callable) -> None:
         # 仅同一 Journey 内部依赖
@@ -395,7 +409,10 @@ class WebsiteSmokeV1Runner:
             price = ""
         if not title or not price:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", f"title={title[:40]!r} price={price!r}")
-        color_count, size_count, atc_available = prod.wait_purchase_ready()
+        try:
+            color_count, size_count, atc_available = prod.wait_purchase_ready()
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",
@@ -495,23 +512,22 @@ class WebsiteSmokeV1Runner:
         )
 
     def _c_search03(self) -> str:
-        """Search Result Opens PDP：真实点击结果卡片（target=_blank 新标签页）。"""
+        """Search Result Opens PDP：接受 same-page 或 new-page 的合法 PDP 导航。"""
         search = self.state["search"]
         try:
-            new_page = search.open_result(0)
+            product_page = search.open_result(0)
+        except SearchResultNavigationError as exc:
+            # 失败证据必须绑定点击后实际到达的 Page（若已创建）。
+            self._adopt_business_page(exc.actual_page)
+            raise FlowError("SEARCH_RESULT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         except Exception as exc:
             raise FlowError("SEARCH_RESULT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
-        if "/products/" not in new_page.url:
+        if not urlparse(product_page.url).path.startswith("/products/"):
             raise FlowError(
-                "SEARCH_PDP_NAVIGATION_FAILURE", f"url={new_page.url[:120]}"
+                "SEARCH_PDP_NAVIGATION_FAILURE", f"url={product_page.url[:120]}"
             )
-        # 后续操作绑定新 PDP 页
-        self._extra_pages.append(self.page)
-        self.page = new_page
-        self.flow = ShoppingFlow(
-            new_page, self.site_config, self.viewport, access_policy=self.runtime.access_policy
-        )
-        prod = ProductPage(new_page, self.site_config, self.viewport)
+        self._adopt_business_page(product_page)
+        prod = ProductPage(product_page, self.site_config, self.viewport)
         self.flow.state["prod"] = prod
         try:
             title = prod.get_title()
@@ -520,12 +536,15 @@ class WebsiteSmokeV1Runner:
         if not title:
             raise FlowError("SEARCH_PDP_NAVIGATION_FAILURE", "title empty")
         self.state["search_prod"] = prod
-        return f"url={new_page.url[:80]} title={title[:50]!r}"
+        return f"url={product_page.url[:80]} title={title[:50]!r}"
 
     def _c_search04(self) -> str:
         """Search Product Purchase：搜索结果商品完整进入购买链，随后 UI 移除。"""
         prod = self.state["search_prod"]
-        color_count, size_count, atc_available = prod.wait_purchase_ready()
+        try:
+            color_count, size_count, atc_available = prod.wait_purchase_ready()
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("SEARCH_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "SEARCH_PURCHASE_AREA_NOT_AVAILABLE",
@@ -632,7 +651,10 @@ class WebsiteSmokeV1Runner:
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""
         prod = self.state["browse_prod"]
-        color_count, size_count, atc_available = prod.wait_purchase_ready()
+        try:
+            color_count, size_count, atc_available = prod.wait_purchase_ready()
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("PURCHASE_AREA_FAILURE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
             raise FlowError(
                 "PURCHASE_AREA_FAILURE",

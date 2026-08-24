@@ -206,38 +206,38 @@ class SearchCaseRunner:
     def _case_search04(self) -> str:
         """Search Result Opens PDP：真实点击第一个结果卡片。
 
-        卡片 target=_blank，PDP 在新标签页打开；
-        PASS 条件：新页 URL 属于 /products/... 且 PDP 标题非空。
+        PASS 条件：实际 same-page/new-page URL 属于 /products/... 且 PDP 标题非空。
         """
         search = self._search()
         count = search.result_count()
         if count <= 0:
             raise FlowError("SEARCH_RESULT_OPEN_FAILURE", f"result_count={count}")
-        new_page = None
+        source_page = self.page
+        product_page = None
         try:
             try:
-                new_page = search.open_result(0)
+                product_page = search.open_result(0)
             except Exception as exc:
                 raise FlowError(
                     "SEARCH_RESULT_OPEN_FAILURE",
                     f"{type(exc).__name__}: {exc}",
                 ) from exc
-            if "/products/" not in new_page.url:
+            if "/products/" not in product_page.url:
                 raise FlowError(
                     "SEARCH_PDP_NAVIGATION_FAILURE",
-                    f"url={new_page.url[:120]}",
+                    f"url={product_page.url[:120]}",
                 )
-            prod = ProductPage(new_page, self.site_config, self.viewport)
+            prod = ProductPage(product_page, self.site_config, self.viewport)
             title = prod.get_title()
             if not title:
                 raise FlowError("SEARCH_PDP_NAVIGATION_FAILURE", "PDP title empty")
-            self.state["pdp_url"] = new_page.url
+            self.state["pdp_url"] = product_page.url
             self.state["pdp_title"] = title
-            return f"url={new_page.url[:90]} title={title[:60]}"
+            return f"url={product_page.url[:90]} title={title[:60]}"
         finally:
-            if new_page is not None:
+            if product_page is not None and product_page is not source_page:
                 try:
-                    new_page.close()
+                    product_page.close()
                 except Exception:  # noqa: BLE001
                     pass
 

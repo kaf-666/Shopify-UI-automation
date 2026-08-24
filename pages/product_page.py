@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 
 FREE_SIZE_MARKER = "free custom size"
+
+
+class PurchaseAreaReadinessError(TimeoutError):
+    """购买区未在 bounded timeout 内进入稳定可测试状态。"""
 
 
 class ProductPage(BasePage):
@@ -43,6 +49,10 @@ class ProductPage(BasePage):
     def gallery(self):
         """返回图集定位器。"""
         return self.locator("gallery").first
+
+    def purchase_area(self):
+        """返回主商品购买表单根节点。"""
+        return self.locator("purchase_area").first
 
     # ------------------------------------------------------------------- 选项
     def color_group(self):
@@ -113,22 +123,84 @@ class ProductPage(BasePage):
         """返回当前可见、可用且有值的尺码选项数。"""
         return len(self.available_options(self.size_options()))
 
-    def wait_purchase_ready(self, timeout_ms: int = 15_000) -> tuple[int, int, bool]:
-        """等待购买区核心控件就绪并返回颜色数、尺码数、ATC 状态。
+    @staticmethod
+    def _safe_state(check, default=False):
+        try:
+            return check()
+        except Exception:
+            return default
 
-        页面异步初始化逻辑由 POM 持有；Tests 层只编排业务 Case，不自行
-        轮询 DOM。Playwright expect 会在有界 timeout 内等待 DOM 状态。
-        """
-        expect(self.title()).to_be_visible(timeout=timeout_ms)
+    def _readiness_snapshot(self) -> dict:
+        """每次用 Locator 重新解析当前 DOM，避免持有 hydration 前旧节点。"""
+        root = self.purchase_area()
+        title = self.title()
         atc = self.add_to_cart_button()
-        expect(atc).to_be_visible(timeout=timeout_ms)
-        expect(atc).to_be_enabled(timeout=timeout_ms)
-        expect(self.color_options().first).to_be_visible(timeout=timeout_ms)
-        expect(self.size_options().first).to_be_visible(timeout=timeout_ms)
-        return (
-            self.available_color_count(),
-            self.available_size_count(),
-            bool(atc.is_visible() and atc.is_enabled()),
+        return {
+            "purchase_area_attached": bool(self._safe_state(root.count, 0)),
+            "title_visible": bool(self._safe_state(title.is_visible)),
+            "color_count": self._safe_state(self.available_color_count, 0),
+            "size_count": self._safe_state(self.available_size_count, 0),
+            "atc_visible": bool(self._safe_state(atc.is_visible)),
+            "atc_enabled": bool(self._safe_state(atc.is_enabled)),
+        }
+
+    @staticmethod
+    def _snapshot_ready(snapshot: dict) -> bool:
+        return all(
+            (
+                snapshot["purchase_area_attached"],
+                snapshot["title_visible"],
+                snapshot["color_count"] > 0,
+                snapshot["size_count"] > 0,
+                snapshot["atc_visible"],
+                snapshot["atc_enabled"],
+            )
+        )
+
+    def _wait_for_missing_readiness_condition(self, snapshot: dict, timeout_ms: int) -> None:
+        if not snapshot["purchase_area_attached"]:
+            self.purchase_area().wait_for(state="attached", timeout=timeout_ms)
+        elif not snapshot["title_visible"]:
+            self.title().wait_for(state="visible", timeout=timeout_ms)
+        elif snapshot["color_count"] == 0:
+            self.color_options().first.wait_for(state="visible", timeout=timeout_ms)
+        elif snapshot["size_count"] == 0:
+            self.size_options().first.wait_for(state="visible", timeout=timeout_ms)
+        elif not snapshot["atc_visible"]:
+            self.add_to_cart_button().wait_for(state="visible", timeout=timeout_ms)
+        elif not snapshot["atc_enabled"]:
+            expect(self.add_to_cart_button()).to_be_enabled(timeout=timeout_ms)
+
+    def wait_purchase_ready(self, timeout_ms: int = 15_000) -> tuple[int, int, bool]:
+        """等待购买区业务条件在一个总 timeout 内同时成立。
+
+        轮询基于 Locator 当前状态；Theme/SPB 替换表单 DOM 后，下一轮会
+        自动解析新节点。无固定 sleep、reload 或无条件 retry。
+        """
+        deadline = time.monotonic() + timeout_ms / 1000
+        initial = self._readiness_snapshot()
+        final = initial
+        while time.monotonic() < deadline:
+            final = self._readiness_snapshot()
+            if self._snapshot_ready(final):
+                return final["color_count"], final["size_count"], True
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                self._wait_for_missing_readiness_condition(final, remaining_ms)
+            except PlaywrightTimeoutError:
+                break
+
+        final = self._readiness_snapshot()
+        raise PurchaseAreaReadinessError(
+            "purchase_area_attached="
+            f"{final['purchase_area_attached']} "
+            f"size_count_initial={initial['size_count']} "
+            f"size_count_final={final['size_count']} "
+            f"color_count_initial={initial['color_count']} "
+            f"color_count_final={final['color_count']} "
+            f"atc_visible={final['atc_visible']} "
+            f"atc_enabled={final['atc_enabled']} "
+            f"readiness_timeout_ms={timeout_ms}"
         )
 
     def _find_option(self, options, value: str, missing_msg: str):
