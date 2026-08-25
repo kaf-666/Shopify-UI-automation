@@ -50,8 +50,7 @@ class SearchPage(BasePage):
         home = HomePage(self.page, self.site_config, self.viewport)
         home.open()
         home.wait_core_ready()
-        home.open_search()
-        self.wait_open()
+        self.ensure_search_session_open(home)
 
     # ------------------------------------------------------------------ 控件
     def container(self):
@@ -176,6 +175,22 @@ class SearchPage(BasePage):
         except PlaywrightTimeoutError:
             return False
 
+    def ensure_search_session_open(
+        self, home: Optional[HomePage] = None, timeout_ms: int = 10_000
+    ) -> None:
+        """确保首页 Search 会话已打开，且输入框可见、可用、可编辑。"""
+        home = home or HomePage(self.page, self.site_config, self.viewport)
+        if self.page.url.rstrip("/") != home.base_url().rstrip("/"):
+            raise RuntimeError("Search session can only be opened from Home")
+        if not self.is_open():
+            expect(home.search_trigger()).to_be_visible(timeout=timeout_ms)
+            home.open_search()
+        self.wait_open(timeout_ms=timeout_ms)
+        inp = self.input()
+        expect(inp).to_be_visible(timeout=timeout_ms)
+        expect(inp).to_be_enabled(timeout=timeout_ms)
+        expect(inp).to_be_editable(timeout=timeout_ms)
+
     def _reopen_session(self) -> None:
         """重建 Search 会话：等待页面稳定后回到首页并打开 Search。
 
@@ -189,11 +204,9 @@ class SearchPage(BasePage):
         while time.monotonic() < deadline:
             try:
                 self.page.evaluate("document.readyState")
-                if self.page.url.rstrip("/") == base:
-                    home.open_search()
-                    self.wait_open()
-                    return
-                home.open()
+                if self.page.url.rstrip("/") != base:
+                    home.open()
+                self.ensure_search_session_open(home)
                 return
             except Exception:
                 self.page.wait_for_timeout(500)

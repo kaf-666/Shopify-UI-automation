@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,6 +27,7 @@ from utils.site_access import (
     parse_env_headers,
     validate_signature_headers,
 )
+from utils.traffic_inventory import TrafficInventory
 from pages.cart_drawer import CartDrawer
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from pages.search_page import SearchPage, SearchResultNavigationError
@@ -91,10 +93,33 @@ def _search_site_config(base_url: str) -> dict:
     return {
         "base_url": base_url,
         "pages": {
+            "home": {
+                "url": "/",
+                "selectors": {
+                    "logo": {"by": "css", "value": "#logo"},
+                    "search": {"by": "css", "value": "#search-trigger"},
+                },
+            },
+            "navigation": {
+                "url": "/",
+                "selectors": {
+                    "header": {"by": "css", "value": "#site-header"},
+                    "mobile_trigger": {"by": "css", "value": "#menu-trigger"},
+                },
+            },
             "search": {
                 "url": "/search",
                 "selectors": {
+                    "container": {"by": "css", "value": "#search-container"},
+                    "input": {"by": "css", "value": "#Search"},
+                    "submit": {"by": "css", "value": "#search-submit"},
+                    "close": {"by": "css", "value": "#search-close"},
+                    "predictive_results": {"by": "css", "value": "#predictive-search"},
+                    "predictive_product": {"by": "css", "value": "#predictive-search a"},
+                    "results_grid": {"by": "css", "value": "#results"},
+                    "result_card": {"by": "css", "value": "#results .result"},
                     "result_link": {"by": "css", "value": "#result"},
+                    "no_results": {"by": "css", "value": "#no-results"},
                 },
             }
         },
@@ -111,11 +136,56 @@ def _search_markup(scenario: str) -> str:
     return '<button id="result" type="button">No navigation</button>'
 
 
+def _search_home_markup() -> str:
+    return """
+<!doctype html>
+<style>
+  #search-container:not(.is-active) { display: none; }
+</style>
+<header id="site-header">
+  <h1 id="logo">Synthetic Store</h1>
+  <button id="menu-trigger" type="button">Menu</button>
+  <button id="search-trigger" type="button">Search</button>
+</header>
+<div id="search-container" class="site-header__search-container">
+  <form action="/search" method="get">
+    <input id="Search" name="q" type="search">
+    <button id="search-submit" type="submit">Submit</button>
+    <button id="search-close" type="button">Close</button>
+  </form>
+  <div id="predictive-search"></div>
+  <div class="predictive__screen" hidden></div>
+</div>
+<script>
+  window.searchOpenCount = 0;
+  document.querySelector('#search-trigger').addEventListener('click', () => {
+    window.searchOpenCount += 1;
+    document.querySelector('#search-container').classList.add('is-active');
+  });
+</script>
+"""
+
+
+def _search_results_markup() -> str:
+    return (
+        '<div id="results"><article class="result">'
+        '<a id="result" href="/products/test">Product</a>'
+        "</article></div>"
+    )
+
+
 class _SyntheticSearchHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 — stdlib handler contract
         parsed = urlparse(self.path)
         scenario = (parse_qs(parsed.query).get("scenario") or ["no_navigation"])[0]
-        body = _search_markup(scenario) if parsed.path == "/search" else "<h1>Destination</h1>"
+        if parsed.path == "/":
+            body = _search_home_markup()
+        elif parsed.path == "/search" and "scenario" in parse_qs(parsed.query):
+            body = _search_markup(scenario)
+        elif parsed.path == "/search":
+            body = _search_results_markup()
+        else:
+            body = "<h1>Destination</h1>"
         payload = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -179,6 +249,151 @@ def validate_search_navigation_regressions() -> dict[str, bool]:
                 results[scenario] = _run_search_scenario(browser, scenario, base_url)
             except Exception as exc:  # noqa: BLE001 — compact offline diagnostic
                 print(f"  FAIL  Search {scenario}: {type(exc).__name__}")
+    finally:
+        if browser is not None:
+            browser.close()
+        if playwright is not None:
+            playwright.stop()
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if server_thread is not None:
+            server_thread.join(timeout=2)
+    return results
+
+
+def _run_search_recovery(browser, base_url: str, *, inventory_on: bool = False) -> dict:
+    context = browser.new_context()
+    page = context.new_page()
+    inventory = None
+    try:
+        if inventory_on:
+            inventory = TrafficInventory(first_party_hosts={"127.0.0.1"})
+            inventory.attach_context(context, "mobile", active_page=page)
+        page.goto(
+            f"{base_url}/search?scenario=recovery",
+            wait_until="domcontentloaded",
+        )
+        search = SearchPage(page, _search_site_config(base_url), "mobile")
+        search._reopen_session()
+        open_count = page.evaluate("window.searchOpenCount")
+        search.fill_query("dress")
+        recovered = search.submit_query()
+        return {
+            "path": urlparse(page.url).path,
+            "query": search.current_query(),
+            "result_count": search.result_count(),
+            "open_count": open_count,
+            "recovered": recovered,
+            "inventory_ok": (
+                inventory is None
+                or (inventory.status == "COMPLETE" and bool(inventory.records))
+            ),
+        }
+    finally:
+        context.close()
+
+
+def validate_search_recovery_regressions(browser, base_url: str) -> dict[str, bool]:
+    results = {
+        "normal_submit": False,
+        "recovery_reopens": False,
+        "already_open_idempotent": False,
+        "hidden_input_not_actionable": False,
+        "traffic_inventory_parity": False,
+    }
+
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        search = SearchPage(page, _search_site_config(base_url), "mobile")
+        search.open_from_home()
+        search.fill_query("dress")
+        recovered = search.submit_query()
+        results["normal_submit"] = (
+            not recovered
+            and search.current_query() == "dress"
+            and search.result_count() == 1
+        )
+    finally:
+        context.close()
+
+    recovery_off = _run_search_recovery(browser, base_url)
+    results["recovery_reopens"] = recovery_off == {
+        "path": "/search",
+        "query": "dress",
+        "result_count": 1,
+        "open_count": 1,
+        "recovered": False,
+        "inventory_ok": True,
+    }
+
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        search = SearchPage(page, _search_site_config(base_url), "mobile")
+        search._reopen_session()
+        first_count = page.evaluate("window.searchOpenCount")
+        search._reopen_session()
+        second_count = page.evaluate("window.searchOpenCount")
+        results["already_open_idempotent"] = (
+            first_count == second_count == 1
+            and search.is_open()
+            and search.input().is_visible()
+            and search.input().is_editable()
+        )
+    finally:
+        context.close()
+
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.goto(base_url, wait_until="domcontentloaded")
+        page.set_default_timeout(300)
+        search = SearchPage(page, _search_site_config(base_url), "mobile")
+        try:
+            search.fill_query("dress")
+        except PlaywrightTimeoutError:
+            results["hidden_input_not_actionable"] = (
+                not search.is_open()
+                and not search.input().is_visible()
+                and search.input_value() == ""
+                and page.evaluate("window.searchOpenCount") == 0
+            )
+    finally:
+        context.close()
+
+    recovery_on = _run_search_recovery(browser, base_url, inventory_on=True)
+    results["traffic_inventory_parity"] = (
+        recovery_on["inventory_ok"]
+        and {**recovery_on, "inventory_ok": True} == recovery_off
+    )
+    return results
+
+
+def validate_search_recovery_contract() -> dict[str, bool]:
+    results = {
+        "normal_submit": False,
+        "recovery_reopens": False,
+        "already_open_idempotent": False,
+        "hidden_input_not_actionable": False,
+        "traffic_inventory_parity": False,
+    }
+    browser = None
+    playwright = None
+    server = None
+    server_thread = None
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _SyntheticSearchHandler)
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        playwright = sync_playwright().start()
+        browser = playwright.webkit.launch(headless=True)
+        results = validate_search_recovery_regressions(browser, base_url)
+    except Exception as exc:  # noqa: BLE001 — compact offline diagnostic
+        print(f"  FAIL  Search recovery regressions: {type(exc).__name__}: {exc}")
     finally:
         if browser is not None:
             browser.close()
@@ -416,6 +631,25 @@ def main() -> int:
         "Search navigation: invalid destination fails",
     ) and ok
     ok = check(search_results["no_navigation"], "Search navigation: no navigation fails") and ok
+
+    search_recovery = validate_search_recovery_contract()
+    ok = check(search_recovery["normal_submit"], "Search recovery: normal submit") and ok
+    ok = check(
+        search_recovery["recovery_reopens"],
+        "Search recovery: return Home, reopen, fill, submit",
+    ) and ok
+    ok = check(
+        search_recovery["already_open_idempotent"],
+        "Search recovery: already-open session is idempotent",
+    ) and ok
+    ok = check(
+        search_recovery["hidden_input_not_actionable"],
+        "Search recovery: hidden input is not actionable",
+    ) and ok
+    ok = check(
+        search_recovery["traffic_inventory_parity"],
+        "Search recovery: Traffic Inventory ON/OFF parity",
+    ) and ok
 
     pdp_results = validate_pdp_readiness_regressions()
     ok = check(pdp_results["initialization"], "PDP readiness: 0 -> 16 initialization") and ok
