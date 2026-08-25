@@ -5,6 +5,8 @@
     python scripts/run_website_smoke_v1.py --viewport desktop
     python scripts/run_website_smoke_v1.py --viewport mobile
     python scripts/run_website_smoke_v1.py --viewport both --traffic-inventory
+    python scripts/run_website_smoke_v1.py --viewport both --traffic-inventory \
+        --traffic-reduction telemetry-v1
 
 产物：
     artifacts/website-smoke-v1/<run_id>/results.json
@@ -45,6 +47,11 @@ from utils.result import (
 )
 from utils.suite_runner import guarded_main
 from utils.traffic_inventory import TrafficInventory
+from utils.traffic_reduction import (
+    EXPERIMENT_TELEMETRY_V1,
+    TrafficReductionPolicy,
+    create_traffic_reduction_policy,
+)
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-v1"
 
@@ -53,15 +60,22 @@ def run_viewport(
     viewport: str,
     artifact_dir: Path,
     traffic_inventory: Optional[TrafficInventory] = None,
+    traffic_reduction: Optional[TrafficReductionPolicy] = None,
 ) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
     runtime = create_browser(viewport)
     try:
+        if traffic_reduction is not None:
+            # Signed Request was registered by create_browser(). This handler
+            # is intentionally registered second and falls back on non-match.
+            traffic_reduction.attach(runtime.context)
         if traffic_inventory is not None:
             try:
                 traffic_inventory.attach_context(runtime.context, viewport, runtime.page)
             except Exception as exc:  # observation must not affect business execution
                 traffic_inventory.record_error("attach_context", exc)
         runtime_meta = runtime.metadata()
+        if traffic_reduction is not None and traffic_reduction.enabled:
+            runtime_meta["traffic_reduction"] = traffic_reduction.runtime_summary()
         site = runtime.site_config or BasePage.load_site_config(site_name=runtime.site_name)
         runner = WebsiteSmokeV1Runner(
             runtime,
@@ -166,6 +180,21 @@ def _write_traffic_inventory(
         print("Traffic Inventory: ERROR (business result unchanged)")
 
 
+def _write_traffic_reduction(
+    policy: TrafficReductionPolicy, artifact_dir: Path
+) -> None:
+    """Persist the opt-in experiment's aggregate blocking summary."""
+    if not policy.enabled:
+        return
+    try:
+        path = artifact_dir / "traffic" / "blocking-summary.json"
+        write_results_json(policy.build_summary(), path)
+        print("Traffic Reduction Artifact:")
+        print(f"artifacts/website-smoke-v1/{artifact_dir.name}/traffic/{path.name}")
+    except Exception as exc:
+        print(f"TRAFFIC_REDUCTION_ARTIFACT_FAILURE: {sanitize_message(exc)}")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Mondressy Website Smoke V1")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
@@ -174,7 +203,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="attach the read-only request inventory observer (default: off)",
     )
+    parser.add_argument(
+        "--traffic-reduction",
+        choices=[EXPERIMENT_TELEMETRY_V1],
+        default=None,
+        help="opt-in request reduction experiment (default: off)",
+    )
     args = parser.parse_args(argv)  # argparse exits 2 on invalid choice
+    if args.traffic_reduction and not args.traffic_inventory:
+        parser.error("--traffic-reduction requires --traffic-inventory")
 
     run_id = make_run_id()
     artifact_dir = ARTIFACT_ROOT / run_id
@@ -187,6 +224,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     started_at = iso_now()
     started = time.perf_counter()
     traffic_inventory = TrafficInventory() if args.traffic_inventory else None
+    traffic_reduction = create_traffic_reduction_policy(args.traffic_reduction)
     site = ""
     base_url = ""
     vp_results: List[ViewportResult] = []
@@ -213,6 +251,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
         _write_traffic_inventory(traffic_inventory, artifact_dir)
+        _write_traffic_reduction(traffic_reduction, artifact_dir)
         return exit_code if ok else exit_code
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
@@ -224,7 +263,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             vp_started_ts = iso_now()
             vp_started = time.perf_counter()
             results, runner, runtime_meta = run_viewport(
-                vp, artifact_dir, traffic_inventory=traffic_inventory
+                vp,
+                artifact_dir,
+                traffic_inventory=traffic_inventory,
+                traffic_reduction=traffic_reduction,
             )
             runtime_by_viewport[vp] = runtime_meta
             vp_duration = int((time.perf_counter() - vp_started) * 1000)
@@ -276,6 +318,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
         _write_traffic_inventory(traffic_inventory, artifact_dir)
+        _write_traffic_reduction(traffic_reduction, artifact_dir)
         return exit_code
 
     total_counts = {
@@ -297,6 +340,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         runtime={"viewports": runtime_by_viewport},
     ):
         _write_traffic_inventory(traffic_inventory, artifact_dir)
+        _write_traffic_reduction(traffic_reduction, artifact_dir)
         return 1
 
     print("=== Summary ===")
@@ -318,6 +362,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"artifacts/website-smoke-v1/{run_id}/results.json")
 
     _write_traffic_inventory(traffic_inventory, artifact_dir)
+    _write_traffic_reduction(traffic_reduction, artifact_dir)
 
     return 0 if overall == "PASS" else 1
 
