@@ -79,6 +79,44 @@ The output may include `results.json` and failure screenshots. `artifacts/` is i
 
 All viewport-aware runners accept `--viewport desktop`, `--viewport mobile`, or `--viewport both` where supported.
 
+## Traffic Inventory (Phase 1)
+
+Website Smoke V1 can attach an optional, read-only BrowserContext network
+observer. It is disabled by default and does not intercept, block, fulfil, or
+modify requests. Signed Request handling and the normal Website Smoke result
+contract remain unchanged.
+
+After offline validation, the single production inventory command is:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_website_smoke_v1.py --viewport both --traffic-inventory
+```
+
+When explicitly enabled, sanitized artifacts are written under the run's
+`traffic/` directory:
+
+```text
+requests.jsonl
+summary.json
+summary.txt
+```
+
+Stored URLs contain only scheme, host, a sanitized path, a query-presence flag,
+and a SHA-256 key derived without query values or fragments. Request/response
+bodies, complete headers, cookies, authorization data, Signed Request fields,
+and checkout tokens are never persisted. Classifications and
+`CACHE_REPEAT_CANDIDATE` are analysis labels only; Phase 1 performs no traffic
+reduction. BrowserContext events do not expose the separate APIRequestContext
+calls used by cart pre-clean and backend assertions, so those few requests are
+outside this inventory even though their surrounding runner scope is marked as
+`infrastructure`.
+
+Offline validation:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\validate_traffic_inventory.py
+```
+
 ## PDP size option resolver
 
 `ProductPage` exposes one model-independent size contract through

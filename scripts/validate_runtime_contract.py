@@ -32,6 +32,10 @@ from pages.search_page import SearchPage, SearchResultNavigationError
 from pages.size_option_resolver import SIZE_MODEL_01, SIZE_MODEL_02
 
 
+SYNTHETIC_SEARCH_TIMEOUT_MS = 1_000
+SYNTHETIC_PDP_READY_TIMEOUT_MS = 3_000
+
+
 def check(ok: bool, label: str) -> bool:
     print(f"  {'PASS' if ok else 'FAIL'}  {label}")
     return ok
@@ -141,7 +145,7 @@ def _run_search_scenario(browser, scenario: str, base_url: str) -> bool:
             )
 
         try:
-            search.open_result(0, timeout_ms=300)
+            search.open_result(0, timeout_ms=SYNTHETIC_SEARCH_TIMEOUT_MS)
         except SearchResultNavigationError as exc:
             actual_path = urlparse(exc.actual_page.url).path
             if scenario == "invalid_destination":
@@ -282,7 +286,11 @@ def validate_pdp_readiness_regressions() -> dict[str, bool]:
             _size_radios(16),
         )
         product = ProductPage(page, config, "mobile")
-        colors, sizes, atc = product.wait_purchase_ready(timeout_ms=1_000)
+        # The multi-model resolver performs a fresh Locator-based snapshot on
+        # every pass. Allow two complete WebKit snapshots on slower CI hosts.
+        colors, sizes, atc = product.wait_purchase_ready(
+            timeout_ms=SYNTHETIC_PDP_READY_TIMEOUT_MS
+        )
         results["initialization"] = colors == 1 and sizes == 16 and atc
 
         page.set_content(_purchase_markup(size_count=0))
@@ -301,7 +309,9 @@ def validate_pdp_readiness_regressions() -> dict[str, bool]:
             _purchase_markup(size_count=16),
         )
         product = ProductPage(page, config, "mobile")
-        colors, sizes, atc = product.wait_purchase_ready(timeout_ms=1_000)
+        colors, sizes, atc = product.wait_purchase_ready(
+            timeout_ms=SYNTHETIC_PDP_READY_TIMEOUT_MS
+        )
         results["dom_rerender"] = colors == 1 and sizes == 16 and atc
         context.close()
     except Exception as exc:  # noqa: BLE001 — compact offline diagnostic

@@ -64,7 +64,14 @@ CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 class WebsiteSmokeV1Runner:
     """针对单个 BrowserRuntime 顺序执行三条购买 Journey（15 Cases）。"""
 
-    def __init__(self, runtime, site_config: dict, viewport: str, artifact_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        runtime,
+        site_config: dict,
+        viewport: str,
+        artifact_dir: Optional[Path] = None,
+        traffic_inventory=None,
+    ):
         self.runtime = runtime
         self.viewport = viewport
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
@@ -84,6 +91,7 @@ class WebsiteSmokeV1Runner:
         self.cf_interruption = False
         self._extra_pages: List = []
         self._journey = ""
+        self._traffic_inventory = traffic_inventory
 
         self._cases: Dict[str, tuple] = {
             # ------------------------------------------------------- Direct
@@ -179,6 +187,19 @@ class WebsiteSmokeV1Runner:
     def _mark_cf(self) -> None:
         self.cf_interruption = True
 
+    def _traffic_observe(self, operation: str, *args, **kwargs) -> None:
+        """Best-effort observation hook; collection can never fail a business Case."""
+        inventory = self._traffic_inventory
+        if inventory is None:
+            return
+        try:
+            getattr(inventory, operation)(*args, **kwargs)
+        except Exception as exc:  # observation layer is intentionally non-blocking
+            try:
+                inventory.record_error(f"runner.{operation}", exc)
+            except Exception:
+                pass
+
     def _adopt_business_page(self, actual_page) -> None:
         """切换当前业务 Page；保留旧 Page 到 Context 生命周期结束时清理。"""
         if actual_page is None or actual_page.is_closed():
@@ -186,6 +207,7 @@ class WebsiteSmokeV1Runner:
         if actual_page is not self.page:
             self._extra_pages.append(self.page)
         self.page = actual_page
+        self._traffic_observe("set_active_page", actual_page, self.viewport)
         self.flow = ShoppingFlow(
             actual_page,
             self.site_config,
@@ -194,6 +216,13 @@ class WebsiteSmokeV1Runner:
         )
 
     def _run_case(self, case_id: str, name: str, deps: List[str], fn: Callable) -> None:
+        self._traffic_observe(
+            "set_scope",
+            self.viewport,
+            journey=self._journey,
+            case_id=case_id,
+            scope_name="CASE",
+        )
         # 仅同一 Journey 内部依赖
         for dep in deps:
             dep_result = self.results.get(dep)
@@ -260,6 +289,13 @@ class WebsiteSmokeV1Runner:
 
     def _journey_cleanup(self) -> None:
         """Journey 结束后兜底清理：抽屉有残留时 API 清空（不影响 Case 结论）。"""
+        self._traffic_observe(
+            "set_scope",
+            self.viewport,
+            journey="infrastructure",
+            case_id=None,
+            scope_name=f"{self._journey.upper()}_JOURNEY_CLEANUP",
+        )
         try:
             quantity = self.flow.cart_state_quantity(0)
         except FlowError as exc:
@@ -344,6 +380,13 @@ class WebsiteSmokeV1Runner:
     # -------------------------------------------------------------------- API
     def run_all(self) -> List[CaseResult]:
         # 前置：API 级购物车清理（基础设施，不产生业务页面导航）
+        self._traffic_observe(
+            "set_scope",
+            self.viewport,
+            journey="infrastructure",
+            case_id=None,
+            scope_name="PRE_CLEAN",
+        )
         try:
             self.flow.pre_clean_cart()
         except FlowError as exc:

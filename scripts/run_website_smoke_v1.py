@@ -4,6 +4,7 @@
     python scripts/run_website_smoke_v1.py                   # both
     python scripts/run_website_smoke_v1.py --viewport desktop
     python scripts/run_website_smoke_v1.py --viewport mobile
+    python scripts/run_website_smoke_v1.py --viewport both --traffic-inventory
 
 产物：
     artifacts/website-smoke-v1/<run_id>/results.json
@@ -43,16 +44,32 @@ from utils.result import (
     write_results_json,
 )
 from utils.suite_runner import guarded_main
+from utils.traffic_inventory import TrafficInventory
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-v1"
 
 
-def run_viewport(viewport: str, artifact_dir: Path) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
+def run_viewport(
+    viewport: str,
+    artifact_dir: Path,
+    traffic_inventory: Optional[TrafficInventory] = None,
+) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
     runtime = create_browser(viewport)
     try:
+        if traffic_inventory is not None:
+            try:
+                traffic_inventory.attach_context(runtime.context, viewport, runtime.page)
+            except Exception as exc:  # observation must not affect business execution
+                traffic_inventory.record_error("attach_context", exc)
         runtime_meta = runtime.metadata()
         site = runtime.site_config or BasePage.load_site_config(site_name=runtime.site_name)
-        runner = WebsiteSmokeV1Runner(runtime, site, viewport, artifact_dir=artifact_dir)
+        runner = WebsiteSmokeV1Runner(
+            runtime,
+            site,
+            viewport,
+            artifact_dir=artifact_dir,
+            traffic_inventory=traffic_inventory,
+        )
         results = runner.run_all()
         return results, runner, runtime_meta
     finally:
@@ -126,9 +143,37 @@ def _fatal_classification(exc: BaseException) -> tuple[str, int]:
     return "RUNTIME_ERROR", 1
 
 
+def _write_traffic_inventory(
+    inventory: Optional[TrafficInventory], artifact_dir: Path
+) -> None:
+    """Persist the optional observer without changing the business exit contract."""
+    if inventory is None:
+        return
+    try:
+        traffic_dir = artifact_dir / "traffic"
+        summary = inventory.write_artifacts(traffic_dir)
+        print()
+        print(inventory.console_summary(summary), end="")
+        print()
+        print("Traffic Artifacts:")
+        for name in ("requests.jsonl", "summary.json", "summary.txt"):
+            print(f"artifacts/website-smoke-v1/{artifact_dir.name}/traffic/{name}")
+    except Exception as exc:  # observation output cannot change business exit status
+        try:
+            inventory.record_error("console_output", exc)
+        except Exception:
+            pass
+        print("Traffic Inventory: ERROR (business result unchanged)")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Mondressy Website Smoke V1")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
+    parser.add_argument(
+        "--traffic-inventory",
+        action="store_true",
+        help="attach the read-only request inventory observer (default: off)",
+    )
     args = parser.parse_args(argv)  # argparse exits 2 on invalid choice
 
     run_id = make_run_id()
@@ -141,6 +186,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     started_at = iso_now()
     started = time.perf_counter()
+    traffic_inventory = TrafficInventory() if args.traffic_inventory else None
     site = ""
     base_url = ""
     vp_results: List[ViewportResult] = []
@@ -152,6 +198,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         site_cfg = load_site_config(site)
         base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
     except Exception as exc:
+        if traffic_inventory is not None:
+            traffic_inventory.record_error("startup", exc)
         classification, exit_code = _fatal_classification(exc)
         ok = _write_run_result(
             artifact_dir,
@@ -164,6 +212,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
+        _write_traffic_inventory(traffic_inventory, artifact_dir)
         return exit_code if ok else exit_code
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
@@ -174,7 +223,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         for vp in viewports:
             vp_started_ts = iso_now()
             vp_started = time.perf_counter()
-            results, runner, runtime_meta = run_viewport(vp, artifact_dir)
+            results, runner, runtime_meta = run_viewport(
+                vp, artifact_dir, traffic_inventory=traffic_inventory
+            )
             runtime_by_viewport[vp] = runtime_meta
             vp_duration = int((time.perf_counter() - vp_started) * 1000)
 
@@ -224,6 +275,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
+        _write_traffic_inventory(traffic_inventory, artifact_dir)
         return exit_code
 
     total_counts = {
@@ -244,6 +296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         vp_results,
         runtime={"viewports": runtime_by_viewport},
     ):
+        _write_traffic_inventory(traffic_inventory, artifact_dir)
         return 1
 
     print("=== Summary ===")
@@ -263,6 +316,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print()
     print("Results:")
     print(f"artifacts/website-smoke-v1/{run_id}/results.json")
+
+    _write_traffic_inventory(traffic_inventory, artifact_dir)
 
     return 0 if overall == "PASS" else 1
 
