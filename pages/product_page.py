@@ -1,7 +1,9 @@
 """商品详情（PDP）页面对象。
 
-颜色 / 尺码选择基于真实表单状态（radio.checked）判定，
-不使用 CSS class 启发式。提供加购按钮定位与真实加购点击。
+颜色 / 尺码选择基于真实表单状态（radio.checked）判定。尺码通过
+SizeOptionResolver 先识别 Group/Model，再归一化 option；class 仅参与
+MODEL_02 的不可用状态识别，不作为 selected state。提供加购按钮定位
+与真实加购点击。
 """
 
 from __future__ import annotations
@@ -13,8 +15,13 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect
 
 from pages.base_page import BasePage
+from pages.size_option_resolver import (
+    DEFAULT_FREE_SIZE_MARKER,
+    SizeGroupNotFoundError,
+    SizeOptionResolver,
+)
 
-FREE_SIZE_MARKER = "free custom size"
+FREE_SIZE_MARKER = DEFAULT_FREE_SIZE_MARKER
 
 
 class PurchaseAreaReadinessError(TimeoutError):
@@ -63,9 +70,9 @@ class ProductPage(BasePage):
         """返回颜色 radio 选项定位器集合。"""
         return self.color_group().locator('input[type="radio"]')
 
-    def size_options(self):
-        """返回尺码 radio 选项定位器集合（SPB 控件）。"""
-        return self.locator("size")
+    def _size_resolver(self) -> SizeOptionResolver:
+        """创建无 DOM 缓存的实时尺码解析器。"""
+        return SizeOptionResolver(self.page, self.page_config(), self.purchase_area)
 
     def add_to_cart_button(self):
         """返回加购按钮定位器。"""
@@ -120,8 +127,11 @@ class ProductPage(BasePage):
         return len(self.available_options(self.color_options()))
 
     def available_size_count(self) -> int:
-        """返回当前可见、可用且有值的尺码选项数。"""
-        return len(self.available_options(self.size_options()))
+        """返回可用尺码数；兼容计入 Free Custom Size 的历史语义。"""
+        try:
+            return len(self._size_resolver().available_options())
+        except SizeGroupNotFoundError:
+            return 0
 
     @staticmethod
     def _safe_state(check, default=False):
@@ -135,11 +145,19 @@ class ProductPage(BasePage):
         root = self.purchase_area()
         title = self.title()
         atc = self.add_to_cart_button()
+        size = self._safe_state(self._size_resolver().snapshot, {})
         return {
             "purchase_area_attached": bool(self._safe_state(root.count, 0)),
             "title_visible": bool(self._safe_state(title.is_visible)),
             "color_count": self._safe_state(self.available_color_count, 0),
-            "size_count": self._safe_state(self.available_size_count, 0),
+            "size_count": int(size.get("size_option_available", 0)),
+            "size_model": size.get("size_model"),
+            "size_group_detected": bool(size.get("size_group_detected", False)),
+            "size_option_total": int(size.get("size_option_total", 0)),
+            "normal_size_available": int(size.get("normal_size_available", 0)),
+            "custom_size_present": bool(size.get("custom_size_present", False)),
+            "selected_size": size.get("selected_size"),
+            "candidate_group_count": int(size.get("candidate_group_count", 0)),
             "atc_visible": bool(self._safe_state(atc.is_visible)),
             "atc_enabled": bool(self._safe_state(atc.is_enabled)),
         }
@@ -165,7 +183,7 @@ class ProductPage(BasePage):
         elif snapshot["color_count"] == 0:
             self.color_options().first.wait_for(state="visible", timeout=timeout_ms)
         elif snapshot["size_count"] == 0:
-            self.size_options().first.wait_for(state="visible", timeout=timeout_ms)
+            self._size_resolver().wait_for_available(timeout_ms)
         elif not snapshot["atc_visible"]:
             self.add_to_cart_button().wait_for(state="visible", timeout=timeout_ms)
         elif not snapshot["atc_enabled"]:
@@ -198,6 +216,13 @@ class ProductPage(BasePage):
             f"size_count_final={final['size_count']} "
             f"color_count_initial={initial['color_count']} "
             f"color_count_final={final['color_count']} "
+            f"size_model={final['size_model'] or 'UNKNOWN'} "
+            f"size_group_detected={final['size_group_detected']} "
+            f"size_option_total={final['size_option_total']} "
+            f"normal_size_available={final['normal_size_available']} "
+            f"custom_size_present={final['custom_size_present']} "
+            f"selected_size={final['selected_size'] or 'NONE'} "
+            f"candidate_group_count={final['candidate_group_count']} "
             f"atc_visible={final['atc_visible']} "
             f"atc_enabled={final['atc_enabled']} "
             f"readiness_timeout_ms={timeout_ms}"
@@ -219,12 +244,10 @@ class ProductPage(BasePage):
 
     def first_available_size(self) -> str:
         """返回第一个可见可用的普通尺码值（排除 Free Custom Size）。"""
-        for v, radio in self.available_options(self.size_options()):
-            if v.lower() == FREE_SIZE_MARKER:
-                continue
-            if not radio.is_checked():
-                return v
-        raise RuntimeError("No available normal size option to select")
+        try:
+            return self._size_resolver().first_available_value()
+        except SizeGroupNotFoundError as exc:
+            raise RuntimeError("No available normal size option to select") from exc
 
     def select_color(self, value: Optional[str] = None) -> str:
         """选择颜色。
@@ -261,11 +284,7 @@ class ProductPage(BasePage):
         """
         if value is None:
             value = self.first_available_size()
-        radio = self._find_option(
-            self.size_options(), value, f"Size option unavailable: {value}"
-        )
-        radio.check()
-        return value
+        return self._size_resolver().select(value)
 
     def get_selected_color(self) -> Optional[str]:
         """返回当前选中的颜色值（基于 radio.checked 真实表单状态）。"""
@@ -277,8 +296,7 @@ class ProductPage(BasePage):
 
     def get_selected_size(self) -> Optional[str]:
         """返回当前选中的尺码值（基于 radio.checked 真实表单状态）。"""
-        for i in range(self.size_options().count()):
-            radio = self.size_options().nth(i)
-            if radio.is_checked():
-                return self._radio_value(radio)
-        return None
+        try:
+            return self._size_resolver().selected_value()
+        except SizeGroupNotFoundError:
+            return None

@@ -239,6 +239,42 @@ pages:
   product:
     url: /products/a-line-princess-scoop-lace-embroidery-mother-of-the-bride-dresses-floral-ankle-length-short-sleeves-mon2313179
 
+    size_resolver:
+      models:
+        - id: SIZE_MODEL_01
+          name: SPB_PROPERTY_RADIO_GROUP
+          group_selector: ".my-infiniteoptions-container.sizeoption[role=\"group\"]"
+          option_selector: "input[type=\"radio\"][name=\"properties[Size]\"]"
+          wait_option_selector: "input[type=\"radio\"][name=\"properties[Size]\"]:not([value=\"\"])"
+          required_attributes:
+            role: group
+          expected_name: Size
+          custom_size_value: Free Custom Size
+
+        - id: SIZE_MODEL_02
+          name: SHOPIFY_NATIVE_VARIANT_RADIO_GROUP
+          group_selector: "fieldset[name=\"Size\"][data-handle=\"size\"]"
+          option_selector: "input[type=\"radio\"][name=\"Size\"][data-variant-input]"
+          wait_option_selector: "input[type=\"radio\"][name=\"Size\"][data-variant-input]"
+          required_attributes:
+            name: Size
+            data-handle: size
+          expected_name: Size
+          disabled_class_tokens:
+            - disabled
+
+      custom_measurement:
+        id: SIZE_MODEL_03
+        name: SPB_CUSTOM_MEASUREMENT_WIDGET
+        trigger_value: Free Custom Size
+        field_selector: "input[type=\"text\"]"
+        field_names:
+          - Bust
+          - Waist
+          - Hips
+          - Hollow to Floor
+          - Height
+
     selectors:
       purchase_area:
         by: css
@@ -269,12 +305,6 @@ pages:
         value: "fieldset[name=\"Color\"]"
         stability: HIGH
         notes: radio swatch group; options = input[type=radio][name=Color].variant__input--color-swatch
-
-      size:
-        by: css
-        value: "input[name=\"properties[Size]\"][type=\"radio\"]:not([value=\"\"])"
-        stability: MEDIUM
-        notes: SPB app radio option group; excludes the hidden empty placeholder radio; Free Custom Size adds Bust/Waist/Hips text inputs
 
       add_to_cart:
         by: css

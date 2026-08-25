@@ -235,7 +235,7 @@ class ShoppingFlow:
                 return False
             if prod.color_options().count() <= 0:
                 return False
-            if prod.size_options().count() <= 0:
+            if prod.available_size_count() <= 0:
                 return False
             atc = prod.add_to_cart_button()
             return atc.is_visible() and atc.is_enabled()
@@ -273,7 +273,7 @@ class ShoppingFlow:
         title = prod.get_title()
         price = prod.get_price()
         colors = prod.color_options().count()
-        sizes = prod.size_options().count()
+        sizes = prod.available_size_count()
         atc = prod.add_to_cart_button()
         atc_visible = atc.is_visible()
         atc_enabled = atc.is_enabled()

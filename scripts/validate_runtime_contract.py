@@ -29,6 +29,7 @@ from utils.site_access import (
 from pages.cart_drawer import CartDrawer
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from pages.search_page import SearchPage, SearchResultNavigationError
+from pages.size_option_resolver import SIZE_MODEL_01, SIZE_MODEL_02
 
 
 def check(ok: bool, label: str) -> bool:
@@ -193,11 +194,48 @@ def _product_site_config() -> dict:
         "pages": {
             "product": {
                 "url": "/products/test",
+                "size_resolver": {
+                    "models": [
+                        {
+                            "id": SIZE_MODEL_01,
+                            "group_selector": ".sizeoption[role='group']",
+                            "option_selector": (
+                                "input[type='radio'][name='properties[Size]']"
+                            ),
+                            "wait_option_selector": (
+                                "input[type='radio'][name='properties[Size]']"
+                                ":not([value=''])"
+                            ),
+                            "required_attributes": {"role": "group"},
+                            "expected_name": "Size",
+                            "custom_size_value": "Free Custom Size",
+                        },
+                        {
+                            "id": SIZE_MODEL_02,
+                            "group_selector": (
+                                "fieldset[name='Size'][data-handle='size']"
+                            ),
+                            "option_selector": (
+                                "input[type='radio'][name='Size']"
+                                "[data-variant-input]"
+                            ),
+                            "wait_option_selector": (
+                                "input[type='radio'][name='Size']"
+                                "[data-variant-input]"
+                            ),
+                            "required_attributes": {
+                                "name": "Size",
+                                "data-handle": "size",
+                            },
+                            "expected_name": "Size",
+                            "disabled_class_tokens": ["disabled"],
+                        },
+                    ]
+                },
                 "selectors": {
                     "purchase_area": {"by": "css", "value": "#purchase"},
                     "title": {"by": "css", "value": "#title"},
                     "color": {"by": "css", "value": "#colors"},
-                    "size": {"by": "css", "value": "input[name='size']"},
                     "add_to_cart": {"by": "css", "value": "#atc"},
                 },
             }
@@ -207,7 +245,9 @@ def _product_site_config() -> dict:
 
 def _size_radios(count: int) -> str:
     return "".join(
-        f'<label><input name="size" type="radio" value="{index}">{index}</label>'
+        '<label>'
+        f'<input form="purchase" name="properties[Size]" type="radio" '
+        f'value="{index}">{index}</label>'
         for index in range(1, count + 1)
     )
 
@@ -218,7 +258,8 @@ def _purchase_markup(*, size_count: int, atc_disabled: bool = False) -> str:
         '<form id="purchase">'
         '<h1 id="title">Synthetic Product</h1>'
         '<fieldset id="colors"><input type="radio" value="Black"></fieldset>'
-        f'<div id="sizes">{_size_radios(size_count)}</div>'
+        '<div id="sizes" class="sizeoption" role="group" aria-label="Size">'
+        f'{_size_radios(size_count)}</div>'
         f'<button id="atc" type="button"{disabled}>Add to cart</button>'
         "</form>"
     )

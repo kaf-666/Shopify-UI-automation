@@ -70,7 +70,7 @@ def run_viewport(viewport: str) -> Tuple[List[Check], dict]:
         title = prod.get_title()
         price = prod.get_price()
         color_n = prod.color_options().count()
-        size_n = prod.size_options().count()
+        size_n = prod.available_size_count()
         atc = prod.add_to_cart_button()
         checks += [
             Check("title", bool(title), f"value={title[:50]}"),

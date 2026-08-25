@@ -79,6 +79,34 @@ The output may include `results.json` and failure screenshots. `artifacts/` is i
 
 All viewport-aware runners accept `--viewport desktop`, `--viewport mobile`, or `--viewport both` where supported.
 
+## PDP size option resolver
+
+`ProductPage` exposes one model-independent size contract through
+`available_size_count()`, `first_available_size()`, `select_size()`, and
+`get_selected_size()`. The implementation in `pages/size_option_resolver.py`
+first detects the Size Group associated with the main Add To Cart form, then
+normalizes its options. It does not scan global radios or retain DOM handles.
+
+The Mondressy configuration currently describes:
+
+- `SIZE_MODEL_01`: SPB property radios (`properties[Size]`);
+- `SIZE_MODEL_02`: Shopify native variant radios (`name=Size`); and
+- `SIZE_MODEL_03`: metadata for the conditional `Free Custom Size`
+  measurement widget.
+
+`Free Custom Size` remains part of the compatible available-option count, but
+automatic normal-size selection always excludes it. The framework never fills
+custom measurements. Native unavailable options support the real `disabled`
+property, `aria-disabled`, and the observed `disabled` class token. Every
+resolver operation re-detects the live group so SPB/theme DOM replacement and
+model switches do not reuse stale nodes.
+
+Run the offline synthetic regression suite with:
+
+```powershell
+python scripts/validate_size_option_resolver.py
+```
+
 ## Secrets and access
 
 Runtime secrets are not stored in this repository. Mondressy Signed Request credentials must be injected or provided externally at runtime. Credential values, cookies, private keys, proxy credentials, and signed-request values must never be committed.
