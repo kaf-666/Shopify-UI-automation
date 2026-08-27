@@ -11,7 +11,7 @@ pipeline {
 
     triggers {
         // Hashed minute avoids synchronized starts when more sites are added.
-        cron('H */3 * * *')
+        cron('H */6 * * *')
     }
 
     options {
