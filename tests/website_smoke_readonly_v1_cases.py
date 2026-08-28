@@ -599,7 +599,7 @@ class WebsiteSmokeReadonlyV1Runner:
         self._assert_atc_available(prod, "ATC_NOT_AVAILABLE")
         return (
             f"color={selected_color} size={selected_size} color_options={colors} "
-            "size_options={sizes} purchase_area_ready=True atc_locator=True "
+            f"size_options={sizes} purchase_area_ready=True atc_locator=True "
             "atc_visible=True atc_enabled=True"
         )
 

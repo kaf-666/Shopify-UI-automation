@@ -129,5 +129,7 @@ def test_pdp02_only_reads_atc_state_without_clicking() -> None:
     assert "atc_locator=True" in detail
     assert "atc_visible=True" in detail
     assert "atc_enabled=True" in detail
+    assert "size_options=3" in detail
+    assert "size_options={sizes}" not in detail
     assert product.button.click_calls == 0
     assert product.readiness_calls == 1

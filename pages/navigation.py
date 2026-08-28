@@ -31,6 +31,11 @@ from pages.base_page import BasePage
 MODE_DESKTOP = "MEGA_MENU_HOVER"
 MODE_MOBILE = "DRAWER_ACCORDION"
 
+MOBILE_MENU_ROOT_TIMEOUT_MS = 5_000
+MOBILE_MENU_RETRY_ATTEMPTS = 4
+MOBILE_MENU_RETRY_INTERVAL_MS = 250
+MOBILE_MENU_TARGET_WAIT_MS = 4_000
+
 
 class NavigationPage(BasePage):
     """Header 导航页面对象：桌面 mega 菜单与移动抽屉的真实展开 / 点击路径。"""
@@ -98,19 +103,111 @@ class NavigationPage(BasePage):
 
     def _target_top_link(self):
         """返回目标顶层菜单项的直接链接定位器（hover / 点击展开用）。"""
+        if self.viewport == "mobile":
+            return self._mobile_target_top_link()
         handle = self._target_top_li()
         if handle is None:
-            if self.viewport == "mobile":
-                # 移动端菜单可能先只渲染折叠的父级，目标链接要在父级
-                # 展开后才插入 DOM；此时用站点配置的父级入口打开它。
-                try:
-                    selector = self.resolve_selector("mobile_target_parent")["value"]
-                except KeyError:
-                    return None
-                return self.primary_menu().locator(selector).first
             return None
         link = handle.as_element().query_selector(":scope > a")
         return link
+
+    def _mobile_parent_selector(self) -> Optional[str]:
+        """返回移动端目标父级入口 selector；未配置时返回 None。"""
+        try:
+            selector = self.resolve_selector("mobile_target_parent").get("value")
+        except KeyError:
+            return None
+        return str(selector or "") or None
+
+    def _mobile_parent_locator(self):
+        """每次调用都重新解析移动端 accordion 父级入口。"""
+        selector = self._mobile_parent_selector()
+        if not selector:
+            return None
+        return self.primary_menu().locator(selector).first
+
+    def _mobile_target_top_link(self):
+        """使用 Locator 重新解析移动端顶层入口，避免跨 rerender 持有节点。"""
+        target = self.target_link().first
+        if target.count():
+            top_li = target.locator(
+                "xpath=ancestor::li[contains(concat(' ', normalize-space(@class), ' '), ' gm-level-0 ')][1]"
+            )
+            direct_link = top_li.locator(":scope > a").first
+            if direct_link.count():
+                return direct_link
+        # 目标可能在父级展开后才插入 DOM；空 Locator 是合法的暂态，
+        # open_menu() 会在有限窗口内重新查询，而不是立即判定为失败。
+        return self._mobile_parent_locator()
+
+    def _mobile_menu_root_ready(self) -> bool:
+        """移动端 drawer 打开后，确认实际菜单子树已挂载且可见。"""
+        try:
+            root = self.primary_menu()
+            return bool(root.count() and root.is_visible())
+        except Exception:
+            return False
+
+    def _mobile_failure_detail(self, prefix: str, attempts: int) -> str:
+        """生成不含凭证的移动导航状态诊断。"""
+        try:
+            target_path = self.target_path()
+        except Exception:
+            target_path = "<unavailable>"
+
+        parent_selector = self._mobile_parent_selector()
+        parent_match = re.search(
+            r"href(?:[*^$|~])?=\s*['\"]([^'\"]+)['\"]",
+            parent_selector or "",
+        )
+        parent_path = parent_match.group(1) if parent_match else (parent_selector or "<not configured>")
+
+        try:
+            drawer_open = bool(self.is_menu_open())
+        except Exception:
+            drawer_open = False
+
+        try:
+            root = self.primary_menu()
+            root_count = int(root.count())
+            root_visible = bool(root_count and root.is_visible())
+        except Exception:
+            root_count = 0
+            root_visible = False
+
+        try:
+            target_count, target_visible_count = self._locator_counts(self.target_link())
+        except Exception:
+            target_count, target_visible_count = 0, 0
+
+        try:
+            parent_count, parent_visible_count = self._locator_counts(
+                self._mobile_parent_locator()
+            )
+        except Exception:
+            parent_count, parent_visible_count = 0, 0
+
+        return (
+            f"{prefix} (target_path={target_path!r} parent_path={parent_path!r} "
+            f"drawer_open={drawer_open} menu_root_count={root_count} "
+            f"menu_root_visible={root_visible} target_count={target_count} "
+            f"target_visible_count={target_visible_count} parent_count={parent_count} "
+            f"parent_visible_count={parent_visible_count} attempts={attempts})"
+        )
+
+    @staticmethod
+    def _locator_counts(locator) -> tuple[int, int]:
+        """返回 locator 总数与可见数；诊断读取失败时安全降级为 0。"""
+        if locator is None:
+            return 0, 0
+        try:
+            count = int(locator.count())
+            if not count:
+                return 0, 0
+            visible_count = int(locator.filter(visible=True).count())
+            return count, visible_count
+        except Exception:
+            return 0, 0
 
     # ------------------------------------------------------------------ 状态
     def is_menu_open(self) -> bool:
@@ -137,6 +234,19 @@ class NavigationPage(BasePage):
                 return
             self.page.wait_for_timeout(200)
         raise TimeoutError(f"Navigation menu did not open ({self.current_mode()})")
+
+    def _wait_mobile_menu_root(self, timeout_ms: int = MOBILE_MENU_ROOT_TIMEOUT_MS) -> None:
+        """等待 drawer 内实际 mobile menu root 挂载并可见。"""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if self._mobile_menu_root_ready():
+                return
+            remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
+            if remaining_ms:
+                self.page.wait_for_timeout(min(MOBILE_MENU_RETRY_INTERVAL_MS, remaining_ms))
+        raise TimeoutError(
+            self._mobile_failure_detail("mobile menu root not ready", attempts=0)
+        )
 
     # ------------------------------------------------------------------ 打开
     def _target_visible(self) -> bool:
@@ -179,23 +289,38 @@ class NavigationPage(BasePage):
                 raise RuntimeError("mobile menu trigger is not visible")
             trigger.click()
             self._wait_open_state()
-        for _attempt in range(3):
+
+        # Drawer open 只代表外层状态；菜单子树可能还在异步挂载。
+        self._wait_mobile_menu_root()
+        attempts = 0
+        for _attempt in range(MOBILE_MENU_RETRY_ATTEMPTS):
+            attempts += 1
             if self._target_visible():
                 return
             link = self._target_top_link()
-            if link is None:
-                raise RuntimeError("target collection not found in mobile menu")
-            try:
-                link.click()
-            except Exception:
-                # 节点被替换：重新查询后再试
-                continue
-            try:
-                self._wait_target_visible(timeout_ms=4000)
-                return
-            except TimeoutError:
-                continue
-        raise TimeoutError("mobile submenu did not expand after 3 attempts")
+            if link is not None:
+                try:
+                    # Empty / hidden parent locator is also a合法过渡态；下一轮
+                    # 重新查询，覆盖 menu root 已挂载但 parent 尚未出现的竞态。
+                    if link.count() and link.is_visible():
+                        link.click()
+                        self._wait_target_visible(timeout_ms=MOBILE_MENU_TARGET_WAIT_MS)
+                        return
+                except (PlaywrightTimeoutError, TimeoutError):
+                    # Accordion click may not have produced the target yet；bounded
+                    # retry will re-query the current DOM.
+                    pass
+                except Exception:
+                    # DOM rerender around click: discard this locator and re-query.
+                    pass
+            self.page.wait_for_timeout(MOBILE_MENU_RETRY_INTERVAL_MS)
+
+        raise RuntimeError(
+            self._mobile_failure_detail(
+                "target collection not found in mobile menu",
+                attempts=attempts,
+            )
+        )
 
     def close_menu(self) -> None:
         """关闭移动端导航抽屉（桌面端 hover 菜单无关闭控件，跳过）。"""
