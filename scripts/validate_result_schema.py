@@ -1,10 +1,15 @@
-"""校验 Legacy Smoke / Website Smoke V1 的 results.json 契约。
+"""校验 Legacy / Website Smoke V1 / Website Smoke Readonly V1 的 results.json 契约。
 
 默认行为保持向后兼容：无参数时验证 ``artifacts/smoke`` 最近一次结果。
 Website Smoke V1 可使用：
 
     python scripts/validate_result_schema.py --suite website_smoke_v1
     python scripts/validate_result_schema.py --suite website_smoke_v1 --results <path>
+
+Website Smoke Readonly V1 可使用：
+
+    python scripts/validate_result_schema.py --suite website_smoke_readonly_v1
+    python scripts/validate_result_schema.py --suite website_smoke_readonly_v1 --results <path>
 
 该脚本默认离线运行，不要求 Signed Request、代理或真实站点可访问。
 """
@@ -29,6 +34,7 @@ from utils.screenshots import capture_case_failure
 ARTIFACT_ROOTS = {
     "legacy": PROJECT_ROOT / "artifacts" / "smoke",
     "website_smoke_v1": PROJECT_ROOT / "artifacts" / "website-smoke-v1",
+    "website_smoke_readonly_v1": PROJECT_ROOT / "artifacts" / "website-smoke-readonly-v1",
 }
 
 LEGACY_CASE_IDS = [
@@ -41,6 +47,18 @@ WEBSITE_CASE_IDS = [
     "WSMOKE-HOME-01", "WSMOKE-NAV-01", "WSMOKE-PLP-01", "WSMOKE-PDP-01",
     "WSMOKE-CART-01", "WSMOKE-CART-02", "WSMOKE-CART-03", "WSMOKE-CHECKOUT-01",
 ]
+WEBSITE_READONLY_CASE_IDS = (
+    "RSMOKE-DIRECT-01", "RSMOKE-DIRECT-02",
+    "RSMOKE-SEARCH-01", "RSMOKE-SEARCH-02", "RSMOKE-SEARCH-03", "RSMOKE-SEARCH-04",
+    "RSMOKE-HOME-01", "RSMOKE-NAV-01", "RSMOKE-PLP-01", "RSMOKE-PDP-01",
+    "RSMOKE-PDP-02",
+)
+
+SUITE_CASE_IDS = {
+    "legacy": LEGACY_CASE_IDS,
+    "website_smoke_v1": WEBSITE_CASE_IDS,
+    "website_smoke_readonly_v1": WEBSITE_READONLY_CASE_IDS,
+}
 
 RUN_REQUIRED = [
     "schema_version", "run_id", "site", "base_url", "started_at",
@@ -81,6 +99,48 @@ def _summary_ok(summary: dict, label: str) -> bool:
         f"{label} summary arithmetic",
         f"pass={values['pass']} fail={values['fail']} blocked={values['blocked']} total={total}",
     )
+
+
+def _summary_matches_cases(summary: dict, cases: list, label: str) -> bool:
+    """Validate arithmetic and ensure every status count reflects the case list."""
+    ok_all = _summary_ok(summary, label)
+    actual = {
+        "pass": sum(case.get("status") == "PASS" for case in cases),
+        "fail": sum(case.get("status") == "FAIL" for case in cases),
+        "blocked": sum(case.get("status") == "BLOCKED" for case in cases),
+    }
+    for status, count in actual.items():
+        ok_all = check(
+            summary.get(status) == count,
+            f"{label} summary {status} matches cases",
+            f"summary={summary.get(status)} cases={count}",
+        ) and ok_all
+    ok_all = check(
+        summary.get("total") == len(cases),
+        f"{label} summary total matches cases",
+        f"summary={summary.get('total')} cases={len(cases)}",
+    ) and ok_all
+    return ok_all
+
+
+def _validate_readonly_lifecycle(
+    suite: str, viewport: str, cases: list, value: dict, field: str, expected_count: int
+) -> bool:
+    """Readonly completed viewports must retain non-cart lifecycle stubs."""
+    if suite != "website_smoke_readonly_v1" or len(cases) != expected_count:
+        return True
+    expected_detail = "readonly_not_required"
+    ok_all = check(
+        value.get("status") == "PASS",
+        f"{viewport} {field} readonly status",
+        "expected=PASS",
+    )
+    ok_all = check(
+        value.get("detail") == expected_detail,
+        f"{viewport} {field} readonly detail",
+        f"expected={expected_detail}",
+    ) and ok_all
+    return ok_all
 
 
 def _validate_evidence(run_dir: Path, case: dict) -> bool:
@@ -128,14 +188,15 @@ def validate_json(run_dir: Path, suite: str) -> bool:
             ok_all = check(bool(fatal.get("message")), "fatal_error message") and ok_all
             ok_all = check(data.get("overall_status") == "FAIL", "fatal run is FAIL") and ok_all
 
-    expected_ids = LEGACY_CASE_IDS if suite == "legacy" else WEBSITE_CASE_IDS
+    expected_ids = SUITE_CASE_IDS[suite]
     viewports = data.get("viewports", [])
     allowed_viewport_counts = (0, 1, 2) if fatal is not None else (1, 2)
     ok_all = check(len(viewports) in allowed_viewport_counts, "viewports count", str(len(viewports))) and ok_all
-    if suite == "website_smoke_v1":
+    if suite in ("website_smoke_v1", "website_smoke_readonly_v1"):
         ok_all = check(all(v.get("viewport") in ("desktop", "mobile") for v in viewports), "Website viewport names") and ok_all
 
     total_case_count = 0
+    all_cases = []
     for vp in viewports:
         vp_name = vp.get("viewport")
         for field in VIEWPORT_REQUIRED:
@@ -148,9 +209,14 @@ def validate_json(run_dir: Path, suite: str) -> bool:
                 ok_all = check(value.get("status") in VALID_BASE_STATUSES, f"{vp_name} {base_name} status") and ok_all
 
         cases = vp.get("cases", [])
+        all_cases.extend(cases)
         ids = [c.get("case_id") for c in cases]
         total_case_count += len(cases)
-        ok_all = check(ids == expected_ids, f"{vp_name} case IDs complete and ordered", f"count={len(ids)}") and ok_all
+        ok_all = check(
+            tuple(ids) == tuple(expected_ids),
+            f"{vp_name} case IDs complete and ordered",
+            f"count={len(ids)}",
+        ) and ok_all
         ok_all = check(len(ids) == len(set(ids)), f"{vp_name} case IDs unique") and ok_all
         for case in cases:
             for field in CASE_REQUIRED:
@@ -161,11 +227,17 @@ def validate_json(run_dir: Path, suite: str) -> bool:
                     ok_all = check(field in case, f"{case.get('case_id')} field: {field}") and ok_all
             ok_all = check(case.get("status") in VALID_CASE_STATUSES, f"{case.get('case_id')} status value") and ok_all
             ok_all = _validate_evidence(run_dir, case) and ok_all
-        ok_all = _summary_ok(vp.get("summary", {}), str(vp_name)) and ok_all
+        ok_all = _summary_matches_cases(vp.get("summary", {}), cases, str(vp_name)) and ok_all
+        for base_name in ("pre_clean", "cleanup"):
+            value = vp.get(base_name) or {}
+            ok_all = _validate_readonly_lifecycle(
+                suite, str(vp_name), cases, value, base_name, len(expected_ids)
+            ) and ok_all
 
     expected_total = len(expected_ids) * len(viewports)
     ok_all = check(total_case_count == expected_total, "case count matches viewport count", f"{total_case_count}/{expected_total}") and ok_all
     top_summary = data.get("summary", {})
+    ok_all = _summary_matches_cases(top_summary, all_cases, "run") and ok_all
     ok_all = check(top_summary.get("total") == total_case_count, "top summary total matches cases") and ok_all
 
     # Security: values / local paths must not enter artifacts. Header names may
