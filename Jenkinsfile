@@ -10,8 +10,8 @@ pipeline {
     agent any
 
     triggers {
-        // Hashed minute avoids synchronized starts when more sites are added.
-        cron('H */6 * * *')
+        // Hashed schedule avoids synchronized starts when more sites are added.
+        cron('H H * * *')
     }
 
     options {
