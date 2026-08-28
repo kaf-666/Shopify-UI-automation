@@ -1,6 +1,12 @@
 # Shopify UI Automation
 
-Standalone Shopify / DTC UI Automation Framework for Mondressy. The framework uses desktop and mobile browser automation to validate core positive shopping journeys.
+Standalone Shopify / DTC UI Automation Framework for Mondressy. The repository
+provides two independent production smoke contracts:
+
+- **Website Smoke V1 (Full)** validates positive shopping journeys through cart
+  and checkout entry.
+- **Website Smoke Readonly V1** is a high-frequency storefront health check
+  that never writes to the cart and never enters checkout.
 
 ## Runtime
 
@@ -24,7 +30,8 @@ verified `.venv` dependency set used by this repository.
 
 ## Website Smoke V1
 
-Website Smoke V1 covers three primary journeys:
+Website Smoke V1 is the **Full** shopping contract. It covers three positive
+journeys:
 
 1. **Direct PDP Purchase**
 
@@ -38,6 +45,14 @@ Website Smoke V1 covers three primary journeys:
 
    `Home → Navigation → Collection → PDP → Variant → Add To Cart → Cart → Quantity → Checkout`
 
+The Full case contract contains 3 Direct cases, 4 Search cases, and 8 Browse
+cases: **15 cases per viewport** and **30 cases for `both`**.
+
+Full validates legal variant selection, Add To Cart, the cart drawer, cart
+identity/variant consistency, quantity changes, and checkout entry. It does
+not enter payment information, use accelerated payment, submit an order, or
+complete a real payment.
+
 ### Main commands
 
 ```powershell
@@ -46,23 +61,115 @@ Website Smoke V1 covers three primary journeys:
 .\.venv\Scripts\python.exe scripts\run_website_smoke_v1.py --viewport mobile
 ```
 
-### Exit code contract
+The default viewport is `both`.
 
-- `0` = all functional cases PASS
-- `1` = one or more cases FAIL or BLOCKED
-- `2` = CLI or configuration error
+## Website Smoke Readonly V1
 
-This contract is intended for the future Jenkins build result.
+Readonly is a high-frequency, non-cart-writing storefront health check. It is
+an independent Readonly Contract; it is **not** Full running halfway and then
+stopping.
+
+The three Readonly journeys are:
+
+- **Direct:** `Direct PDP → Variant readiness → ATC availability`
+- **Search:** `Home → Search → Results → PDP → Variant readiness → ATC availability`
+- **Browse:** `Home → Navigation → Collection → PDP → Variant readiness → ATC availability`
+
+Selecting a legal Color and Size is allowed. Add To Cart is only inspected for
+existence, visibility, and purchase-area readiness after a valid variant is
+selected. The Add To Cart control is never clicked.
+
+### Readonly case contract
+
+- Direct: 2 cases
+- Search: 4 cases
+- Browse: 5 cases
+- Total: **11 cases per viewport**, **22 cases for `both`**
+
+The stable case IDs are:
+
+```text
+RSMOKE-DIRECT-01
+RSMOKE-DIRECT-02
+RSMOKE-SEARCH-01
+RSMOKE-SEARCH-02
+RSMOKE-SEARCH-03
+RSMOKE-SEARCH-04
+RSMOKE-HOME-01
+RSMOKE-NAV-01
+RSMOKE-PLP-01
+RSMOKE-PDP-01
+RSMOKE-PDP-02
+```
+
+### Readonly mutation safety
+
+Readonly uses a network-layer Mutation Guard. It protects cart mutation
+endpoints for mutation-capable methods (`POST`, `PUT`, `PATCH`, and `DELETE`):
+
+```text
+/cart/add
+/cart/add.js
+/cart/change
+/cart/change.js
+/cart/update
+/cart/update.js
+/cart/clear
+/cart/clear.js
+```
+
+When a matching request is found, the guard records the safe method/path
+diagnostic and calls Playwright `route.abort()`. The request does not reach
+Shopify. Non-matching requests use `route.fallback()`, preserving the
+Signed Request routing chain.
+
+If a mutation occurs during a Readonly case, that case fails with
+`READONLY_MUTATION_VIOLATION` and the run exits with code 1. A normal Readonly
+run reports **Readonly Mutation Violations = 0**.
+
+Readonly does not read or clean the cart and does not navigate to checkout. Its
+result contract keeps structural lifecycle fields for compatibility:
+
+```text
+pre_clean: PASS / readonly_not_required
+cleanup:   PASS / readonly_not_required
+```
+
+These fields do not mean that cart cleanup was called.
+
+### Readonly commands
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_website_smoke_readonly_v1.py --viewport both
+.\.venv\Scripts\python.exe scripts\run_website_smoke_readonly_v1.py --viewport desktop
+.\.venv\Scripts\python.exe scripts\run_website_smoke_readonly_v1.py --viewport mobile
+```
+
+The default viewport is `both`.
+
+## Exit code contract
+
+The exit-code contract is consumed directly by Jenkins.
+
+- `0` = all cases PASS
+- `1` = one or more cases FAIL/BLOCKED, a runtime failure, or a Readonly
+  mutation violation
+- `2` = CLI, viewport, configuration, or artifact-directory error
 
 ## Artifacts
 
-Runs write to:
+Full and Readonly use separate artifact roots:
 
 ```text
-artifacts/<suite>/<run_id>/
+artifacts/website-smoke-v1/<run_id>/
+artifacts/website-smoke-readonly-v1/<run_id>/
 ```
 
-The output may include `results.json` and failure screenshots. `artifacts/` is intentionally excluded from Git; Jenkins will archive runtime artifacts in the integration phase.
+Each run contains `results.json`. Failed cases may also contain a
+viewport-scoped failure screenshot or diagnostics. Full `both` runs may
+additionally contain `stability_record.json`; Readonly does not generate a
+Stability record. Jenkins archives `artifacts/**` after the pipeline stages
+complete.
 
 ## Specialized suites
 
@@ -76,10 +183,30 @@ The output may include `results.json` and failure screenshots. `artifacts/` is i
 | Direct PDP | `scripts/run_direct_pdp_cases.py` |
 | Expanded PLP | `scripts/run_expanded_plp_cases.py` |
 | Website Smoke V1 | `scripts/run_website_smoke_v1.py` |
+| Website Smoke Readonly V1 | `scripts/run_website_smoke_readonly_v1.py` |
 
 All viewport-aware runners accept `--viewport desktop`, `--viewport mobile`, or `--viewport both` where supported.
 
-## Traffic Inventory (Phase 1)
+## Result schema
+
+The formal result suites are independent of business PASS/FAIL:
+
+- `website_smoke_v1`: 15 cases per viewport
+- `website_smoke_readonly_v1`: 11 cases per viewport
+
+Validate the latest local result for either suite with:
+
+```powershell
+python scripts/validate_result_schema.py --suite website_smoke_v1
+python scripts/validate_result_schema.py --suite website_smoke_readonly_v1
+```
+
+Schema validation checks the structure, case ordering, summaries, evidence
+paths, and safe-output markers. It is separate from the business result: for
+example, a results file containing `READONLY_MUTATION_VIOLATION` can be
+structurally valid while the business run is still FAIL.
+
+## Traffic inventory
 
 Website Smoke V1 can attach an optional, read-only BrowserContext network
 observer. It is disabled by default and does not intercept, block, fulfil, or
@@ -105,11 +232,11 @@ Stored URLs contain only scheme, host, a sanitized path, a query-presence flag,
 and a SHA-256 key derived without query values or fragments. Request/response
 bodies, complete headers, cookies, authorization data, Signed Request fields,
 and checkout tokens are never persisted. Classifications and
-`CACHE_REPEAT_CANDIDATE` are analysis labels only; Phase 1 performs no traffic
-reduction. BrowserContext events do not expose the separate APIRequestContext
-calls used by cart pre-clean and backend assertions, so those few requests are
-outside this inventory even though their surrounding runner scope is marked as
-`infrastructure`.
+`CACHE_REPEAT_CANDIDATE` are analysis labels only; the inventory observer does
+not perform traffic reduction. BrowserContext events do not expose the
+separate APIRequestContext calls used by cart pre-clean and backend assertions,
+so those few requests are outside this inventory even though their surrounding
+runner scope is marked as `infrastructure`.
 
 Offline validation:
 
@@ -172,13 +299,16 @@ the exact hosts in `configs/sites/mondressy.yaml`.
 
 ## Checkout safety boundary
 
-Checkout automation validates checkout entry and core checkout state only. It does not:
+Full checkout automation validates checkout entry and core checkout state only.
+It does not:
 
 - enter payment information;
 - complete PayPal or Shop Pay;
 - intentionally trigger 3DS;
 - submit an order; or
 - complete a real payment.
+
+Readonly never enters checkout.
 
 ## Frozen baseline
 
@@ -193,48 +323,88 @@ Checkout automation validates checkout entry and core checkout state only. It do
 
 The frozen scope covers Direct PDP Purchase, Search Purchase, and Browse Purchase across desktop and mobile profiles.
 
-## Jenkins readiness
+## Current verified Jenkins baseline
 
-`Jenkinsfile` is the orchestration entry point. It checks out the repository,
-creates `.venv`, installs `requirements.lock.txt`, installs Chromium and WebKit,
-runs the offline/runtime/site-access gates, executes one Website Smoke V1 target,
-validates the resulting schema, and always archives `artifacts/**`.
+- Date: `2026-08-28`
+- Verified commit: `ead320c7ca28d68b6ef4f7284d2b62f7aa86797b`
 
-The `Secret Leakage Check` stage runs after Website Smoke V1 and scans persisted
-result, metadata, error and artifact output for the actual injected secret
-values; it reports only variable names and safe paths. Jenkins credential
-masking protects the console.
+Readonly Jenkins manual gate:
 
-The Jenkins Agent is expected to provide the OS libraries required by Chromium
-and WebKit. The pipeline only performs the unprivileged project-level browser
-install (`playwright install chromium webkit`); it does not use `sudo`, apt, or
-`--with-deps`.
+- Desktop: `11/11 PASS`
+- Mobile: `11/11 PASS`
+- Combined: `22/22 PASS`
+- Mutation Violations: `0`
 
-The default/final target is `SMOKE_VIEWPORT=both`; `desktop` and `mobile` are
-available for isolated diagnosis. The pipeline binds the three Secret Text
-credentials whose IDs match the Signed Request environment variable names. Proxy
-variables remain optional and are inherited from the Jenkins environment; when
-`SHOPIFY_PROXY_SERVER` is absent, the framework uses direct mode.
+Full Jenkins manual gate:
 
-The pipeline uses Jenkins `catchError` to continue to result validation and
-artifact archiving; the stability collector is observational and cannot change
-the functional result. Python Exit 1/2 still sets the Jenkins build to FAILURE.
-No credential values are stored in this repository.
+- Desktop: `15/15 PASS`
+- Mobile: `15/15 PASS`
+- Combined: `30/30 PASS`
+
+Full Stability executed successfully for the first new Job build; its initial
+status was `COLLECTING` while the stability window was being populated.
+
+## Jenkins
+
+The repository currently has two formal Jenkins Jobs:
+
+| Job | Pipeline | Suite | Cases (`both`) | Schedule | Stability |
+| --- | --- | --- | ---: | --- | --- |
+| Mondressy - Website Smoke - Full | `Jenkinsfile.full` | `website_smoke_v1` | 30 | Daily | YES |
+| Mondressy - Website Smoke - Readonly | `Jenkinsfile.readonly` | `website_smoke_readonly_v1` | 22 | Every 4 hours | NO |
+
+Scheduling is configured at the Jenkins Job level / Jenkins UI, not in the new
+Jenkinsfiles:
+
+- Readonly: `H */4 * * *`
+- Full: `H H * * *`
+
+`Jenkinsfile.full` and `Jenkinsfile.readonly` contain no `triggers`, `cron`, or
+`pollSCM` configuration. The repository retains the original `Jenkinsfile` as
+a historical and rollback reference. The legacy `test` Job uses Script Path
+`Jenkinsfile` and is disabled, so its historical cron cannot create automatic
+builds. There is no duplicate automatic scheduling path.
+
+### Jenkins pipeline stages
+
+Both formal pipelines use the following stages:
+
+```text
+Checkout
+Environment
+Install Dependencies
+Install Playwright Browsers
+Static Validation
+Runtime Contract
+Signed Request / Site Access
+Smoke
+Secret Leakage Check
+Result Validation
+Artifact Archive
+```
+
+The Full pipeline also records Stability after the build. Readonly does not
+execute `record_stability.py` and does not enter Full Stability history. If the
+Smoke stage fails, the pipeline preserves the failure result while allowing
+Secret Leakage Check, Result Validation, and artifact archiving to run.
+
+The Checkout stage records the checked-out workspace SHA. Jenkins credentials
+are bound by credential ID and their values are redacted from logs; no
+credential value is documented here.
 
 ## Stability tracking
 
-Jenkins schedules the complete Website Smoke V1 gate with the hashed cron
-`H */3 * * *`. `disableConcurrentBuilds()` keeps the same Job from running two
-samples at once, and the first `SMOKE_VIEWPORT` choice (`both`) is the default
-used by scheduled builds. The Job currently retains 25 Builds and 25 Build
-artifact sets, which covers the ten-build stability window.
+Stability belongs only to Website Smoke V1 / Full. The Full Job uses the UI
+schedule `H H * * *` (daily). Readonly runs are not included in Full Stability
+history.
 
-After a `both` run, the pipeline archives a safe
+The Full collector consumes the existing `results.json` after a build. Only a
+complete `both` run is eligible for a formal stability sample. It writes a safe
 `artifacts/website-smoke-v1/<run_id>/stability_record.json` and atomically
 updates the ignored runtime cache
-`artifacts/website-smoke-v1/stability-history.jsonl`. The per-Build
+`artifacts/website-smoke-v1/stability-history.jsonl`. The per-build
 `results.json` and `stability_record.json` archives remain the source of truth;
-the JSONL file is only a workspace cache and may be absent after a cleanup.
+the JSONL file is only a workspace cache and may be absent after cleanup.
 
 The stability metadata contract uses the actual checked-out workspace HEAD:
 Jenkins captures `checkout scm`'s `GIT_COMMIT` (with `git rev-parse HEAD` as a
@@ -244,14 +414,23 @@ eligible for a formal baseline. Schema and secret gates are initialized as
 `NOT_RUN`, then set to `PASS` or `FAIL` from their real process exit status;
 the collector never promotes `NOT_RUN` or overwrites `FAIL`.
 
+The summary reports the existing stability statuses:
+
+```text
+COLLECTING
+STABLE
+ACCESS_UNSTABLE
+FLAKY
+UNSTABLE
+MIXED_BASELINE
+```
+
+Stability is observational: it does not change the Website Smoke V1 exit-code
+or Jenkins result contract.
+
 Offline summary and validation commands:
 
 ```powershell
 python scripts/summarize_stability.py --last 10
 python scripts/validate_stability.py
 ```
-
-The summary selects one baseline commit and reports `COLLECTING`, `STABLE`,
-`ACCESS_UNSTABLE`, `FLAKY`, `UNSTABLE`, or `MIXED_BASELINE`. Stability status is
-observational: it does not change the existing Website Smoke V1 exit-code or
-Jenkins result contract.
