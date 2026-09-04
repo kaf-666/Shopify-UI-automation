@@ -1,9 +1,10 @@
 """Website Smoke V1 入口：三条购买 Journey 的日常编排 Smoke。
 
 用法：
-    python scripts/run_website_smoke_v1.py                   # both
+    python scripts/run_website_smoke_v1.py                   # both, settings.default_site
     python scripts/run_website_smoke_v1.py --viewport desktop
     python scripts/run_website_smoke_v1.py --viewport mobile
+    python scripts/run_website_smoke_v1.py --site mondressy --viewport both
     python scripts/run_website_smoke_v1.py --viewport both --traffic-inventory
     python scripts/run_website_smoke_v1.py --viewport both --traffic-inventory \
         --traffic-reduction telemetry-v1
@@ -61,8 +62,9 @@ def run_viewport(
     artifact_dir: Path,
     traffic_inventory: Optional[TrafficInventory] = None,
     traffic_reduction: Optional[TrafficReductionPolicy] = None,
+    site_name: Optional[str] = None,
 ) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
-    runtime = create_browser(viewport)
+    runtime = create_browser(viewport, site_name=site_name)
     try:
         if traffic_reduction is not None:
             # Signed Request was registered by create_browser(). This handler
@@ -196,8 +198,13 @@ def _write_traffic_reduction(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Mondressy Website Smoke V1")
+    parser = argparse.ArgumentParser(description="Website Smoke V1")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
+    parser.add_argument(
+        "--site",
+        default=None,
+        help="site name (default: settings.default_site)",
+    )
     parser.add_argument(
         "--traffic-inventory",
         action="store_true",
@@ -232,7 +239,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         settings = load_settings()
-        site = str(settings.get("default_site") or "")
+        site = args.site or str(settings.get("default_site") or "")
         site_cfg = load_site_config(site)
         base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
     except Exception as exc:
@@ -256,7 +263,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 
-    print("=== Mondressy Website Smoke V1 ===")
+    print(f"=== {site} Website Smoke V1 ===")
     print()
     try:
         for vp in viewports:
@@ -267,6 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 artifact_dir,
                 traffic_inventory=traffic_inventory,
                 traffic_reduction=traffic_reduction,
+                site_name=site,
             )
             runtime_by_viewport[vp] = runtime_meta
             vp_duration = int((time.perf_counter() - vp_started) * 1000)

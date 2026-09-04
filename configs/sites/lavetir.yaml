@@ -1,0 +1,5 @@
+site: lavetir
+base_url: "https://www.lavetir.com"
+
+access:
+  type: none

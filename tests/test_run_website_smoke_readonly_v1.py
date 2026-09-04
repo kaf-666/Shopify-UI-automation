@@ -143,14 +143,15 @@ def test_cli_offline_viewport_contract(
     )
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
 
-    def fake_run_viewport(viewport, artifact_dir):
-        calls.append((viewport, artifact_dir))
+    def fake_run_viewport(viewport, artifact_dir, *, site_name=None):
+        calls.append((viewport, artifact_dir, site_name))
         return _pass_results(), _FakeRunner(), {"viewport": viewport}
 
     monkeypatch.setattr(cli, "run_viewport", fake_run_viewport)
 
     assert cli.main(["--viewport", requested]) == 0
-    assert [viewport for viewport, _artifact_dir in calls] == expected_viewports
+    assert [viewport for viewport, _artifact_dir, _site_name in calls] == expected_viewports
+    assert all(site_name == "mondressy" for _viewport, _artifact_dir, site_name in calls)
 
     result_path = artifact_root / "offline" / "results.json"
     payload = json.loads(result_path.read_text(encoding="utf-8"))
@@ -175,7 +176,7 @@ def test_cli_result_write_failure_is_nonzero(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         cli,
         "run_viewport",
-        lambda _viewport, _artifact_dir: (_pass_results(), _FakeRunner(), {}),
+        lambda _viewport, _artifact_dir, **_kwargs: (_pass_results(), _FakeRunner(), {}),
     )
 
     def fail_write(*_args, **_kwargs):
@@ -200,7 +201,7 @@ def test_cli_out_of_scope_mutation_is_run_fatal(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         cli,
         "run_viewport",
-        lambda _viewport, _artifact_dir: (
+        lambda _viewport, _artifact_dir, **_kwargs: (
             _pass_results(),
             SimpleNamespace(mutation_guard=_OutOfScopeGuard()),
             {},
@@ -214,3 +215,30 @@ def test_cli_out_of_scope_mutation_is_run_fatal(monkeypatch, tmp_path) -> None:
     assert payload["overall_status"] == "FAIL"
     assert payload["fatal_error"]["classification"] == "READONLY_MUTATION_VIOLATION"
     assert "POST /cart/add.js" in payload["fatal_error"]["message"]
+
+
+def test_cli_explicit_site_overrides_default_site(monkeypatch, tmp_path) -> None:
+    artifact_root = tmp_path / "artifacts" / "website-smoke-readonly-v1"
+    loaded_sites = []
+    runtime_sites = []
+
+    monkeypatch.setattr(cli, "ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(cli, "make_run_id", lambda: "explicit-site")
+    monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "settings-site"})
+
+    def fake_load_site_config(site_name):
+        loaded_sites.append(site_name)
+        return {"base_url": "https://mondressy.com"}
+
+    monkeypatch.setattr(cli, "load_site_config", fake_load_site_config)
+    monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
+
+    def fake_run_viewport(_viewport, _artifact_dir, *, site_name=None):
+        runtime_sites.append(site_name)
+        return _pass_results(), _FakeRunner(), {}
+
+    monkeypatch.setattr(cli, "run_viewport", fake_run_viewport)
+
+    assert cli.main(["--site", "mondressy", "--viewport", "desktop"]) == 0
+    assert loaded_sites == ["mondressy"]
+    assert runtime_sites == ["mondressy"]

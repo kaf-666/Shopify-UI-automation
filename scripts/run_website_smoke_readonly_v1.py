@@ -1,10 +1,11 @@
 """Website Smoke Readonly V1 CLI：独立的 11 Case / viewport 入口。
 
 用法：
-    python scripts/run_website_smoke_readonly_v1.py
+    python scripts/run_website_smoke_readonly_v1.py                   # settings.default_site
     python scripts/run_website_smoke_readonly_v1.py --viewport desktop
     python scripts/run_website_smoke_readonly_v1.py --viewport mobile
     python scripts/run_website_smoke_readonly_v1.py --viewport both
+    python scripts/run_website_smoke_readonly_v1.py --site mondressy --viewport both
 
 产物：
     artifacts/website-smoke-readonly-v1/<run_id>/results.json
@@ -50,9 +51,10 @@ READONLY_CASES_PER_VIEWPORT = 11
 def run_viewport(
     viewport: str,
     artifact_dir: Path,
+    site_name: Optional[str] = None,
 ) -> Tuple[List, WebsiteSmokeReadonlyV1Runner, dict]:
     """Run one viewport and always dispose its BrowserRuntime."""
-    runtime = create_browser(viewport)
+    runtime = create_browser(viewport, site_name=site_name)
     guard: Optional[ReadonlyMutationGuard] = None
     try:
         guard = ReadonlyMutationGuard()
@@ -161,8 +163,13 @@ def _fatal_classification(exc: BaseException) -> tuple[str, int]:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Mondressy Website Smoke Readonly V1")
+    parser = argparse.ArgumentParser(description="Website Smoke Readonly V1")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
+    parser.add_argument(
+        "--site",
+        default=None,
+        help="site name (default: settings.default_site)",
+    )
     args = parser.parse_args(argv)
 
     run_id = make_run_id()
@@ -184,7 +191,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         settings = load_settings()
-        site = str(settings.get("default_site") or "")
+        site = args.site or str(settings.get("default_site") or "")
         site_config = load_site_config(site)
         base_url = resolve_url(site_config.get("base_url"), "site.base_url")
     except Exception as exc:
@@ -204,13 +211,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 
-    print("=== Mondressy Website Smoke Readonly V1 ===")
+    print(f"=== {site} Website Smoke Readonly V1 ===")
     print()
     try:
         for viewport in viewports:
             viewport_started_at = iso_now()
             viewport_started = time.perf_counter()
-            results, runner, runtime_meta = run_viewport(viewport, artifact_dir)
+            results, runner, runtime_meta = run_viewport(
+                viewport,
+                artifact_dir,
+                site_name=site,
+            )
             runtime_by_viewport[viewport] = runtime_meta
 
             if len(results) != READONLY_CASES_PER_VIEWPORT:
