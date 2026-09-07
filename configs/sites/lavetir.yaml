@@ -2,7 +2,15 @@ site: lavetir
 base_url: "https://www.lavetir.com"
 
 access:
-  type: none
+  type: signed_request
+  source: env
+  env:
+    Signature: LAVETIR_US_SHOPIFY_SIGNATURE
+    Signature-Input: LAVETIR_US_SHOPIFY_SIGNATURE_INPUT
+    Signature-Agent: LAVETIR_US_SHOPIFY_SIGNATURE_AGENT
+  allowed_hosts:
+    - lavetir.com
+    - www.lavetir.com
 
 # Step 4B verified profile: Home and positive Search.
 # Step 4C adds the GET-only Header Navigation Journey.

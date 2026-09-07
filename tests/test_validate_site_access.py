@@ -146,18 +146,27 @@ def test_signed_request_credential_self_checks_remain_active() -> None:
     assert all("PASS" in line for line in checks)
 
 
-def test_lavetir_minimal_config_uses_no_access_policy(monkeypatch) -> None:
+def test_lavetir_config_uses_signed_request_policy(monkeypatch) -> None:
     config = load_site_config("lavetir")
 
     assert config["site"] == "lavetir"
     assert resolve_url(config["base_url"], "site.base_url") == "https://www.lavetir.com"
 
-    def forbidden_env_lookup(*_args, **_kwargs):
-        raise AssertionError("none policy must not inspect signed-request credentials")
+    monkeypatch.setattr(
+        site_access,
+        "parse_env_headers",
+        lambda **_kwargs: {
+            "Signature": "synthetic-signature",
+            "Signature-Input": 'sig1=("@authority");expires=4102444800',
+            "Signature-Agent": '"https://shopify.com"',
+        },
+    )
 
-    monkeypatch.setattr(site_access, "parse_env_headers", forbidden_env_lookup)
     policy = site_access.create_site_access_policy("lavetir", config)
 
-    assert isinstance(policy, NoAccessPolicy)
-    assert policy.type_name == "none"
-    assert policy.request_headers("https://www.lavetir.com/cart.js") == {}
+    assert isinstance(policy, SignedRequestPolicy)
+    assert policy.type_name == "signed_request"
+    assert policy.request_headers("https://www.lavetir.com/cart.js")["Signature"] == (
+        "synthetic-signature"
+    )
+    assert policy.request_headers("https://example.com/cart.js") == {}

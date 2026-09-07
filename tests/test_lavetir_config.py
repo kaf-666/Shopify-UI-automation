@@ -1,4 +1,4 @@
-"""Offline contract tests for the partial Lavetir Step 4B profile."""
+"""Offline contract tests for the Lavetir site profile."""
 
 from __future__ import annotations
 
@@ -22,6 +22,19 @@ def test_lavetir_profile_contains_current_page_groups() -> None:
         "collection",
         "product",
     }
+
+
+def test_lavetir_signed_request_access_contract() -> None:
+    access = LAVETIR["access"]
+
+    assert access["type"] == "signed_request"
+    assert access["source"] == "env"
+    assert access["env"] == {
+        "Signature": "LAVETIR_US_SHOPIFY_SIGNATURE",
+        "Signature-Input": "LAVETIR_US_SHOPIFY_SIGNATURE_INPUT",
+        "Signature-Agent": "LAVETIR_US_SHOPIFY_SIGNATURE_AGENT",
+    }
+    assert access["allowed_hosts"] == ["lavetir.com", "www.lavetir.com"]
 
 
 def test_lavetir_home_and_search_selector_contract_resolves() -> None:
