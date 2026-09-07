@@ -3,3 +3,118 @@ base_url: "https://www.lavetir.com"
 
 access:
   type: none
+
+# Step 4B verified profile: Home, positive Search, and Header readiness only.
+# Collection, PDP, empty-search strategy, and Navigation Journey remain deferred.
+pages:
+  home:
+    url: /
+
+    selectors:
+      logo:
+        by: css
+        value: "h1.site-header__logo"
+        stability: HIGH
+        notes: Verified visible on Lavetir desktop and mobile during Step 4A probe
+
+      search:
+        desktop:
+          by: css
+          value: "a.js-search-header:not(.medium-up--hide)"
+          stability: HIGH
+          notes: Verified desktop search trigger; excludes the mobile-only duplicate
+        mobile:
+          by: css
+          value: "a.js-search-header.medium-up--hide"
+          stability: HIGH
+          notes: Verified mobile search trigger; excludes the desktop-only duplicate
+
+      cart:
+        by: css
+        value: "a.js-drawer-open-cart"
+        stability: HIGH
+        notes: Verified visible cart trigger on Lavetir desktop and mobile
+
+  search:
+    url: /search
+
+    selectors:
+      container:
+        by: css
+        value: ".site-header__search-container"
+        stability: HIGH
+        notes: Verified inline header search container; is-active marks the open state
+
+      input:
+        by: css
+        value: "input#Search"
+        stability: HIGH
+        notes: Verified type=search name=q input on Lavetir desktop and mobile
+
+      submit:
+        by: css
+        value: "button.btn--search"
+        stability: HIGH
+        notes: Verified search submit control; Enter and button both reach /search
+
+      close:
+        by: css
+        value: "button.btn--close-search"
+        stability: HIGH
+        notes: Verified close control for the inline search container
+
+      predictive_results:
+        by: css
+        value: "#predictive-search"
+        stability: MEDIUM
+        notes: Verified predictive suggestion container after filling dress
+
+      predictive_product:
+        by: css
+        value: "#predictive-search a[href*='/products/']"
+        stability: MEDIUM
+        notes: Verified predictive product links on Lavetir desktop and mobile
+
+      results_grid:
+        by: css
+        value: "#CollectionAjaxContent"
+        stability: HIGH
+        notes: Verified positive /search result container on Lavetir desktop and mobile
+
+      result_card:
+        by: css
+        value: "#CollectionAjaxContent .grid-product"
+        stability: HIGH
+        notes: Verified product card scope inside the positive search result container
+
+      result_link:
+        by: css
+        value: "#CollectionAjaxContent a.grid-product__link"
+        stability: HIGH
+        notes: Verified same-tab product links with /products/ hrefs; product is not clicked
+
+  navigation:
+    selectors:
+      header:
+        by: css
+        value: "header#SiteHeader"
+        stability: HIGH
+        notes: Verified visible site header required by HomePage.wait_core_ready
+
+      desktop_menu:
+        by: css
+        value: '#SiteHeader ul.site-nav.site-navigation.horizontal-mega-menu[role="menubar"]'
+        stability: HIGH
+        notes: Verified Lavetir desktop navigation root for readiness profile only
+
+      desktop_menu_item:
+        by: css
+        value: '#SiteHeader ul.site-nav.site-navigation.horizontal-mega-menu[role="menubar"] > li.buddha-menu-item'
+        stability: HIGH
+        notes: Verified visible desktop top-level items required by HomePage.wait_core_ready
+
+      mobile_trigger:
+        by: css
+        value: 'button.js-drawer-open-nav[aria-controls="NavDrawer"]'
+        stability: HIGH
+        notes: Verified visible mobile menu trigger; drawer interaction is deferred
