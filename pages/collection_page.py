@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from typing import List, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from pages.base_page import BasePage
 from utils.browser import PAGE_NAV_TIMEOUT_MS
@@ -42,6 +42,18 @@ class CollectionPage(BasePage):
         """返回排序下拉控件定位器（select#SortBy）。"""
         return self.locator("sort").first
 
+    @staticmethod
+    def _canonical_product_href(href: str) -> str:
+        """Normalize a Shopify product link while preserving query/fragment."""
+        raw_href = str(href or "").strip()
+        parsed = urlparse(raw_href)
+        marker = "/products/"
+        product_start = parsed.path.find(marker)
+        if product_start < 0 or product_start + len(marker) >= len(parsed.path):
+            raise RuntimeError("Product card link is not a product URL")
+        canonical_path = parsed.path[product_start:]
+        return parsed._replace(path=canonical_path).geturl()
+
     def open_product(self, index: int = 0) -> str:
         """打开第 index 张商品卡并返回最终 URL。"""
         cards = self.product_cards()
@@ -51,7 +63,12 @@ class CollectionPage(BasePage):
         href = cards.nth(index).locator("a.grid-product__link").first.get_attribute("href")
         if not href:
             raise RuntimeError(f"No product link found on card {index}")
-        url = href if href.startswith("http") else self.base_url() + href
+        canonical_href = self._canonical_product_href(href)
+        parsed = urlparse(canonical_href)
+        if parsed.scheme:
+            url = canonical_href
+        else:
+            url = urljoin(f"{self.base_url().rstrip('/')}/", canonical_href)
         self.page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAV_TIMEOUT_MS)
         return self.page.url
 

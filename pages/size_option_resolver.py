@@ -7,8 +7,11 @@ ElementHandle/JSHandle，因而可安全处理 Theme/SPB rerender 与模型切�
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
 SIZE_MODEL_01 = "SIZE_MODEL_01"
@@ -32,6 +35,7 @@ class SizeOption:
     model: str
     custom_size: bool
     locator: Any = field(repr=False, compare=False)
+    control_locator: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -203,14 +207,64 @@ class SizeOptionResolver:
         return ""
 
     @staticmethod
+    def _actionable_control(control) -> bool:
+        """Return whether a real user can operate the option control."""
+        if control is None:
+            return False
+        try:
+            # The radio's disabled state is checked separately.  For labels
+            # and native controls, visibility is the useful actionability
+            # signal and avoids repeated cross-process count/enabled calls.
+            return bool(control.is_visible())
+        except Exception:
+            return False
+
+    def _associated_label(self, radio):
+        """Resolve an explicit or wrapping label for a radio option."""
+        wrapping = radio.locator("xpath=ancestor::label[1]").first
+        if wrapping.count():
+            return wrapping
+        radio_id = str(radio.get_attribute("id") or "").strip()
+        if radio_id:
+            escaped_id = radio_id.replace("\\", "\\\\").replace('"', '\\"')
+            explicit = self.page.locator(f'label[for="{escaped_id}"]').first
+            if explicit.count():
+                return explicit
+        return None
+
+    def _option_control(self, radio, config: dict):
+        """Return the visible control used to operate a Size radio."""
+        config = config if isinstance(config, dict) else {}
+        strategy = str(config.get("control_strategy") or "").strip().lower()
+
+        if strategy in {"radio", "native"}:
+            return radio if self._actionable_control(radio) else None
+
+        if strategy in {"associated_label", "label", "label_for"}:
+            label = self._associated_label(radio)
+            if self._actionable_control(label):
+                return label
+            return radio if self._actionable_control(radio) else None
+
+        # Visible native radio inputs remain the default path.  Hidden radios
+        # fall back to their explicit/wrapping label without requiring a
+        # theme-specific wrapper class.
+        if self._actionable_control(radio):
+            return radio
+        label = self._associated_label(radio)
+        return label if self._actionable_control(label) else None
+
+    @staticmethod
     def _has_disabled_token(locator, tokens: tuple[str, ...]) -> bool:
         if not tokens:
             return False
         classes = set(str(locator.get_attribute("class") or "").lower().split())
         return any(token in classes for token in tokens)
 
-    def _is_available(self, radio, group: SizeGroup, value: str) -> bool:
-        if not value or not radio.is_visible() or radio.is_disabled():
+    def _is_available(
+        self, radio, group: SizeGroup, value: str, control=None
+    ) -> bool:
+        if not value or radio.is_disabled():
             return False
         if self._normalized(radio.get_attribute("aria-disabled")) == "true":
             return False
@@ -221,7 +275,14 @@ class SizeOptionResolver:
             parent, group.disabled_class_tokens
         ):
             return False
-        return True
+        control = control if control is not None else self._option_control(
+            radio, group.config
+        )
+        if not self._actionable_control(control):
+            return False
+        if self._normalized(control.get_attribute("aria-disabled")) == "true":
+            return False
+        return not self._has_disabled_token(control, group.disabled_class_tokens)
 
     def _options_for(self, group: SizeGroup) -> list[SizeOption]:
         options = []
@@ -234,15 +295,19 @@ class SizeOptionResolver:
             normalized_value = value or display_text
             if not normalized_value:
                 continue
+            control = self._option_control(radio, group.config)
             options.append(
                 SizeOption(
                     value=normalized_value,
                     display_text=display_text or normalized_value,
-                    available=self._is_available(radio, group, normalized_value),
+                    available=self._is_available(
+                        radio, group, normalized_value, control
+                    ),
                     selected=radio.is_checked(),
                     model=group.model,
                     custom_size=self._normalized(normalized_value) == custom_marker,
                     locator=radio,
+                    control_locator=control,
                 )
             )
         return options
@@ -273,7 +338,10 @@ class SizeOptionResolver:
                 continue
             if option.custom_size:
                 raise RuntimeError("Automatic Free Custom Size selection is not allowed")
-            option.locator.check()
+            control = option.control_locator
+            if not self._actionable_control(control):
+                raise RuntimeError(f"Size option has no actionable control: {value}")
+            control.click()
             if not option.locator.is_checked():
                 raise RuntimeError(f"Size selection did not take effect: {value}")
             return value
@@ -351,23 +419,37 @@ class SizeOptionResolver:
 
     # --------------------------------------------------------------- 等待
     def wait_for_available(self, timeout_ms: int) -> None:
-        """等待当前模型出现 option；模型未知时只等待候选 Group 注入。"""
-        group = self.detect()
-        if group is not None:
-            wait_selector = str(
-                group.config.get("wait_option_selector") or group.option_selector
-            )
-            group.locator.locator(wait_selector).first.wait_for(
-                state="visible", timeout=timeout_ms
-            )
-            return
-        selectors = [
-            str(config.get("group_selector") or "")
-            for config in self._model_configs()
-            if config.get("group_selector")
-        ]
-        if not selectors:
-            raise SizeGroupNotFoundError("No Size Group detectors configured")
-        self.page.locator(", ".join(selectors)).first.wait_for(
-            state="attached", timeout=timeout_ms
-        )
+        """Wait for an available option, including hidden-radio controls."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            group = self.detect()
+            if group is not None:
+                if self.available_options():
+                    return
+                wait_selector = str(
+                    group.config.get("wait_option_selector") or group.option_selector
+                )
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                try:
+                    group.locator.locator(wait_selector).first.wait_for(
+                        state="attached", timeout=min(remaining_ms, 250)
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+            else:
+                selectors = [
+                    str(config.get("group_selector") or "")
+                    for config in self._model_configs()
+                    if config.get("group_selector")
+                ]
+                if not selectors:
+                    raise SizeGroupNotFoundError("No Size Group detectors configured")
+                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+                try:
+                    self.page.locator(", ".join(selectors)).first.wait_for(
+                        state="attached", timeout=min(remaining_ms, 250)
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+            self.page.wait_for_timeout(50)
+        raise PlaywrightTimeoutError("No actionable Size option became available")

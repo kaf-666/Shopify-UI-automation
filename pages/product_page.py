@@ -39,19 +39,23 @@ class ProductPage(BasePage):
     # ------------------------------------------------------------------- 读取
     def title(self):
         """返回商品标题定位器。"""
-        return self.locator("title").first
+        return self.locator("title").filter(visible=True).first
 
     def get_title(self) -> str:
         """返回商品标题文本。"""
-        return self.title().inner_text().strip()
+        title = self.title()
+        title.wait_for(state="visible", timeout=15_000)
+        return title.inner_text().strip()
 
     def price(self):
         """返回价格定位器。"""
-        return self.locator("price").first
+        return self.locator("price").filter(visible=True).first
 
     def get_price(self) -> str:
         """返回价格文本。"""
-        return self.price().inner_text().strip()
+        price = self.price()
+        price.wait_for(state="visible", timeout=15_000)
+        return price.inner_text().strip()
 
     def gallery(self):
         """返回图集定位器。"""
@@ -105,26 +109,141 @@ class ProductPage(BasePage):
             or ""
         ).strip()
 
-    def available_options(self, options):
-        """返回 [(值, radio)]：可见、可用且值非空的选项。"""
+    @staticmethod
+    def _actionable_control(control) -> bool:
+        """Return whether a real user can operate the associated control."""
+        if control is None:
+            return False
+        try:
+            # Locator construction/count checks are intentionally avoided
+            # here.  Callers already obtained the control from a live radio;
+            # one visibility query is sufficient for labels and native
+            # controls, while radio disabled state is checked separately.
+            return bool(control.is_visible())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _normalized(value: Optional[str]) -> str:
+        return " ".join(str(value or "").split()).strip().lower()
+
+    @classmethod
+    def _has_disabled_token(cls, locator, tokens: tuple[str, ...]) -> bool:
+        if locator is None or not tokens:
+            return False
+        classes = set(cls._normalized(locator.get_attribute("class")).split())
+        return any(token in classes for token in tokens)
+
+    def _associated_label(self, radio):
+        """Resolve an explicit or wrapping label for a radio option."""
+        wrapping = radio.locator("xpath=ancestor::label[1]").first
+        if wrapping.count():
+            return wrapping
+        radio_id = str(radio.get_attribute("id") or "").strip()
+        if radio_id:
+            escaped_id = radio_id.replace("\\", "\\\\").replace('"', '\\"')
+            explicit = self.page.locator(f'label[for="{escaped_id}"]').first
+            if explicit.count():
+                return explicit
+        return None
+
+    def _variant_input_control(self, radio):
+        """Keep the legacy variant-input click as an optional fallback."""
+        return radio.locator(
+            "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), "
+            "' variant-input ')][1]"
+        ).first
+
+    def _option_control(self, radio, config: Optional[dict] = None):
+        """Return the real user-facing control for a radio option.
+
+        Custom Shopify option widgets often hide the semantic radio and bind
+        the interaction to a visible label.  The strategy is deliberately
+        small and configuration-driven; visible native radios remain fully
+        supported, while ``variant-input`` is only a backwards-compatible
+        fallback for existing themes.
+        """
+        config = config if isinstance(config, dict) else {}
+        strategy = str(
+            config.get("strategy") or config.get("control_strategy") or ""
+        ).strip().lower()
+
+        if strategy in {"radio", "native"}:
+            return radio if self._actionable_control(radio) else None
+
+        if strategy in {"variant_input", "variant-container"}:
+            control = self._variant_input_control(radio)
+            return control if self._actionable_control(control) else None
+
+        if strategy in {"associated_label", "label", "label_for"}:
+            label = self._associated_label(radio)
+            if self._actionable_control(label):
+                return label
+            # A configured label strategy must not make a visible native
+            # radio unusable when a theme omits the label association.
+            return radio if self._actionable_control(radio) else None
+
+        # Default behavior preserves the existing visible-radio path and its
+        # variant-input fallback, then supports hidden radios generically.
+        if self._actionable_control(radio):
+            variant = self._variant_input_control(radio)
+            if self._actionable_control(variant):
+                return variant
+            return radio
+        label = self._associated_label(radio)
+        return label if self._actionable_control(label) else None
+
+    def _color_option_control_config(self) -> dict:
+        config = self.page_config().get("color_option_control") or {}
+        return config if isinstance(config, dict) else {}
+
+    def _color_disabled_class_tokens(self) -> tuple[str, ...]:
+        config = self._color_option_control_config()
+        configured = config.get("disabled_class_tokens")
+        values = configured or ("disabled", "sold-out", "unavailable")
+        return tuple(
+            self._normalized(token) for token in values if self._normalized(token)
+        )
+
+    def available_options(self, options, control_config: Optional[dict] = None):
+        """Return ``[(value, radio)]`` for semantically available options.
+
+        A hidden radio is still available when its associated visible control
+        is actionable.  The radio's disabled state remains authoritative.
+        """
         result = []
         total = options.count()
+        disabled_tokens = self._color_disabled_class_tokens()
         for i in range(total):
             radio = options.nth(i)
             try:
-                if not radio.is_visible() or radio.is_disabled():
+                if radio.is_disabled():
                     continue
             except Exception:
                 continue
             value = self._radio_value(radio)
-            if not value:
+            if not value or self._normalized(radio.get_attribute("aria-disabled")) == "true":
+                continue
+            if self._has_disabled_token(radio, disabled_tokens):
+                continue
+            parent = radio.locator("xpath=parent::*[1]").first
+            if parent.count() and self._has_disabled_token(parent, disabled_tokens):
+                continue
+            control = self._option_control(radio, control_config)
+            if not control or self._normalized(control.get_attribute("aria-disabled")) == "true":
+                continue
+            if self._has_disabled_token(control, disabled_tokens):
                 continue
             result.append((value, radio))
         return result
 
     def available_color_count(self) -> int:
-        """返回当前可见、可用且有值的颜色选项数。"""
-        return len(self.available_options(self.color_options()))
+        """Return the number of available color options."""
+        return len(
+            self.available_options(
+                self.color_options(), self._color_option_control_config()
+            )
+        )
 
     def available_size_count(self) -> int:
         """返回可用尺码数；兼容计入 Free Custom Size 的历史语义。"""
@@ -181,13 +300,29 @@ class ProductPage(BasePage):
         elif not snapshot["title_visible"]:
             self.title().wait_for(state="visible", timeout=timeout_ms)
         elif snapshot["color_count"] == 0:
-            self.color_options().first.wait_for(state="visible", timeout=timeout_ms)
+            self._wait_for_color_available(timeout_ms)
         elif snapshot["size_count"] == 0:
             self._size_resolver().wait_for_available(timeout_ms)
         elif not snapshot["atc_visible"]:
             self.add_to_cart_button().wait_for(state="visible", timeout=timeout_ms)
         elif not snapshot["atc_enabled"]:
             expect(self.add_to_cart_button()).to_be_enabled(timeout=timeout_ms)
+
+    def _wait_for_color_available(self, timeout_ms: int) -> None:
+        """Wait for a semantic color option, including hidden-radio widgets."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if self.available_color_count() > 0:
+                return
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                self.color_options().first.wait_for(
+                    state="attached", timeout=min(remaining_ms, 250)
+                )
+            except PlaywrightTimeoutError:
+                pass
+            self.page.wait_for_timeout(50)
+        raise PlaywrightTimeoutError("No actionable color option became available")
 
     def wait_purchase_ready(self, timeout_ms: int = 15_000) -> tuple[int, int, bool]:
         """等待购买区业务条件在一个总 timeout 内同时成立。
@@ -230,14 +365,18 @@ class ProductPage(BasePage):
 
     def _find_option(self, options, value: str, missing_msg: str):
         """按值查找可用选项，找不到抛出明确异常。"""
-        for v, radio in self.available_options(options):
+        for v, radio in self.available_options(
+            options, self._color_option_control_config()
+        ):
             if v == value:
                 return radio
         raise LookupError(missing_msg)
 
     def first_available_color(self) -> str:
         """返回第一个可见可用且当前未选中的颜色选项值。"""
-        for v, radio in self.available_options(self.color_options()):
+        for v, radio in self.available_options(
+            self.color_options(), self._color_option_control_config()
+        ):
             if not radio.is_checked():
                 return v
         raise RuntimeError("No available color option to select")
@@ -253,8 +392,8 @@ class ProductPage(BasePage):
         """选择颜色。
 
         未指定 value 时自动选择第一个可见可用且未选中的颜色。
-        主题把点击绑定在包裹 radio 的 div.variant-input 容器上
-        （radio 被覆盖拦截指针事件），因此走真实容器点击，
+        主题可以把点击绑定在 radio 的可见关联控件上；隐藏 radio
+        不直接执行 check/JS click，而是走真实用户控件点击，
         再用 radio.checked 验证选择生效。
         """
         if value is None:
@@ -262,16 +401,10 @@ class ProductPage(BasePage):
         radio = self._find_option(
             self.color_options(), value, f"Color option not found: {value}"
         )
-        container = radio.evaluate_handle(
-            """el => {
-                let p = el.parentElement;
-                while (p && !(p.classList && p.classList.contains('variant-input'))) {
-                    p = p.parentElement;
-                }
-                return p || el.parentElement;
-            }"""
-        )
-        container.click()
+        control = self._option_control(radio, self._color_option_control_config())
+        if control is None:
+            raise RuntimeError(f"Color option has no actionable control: {value}")
+        control.click()
         if not radio.is_checked():
             raise RuntimeError(f"Color selection did not take effect: {value}")
         return value

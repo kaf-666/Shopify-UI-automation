@@ -12,10 +12,16 @@ from utils.config import resolve_url
 LAVETIR = load_site_config("lavetir")
 
 
-def test_lavetir_profile_contains_only_step4b_page_groups() -> None:
+def test_lavetir_profile_contains_current_page_groups() -> None:
     assert LAVETIR["site"] == "lavetir"
     assert resolve_url(LAVETIR["base_url"], "site.base_url") == "https://www.lavetir.com"
-    assert set(LAVETIR["pages"]) == {"home", "search", "navigation"}
+    assert set(LAVETIR["pages"]) == {
+        "home",
+        "search",
+        "navigation",
+        "collection",
+        "product",
+    }
 
 
 def test_lavetir_home_and_search_selector_contract_resolves() -> None:
@@ -97,5 +103,39 @@ def test_lavetir_navigation_has_full_step4c_journey_contract() -> None:
 
 def test_lavetir_profile_does_not_require_deferred_page_groups() -> None:
     pages = LAVETIR["pages"]
-    for deferred in ("collection", "product", "cart", "checkout"):
+    for deferred in ("cart", "checkout"):
         assert deferred not in pages
+
+
+def test_lavetir_collection_and_product_readonly_contract() -> None:
+    collection = LAVETIR["pages"]["collection"]
+    assert collection["url"] == "/collections/mother-of-the-bride-dresses"
+    assert collection["selectors"]["product_grid"]["value"] == "#CollectionAjaxContent"
+    assert (
+        collection["selectors"]["product_card"]["value"]
+        == "#CollectionAjaxContent .grid-product"
+    )
+
+    product = LAVETIR["pages"]["product"]
+    assert product["url"] == (
+        "/products/a-line-princess-chiffon-scoop-3-4-sleeves-"
+        "mother-of-the-bride-dresses-with-appliques-ruffles-12010206a1"
+    )
+    selectors = product["selectors"]
+    assert selectors["purchase_area"]["value"] == "form.product-single__form"
+    assert selectors["title"]["value"] == ".product-single__title"
+    assert selectors["price"]["value"] == ".product__price"
+    assert selectors["gallery"]["value"] == ".product-slideshow"
+    assert selectors["color"]["value"] == ".shopify-color-selector"
+    assert (
+        selectors["add_to_cart"]["value"]
+        == 'form.product-single__form button[name="add"]'
+    )
+    assert product["color_option_control"] == {"strategy": "associated_label"}
+
+    models = product["size_resolver"]["models"]
+    assert len(models) == 1
+    assert models[0]["id"] == "SIZE_MODEL_04"
+    assert models[0]["group_selector"] == ".shopify-size-selector"
+    assert models[0]["control_strategy"] == "associated_label"
+    assert models[0]["custom_size_value"] == "Custom Size (Inch)"

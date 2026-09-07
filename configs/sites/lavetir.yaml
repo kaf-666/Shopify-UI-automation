@@ -171,3 +171,89 @@ pages:
         value: 'a[href="/collections/mother-of-the-bride-dresses"][role="menuitem"]:not(.site-nav__link--underline):not(.mobile-nav__link)'
         stability: HIGH
         notes: Verified child target link; excludes the visible desktop/mobile top-level entries and selects the item revealed by the configured parent interaction
+
+  collection:
+    url: /collections/mother-of-the-bride-dresses
+
+    selectors:
+      product_grid:
+        by: css
+        value: "#CollectionAjaxContent"
+        stability: HIGH
+        notes: Main Lavetir collection content root; excludes header/footer recommendation grids
+
+      product_card:
+        by: css
+        value: "#CollectionAjaxContent .grid-product"
+        stability: HIGH
+        notes: Product cards scoped to the main collection content root
+
+  product:
+    url: /products/a-line-princess-chiffon-scoop-3-4-sleeves-mother-of-the-bride-dresses-with-appliques-ruffles-12010206a1
+
+    color_option_control:
+      strategy: associated_label
+
+    size_resolver:
+      models:
+        - id: SIZE_MODEL_04
+          name: LAVETIR_ASSOCIATED_LABEL_RADIO_GROUP
+          group_selector: ".shopify-size-selector"
+          option_selector: "input[type=\"radio\"][name=\"properties[Size]\"]"
+          wait_option_selector: "input[type=\"radio\"][name=\"properties[Size]\"]"
+          control_strategy: associated_label
+          required_attributes: {}
+          disabled_class_tokens:
+            - disabled
+            - sold-out
+            - unavailable
+          custom_size_value: Custom Size (Inch)
+
+      custom_measurement:
+        id: SIZE_MODEL_03
+        name: LAVETIR_CUSTOM_MEASUREMENT_WIDGET
+        trigger_value: Custom Size (Inch)
+        field_selector: "input[type=\"text\"]"
+        field_names:
+          - Bust
+          - Waist
+          - Hips
+          - Hollow to Floor
+          - Height
+
+    selectors:
+      purchase_area:
+        by: css
+        value: "form.product-single__form"
+        stability: HIGH
+        notes: Main product purchase form
+
+      title:
+        by: css
+        value: ".product-single__title"
+        stability: HIGH
+        notes: Product title, count=1 on verified Direct/Search/Browse PDPs
+
+      price:
+        by: css
+        value: ".product__price"
+        stability: HIGH
+        notes: Verified readable price; selector currently matches two visible theme nodes and ProductPage uses first
+
+      gallery:
+        by: css
+        value: ".product-slideshow"
+        stability: MEDIUM
+        notes: Main product slideshow container
+
+      color:
+        by: css
+        value: ".shopify-color-selector"
+        stability: HIGH
+        notes: Color group with hidden radios and visible associated labels
+
+      add_to_cart:
+        by: css
+        value: "form.product-single__form button[name=\"add\"]"
+        stability: HIGH
+        notes: Main product ATC only; scoped to product-single form and excludes recommendation/sticky buttons
