@@ -6,6 +6,103 @@ import pytest
 
 from pages.navigation import NavigationPage
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
+
+
+SYNTHETIC_HTML = """
+<style>
+  #drawer { display: none; }
+  #drawer.open { display: block; }
+  [hidden] { display: none !important; }
+</style>
+<header id="site-header">
+  <button id="drawer-trigger" type="button">Menu</button>
+  <nav id="desktop-menu">
+    <ul>
+      <li class="top-item">
+        <a class="parent-toggle" href="/collections/parent">Parent</a>
+        <ul class="submenu">
+          <li><a class="target-link" href="/collections/target" hidden>Target</a></li>
+        </ul>
+      </li>
+    </ul>
+  </nav>
+  <aside id="drawer" class="drawer">
+    <button class="close" type="button">Close</button>
+    <ul class="menu-root">
+      <li class="mobile-item">
+        <a class="parent-toggle" href="/collections/parent">Parent</a>
+        <div class="mobile-panel">
+          <a class="target-link" href="/collections/target" hidden>Target</a>
+        </div>
+      </li>
+    </ul>
+  </aside>
+</header>
+<script>
+  const desktopParent = document.querySelector("#desktop-menu .parent-toggle");
+  const desktopTarget = document.querySelector("#desktop-menu .target-link");
+  desktopParent.addEventListener("mouseenter", () => { desktopTarget.hidden = false; });
+
+  const drawer = document.querySelector("#drawer");
+  document.querySelector("#drawer-trigger").addEventListener("click", () => {
+    drawer.classList.add("open");
+  });
+  document.querySelector("#drawer .close").addEventListener("click", () => {
+    drawer.classList.remove("open");
+  });
+  const mobileParent = document.querySelector("#drawer .parent-toggle");
+  const mobileTarget = document.querySelector("#drawer .target-link");
+  mobileParent.addEventListener("click", (event) => {
+    event.preventDefault();
+    mobileTarget.hidden = false;
+  });
+</script>
+"""
+
+
+def _synthetic_config() -> dict:
+    return {
+        "site": "synthetic",
+        "base_url": "https://synthetic.test",
+        "pages": {
+            "navigation": {
+                "smoke_collection": {
+                    "name": "Target Collection",
+                    "path": "/collections/target",
+                },
+                "selectors": {
+                    "header": {"by": "css", "value": "#site-header"},
+                    "desktop_menu": {"by": "css", "value": "#desktop-menu > ul"},
+                    "desktop_menu_item": {
+                        "by": "css",
+                        "value": "#desktop-menu > ul > li.top-item",
+                    },
+                    "desktop_target_parent": {
+                        "by": "css",
+                        "value": "#desktop-menu > ul > li.top-item > a.parent-toggle",
+                    },
+                    "mobile_trigger": {"by": "css", "value": "#drawer-trigger"},
+                    "mobile_drawer": {"by": "css", "value": "#drawer"},
+                    "mobile_drawer_open": {"by": "css", "value": "#drawer.open"},
+                    "mobile_menu": {"by": "css", "value": "#drawer > ul.menu-root"},
+                    "mobile_menu_item": {
+                        "by": "css",
+                        "value": "#drawer > ul.menu-root > li.mobile-item",
+                    },
+                    "mobile_close": {"by": "css", "value": "#drawer .close"},
+                    "mobile_target_parent": {
+                        "by": "css",
+                        "value": "a.parent-toggle[href='/collections/parent']",
+                    },
+                    "target_collection": {
+                        "by": "css",
+                        "value": "a.target-link[href='/collections/target']",
+                    },
+                },
+            }
+        },
+    }
 
 
 class _FakePage:
@@ -130,7 +227,7 @@ def test_mobile_parent_locator_can_appear_on_later_attempt(monkeypatch) -> None:
 def test_mobile_permanently_missing_target_fails_with_bounded_diagnostics(monkeypatch) -> None:
     nav, _trigger = _mobile_nav(monkeypatch, menu_open=True)
     nav.target_path = lambda: "/collections/wedding-guest-dresses"
-    nav._mobile_parent_selector = lambda: "a.gm-target[href*='/collections/new-collection']"
+    nav._mobile_parent_selector = lambda: "a.menu-target[href*='/collections/new-collection']"
     target = _FakeLocator(count=0, visible=False)
     parent = _FakeLocator(count=0, visible=False)
     root = _FakeLocator(child=parent)
@@ -200,3 +297,73 @@ def test_mobile_menu_root_waits_for_mount_and_visibility() -> None:
     nav._wait_mobile_menu_root(timeout_ms=1_000)
 
     assert nav.page.waits
+
+
+def test_synthetic_navigation_supports_distinct_desktop_and_mobile_topologies() -> None:
+    """Use neutral HTML to exercise configured hover, accordion, and close paths."""
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+    try:
+        config = _synthetic_config()
+
+        desktop_page = browser.new_page()
+        desktop_page.set_content(SYNTHETIC_HTML)
+        desktop = NavigationPage(desktop_page, config, "desktop")
+        desktop.wait_ready()
+        assert desktop.current_mode() == "MEGA_MENU_HOVER"
+        assert not desktop.is_menu_open()
+        desktop.open_menu()
+        assert desktop.is_menu_open()
+        assert desktop.target_link().filter(visible=True).count() == 1
+
+        mobile_page = browser.new_page()
+        mobile_page.set_content(SYNTHETIC_HTML)
+        mobile = NavigationPage(mobile_page, config, "mobile")
+        mobile.wait_ready()
+        assert mobile.current_mode() == "DRAWER_ACCORDION"
+        assert not mobile.is_menu_open()
+        mobile.open_menu()
+        assert mobile.is_menu_open()
+        assert mobile.target_link().filter(visible=True).count() == 1
+        mobile.close_menu()
+        assert not mobile.is_menu_open()
+        assert mobile_page.locator("#drawer.open").count() == 0
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_synthetic_mobile_failure_keeps_bounded_diagnostics() -> None:
+    """A neutral DOM with a mismatched target reports state without unbounded retries."""
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+    try:
+        page = browser.new_page()
+        page.set_content(SYNTHETIC_HTML.replace('class="drawer"', 'class="drawer open"'))
+        config = _synthetic_config()
+        config["pages"]["navigation"]["selectors"]["target_collection"] = {
+            "by": "css",
+            "value": "a.target-link[href='/collections/missing']",
+        }
+        nav = NavigationPage(page, config, "mobile")
+
+        def fail_fast(_timeout_ms: int) -> None:
+            raise PlaywrightTimeoutError("synthetic target remains hidden")
+
+        nav._wait_target_visible = fail_fast
+        with pytest.raises(RuntimeError) as exc_info:
+            nav.open_menu()
+
+        message = str(exc_info.value)
+        assert "target collection not found in mobile menu" in message
+        assert "target_path='/collections/target'" in message
+        assert "parent_path='/collections/parent'" in message
+        assert "drawer_open=True" in message
+        assert "menu_root_count=1" in message
+        assert "menu_root_visible=True" in message
+        assert "target_count=0" in message
+        assert "parent_count=1" in message
+        assert "attempts=4" in message
+    finally:
+        browser.close()
+        playwright.stop()

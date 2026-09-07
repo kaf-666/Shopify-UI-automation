@@ -4,8 +4,8 @@ base_url: "https://www.lavetir.com"
 access:
   type: none
 
-# Step 4B verified profile: Home, positive Search, and Header readiness only.
-# Collection, PDP, empty-search strategy, and Navigation Journey remain deferred.
+# Step 4B verified profile: Home and positive Search.
+# Step 4C adds the GET-only Header Navigation Journey.
 pages:
   home:
     url: /
@@ -94,6 +94,11 @@ pages:
         notes: Verified same-tab product links with /products/ hrefs; product is not clicked
 
   navigation:
+    smoke_collection:
+      name: Mother of the Bride Dresses
+      path: /collections/mother-of-the-bride-dresses
+      notes: Verified collection target in Lavetir desktop/mobile menus; GET-only navigation target
+
     selectors:
       header:
         by: css
@@ -105,16 +110,64 @@ pages:
         by: css
         value: '#SiteHeader ul.site-nav.site-navigation.horizontal-mega-menu[role="menubar"]'
         stability: HIGH
-        notes: Verified Lavetir desktop navigation root for readiness profile only
+        notes: Verified Lavetir desktop navigation root for the hover journey
 
       desktop_menu_item:
         by: css
         value: '#SiteHeader ul.site-nav.site-navigation.horizontal-mega-menu[role="menubar"] > li.buddha-menu-item'
         stability: HIGH
-        notes: Verified visible desktop top-level items required by HomePage.wait_core_ready
+        notes: Verified visible desktop top-level items
+
+      desktop_target_parent:
+        by: css
+        value: 'a[href="/collections/mother-of-the-bride-dresses"][role="menuitem"].site-nav__link--underline'
+        stability: HIGH
+        notes: Verified visible Mother top-level link used as the desktop hover parent
 
       mobile_trigger:
         by: css
         value: 'button.js-drawer-open-nav[aria-controls="NavDrawer"]'
         stability: HIGH
-        notes: Verified visible mobile menu trigger; drawer interaction is deferred
+        notes: Verified visible mobile menu trigger
+
+      mobile_drawer:
+        by: css
+        value: "#NavDrawer"
+        stability: HIGH
+        notes: Verified Lavetir mobile navigation drawer root
+
+      mobile_drawer_open:
+        by: css
+        value: "#NavDrawer.drawer--is-open"
+        stability: HIGH
+        notes: Verified after normal trigger click; configured drawer open-state locator
+
+      mobile_menu:
+        by: css
+        value: '#NavDrawer ul.mobile-nav.mobile-nav--heading-style[role="menubar"]'
+        stability: HIGH
+        notes: Verified visible mobile menu root after the drawer opens
+
+      mobile_menu_item:
+        by: css
+        value: '#NavDrawer ul.mobile-nav.mobile-nav--heading-style[role="menubar"] > li.buddha-menu-item'
+        stability: HIGH
+        notes: Verified visible mobile top-level menu items
+
+      mobile_close:
+        by: css
+        value: "#NavDrawer button.drawer__close-button.js-drawer-close"
+        stability: HIGH
+        notes: Verified mobile drawer close control
+
+      mobile_target_parent:
+        by: css
+        value: 'a[href="/collections/mother-of-the-bride-dresses"][aria-expanded] > span.toggle-menu-btn'
+        stability: HIGH
+        notes: Verified visible accordion toggle; the direct parent link navigates instead of expanding
+
+      target_collection:
+        by: css
+        value: 'a[href="/collections/mother-of-the-bride-dresses"][role="menuitem"]:not(.site-nav__link--underline):not(.mobile-nav__link)'
+        stability: HIGH
+        notes: Verified child target link; excludes the visible desktop/mobile top-level entries and selects the item revealed by the configured parent interaction

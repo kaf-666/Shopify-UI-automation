@@ -55,20 +55,37 @@ def test_lavetir_search_trigger_is_resolved_per_viewport() -> None:
     )
 
 
-def test_lavetir_navigation_has_readiness_selectors_only() -> None:
+def test_lavetir_navigation_has_full_step4c_journey_contract() -> None:
     navigation = LAVETIR["pages"]["navigation"]
     selectors = navigation["selectors"]
-    required = {"header", "desktop_menu", "desktop_menu_item", "mobile_trigger"}
-    forbidden_journey = {
-        "desktop_submenu",
-        "target_collection",
-        "mobile_target_parent",
+    required = {
+        "header",
+        "desktop_menu",
+        "desktop_menu_item",
+        "desktop_target_parent",
+        "mobile_trigger",
+        "mobile_drawer",
+        "mobile_drawer_open",
         "mobile_menu",
+        "mobile_menu_item",
         "mobile_close",
+        "mobile_target_parent",
+        "target_collection",
     }
 
     assert required.issubset(selectors)
-    assert not forbidden_journey.intersection(selectors)
+    assert "desktop_submenu" not in selectors
+    assert navigation["smoke_collection"] == {
+        "name": "Mother of the Bride Dresses",
+        "path": "/collections/mother-of-the-bride-dresses",
+        "notes": "Verified collection target in Lavetir desktop/mobile menus; GET-only navigation target",
+    }
+
+    for name in required:
+        page = NavigationPage(None, LAVETIR, "desktop")
+        selector = page.resolve_selector(name)
+        assert selector["by"] == "css"
+        assert selector["value"]
 
     for viewport, required_name in (("desktop", "desktop_menu_item"), ("mobile", "mobile_trigger")):
         page = NavigationPage(None, LAVETIR, viewport)

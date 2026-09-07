@@ -1,19 +1,13 @@
-"""Header / Navigation 页面对象（选择器驱动，无硬编码定位符）。
+"""Header / Navigation 页面对象（选择器和拓扑均由站点配置提供）。
 
-导航模型（真实探测）：
+导航交互模型保持稳定：
     Desktop : MEGA_MENU_HOVER
-        桌面端主导航为 Gm mega menu（ul.site-nav.gm-menu），
-        顶层项含 mega 子菜单；真实 hover 顶层项展开子菜单。
+        hover 配置的目标父级，等待配置的目标链接变为可见。
     Mobile  : DRAWER_ACCORDION
-        Brooklyn #NavDrawer 抽屉内嵌 Gm 移动菜单，
-        点击汉堡打开抽屉，点击顶层项展开子菜单（click_toggle）。
+        点击配置的抽屉触发器，再点击配置的目标父级展开菜单。
 
-打开状态判定：
-    Desktop 子菜单：gm-submenu 容器可见。
-    Mobile 抽屉：drawer--is-open 类（过渡期 is_visible 会误报，按 class 判定）。
-
-目标 Collection 按 site config 中的稳定 pathname / selector 定位，
-不依赖文本层级或 nth-child。
+打开状态和目标链接都通过 site config 解析，页面对象不假设主题的
+class、DOM ancestor 或子菜单命名。
 """
 
 from __future__ import annotations
@@ -38,7 +32,7 @@ MOBILE_MENU_TARGET_WAIT_MS = 4_000
 
 
 class NavigationPage(BasePage):
-    """Header 导航页面对象：桌面 mega 菜单与移动抽屉的真实展开 / 点击路径。"""
+    """Header 导航页面对象：双端菜单的真实展开与 GET-only 点击路径。"""
 
     PAGE_NAME = "navigation"
 
@@ -48,13 +42,13 @@ class NavigationPage(BasePage):
         return MODE_DESKTOP if self.viewport == "desktop" else MODE_MOBILE
 
     def _menu_scope(self) -> str:
-        """返回当前端菜单作用域 CSS（目标链接定位 / 顶层项解析共用）。"""
+        """返回当前端菜单作用域 CSS（目标链接定位共用）。"""
         name = "desktop_menu" if self.viewport == "desktop" else "mobile_menu"
         return str(self.resolve_selector(name)["value"])
 
     # ------------------------------------------------------------------ 控件
     def header(self):
-        """返回站点头部定位器（header#SiteHeader）。"""
+        """返回配置的站点头部定位器。"""
         return self.locator("header").first
 
     def menu_trigger(self):
@@ -69,7 +63,7 @@ class NavigationPage(BasePage):
         return self.locator(name).first
 
     def primary_items(self):
-        """返回当前端顶层菜单项（li.gm-item）定位器集合。"""
+        """返回当前端配置的顶层菜单项定位器集合。"""
         name = "desktop_menu_item" if self.viewport == "desktop" else "mobile_menu_item"
         return self.locator(name)
 
@@ -86,30 +80,11 @@ class NavigationPage(BasePage):
         """返回目标 Collection 链接定位器（按稳定 pathname 匹配）。"""
         return self.primary_menu().locator(self.resolve_selector("target_collection")["value"])
 
-    def _target_top_li(self):
-        """返回目标链接所在顶层菜单项的 JSHandle；找不到返回 None。"""
-        target = self.target_link().first
-        if target.count() == 0:
-            return None
-        return target.evaluate_handle(
-            """(a) => {
-                let n = a;
-                while (n && !(n.classList && n.classList.contains('gm-level-0'))) {
-                    n = n.parentElement;
-                }
-                return n;
-            }"""
-        )
-
     def _target_top_link(self):
-        """返回目标顶层菜单项的直接链接定位器（hover / 点击展开用）。"""
+        """返回配置的目标父级入口（hover / 点击展开用）。"""
         if self.viewport == "mobile":
-            return self._mobile_target_top_link()
-        handle = self._target_top_li()
-        if handle is None:
-            return None
-        link = handle.as_element().query_selector(":scope > a")
-        return link
+            return self._mobile_parent_locator()
+        return self.locator("desktop_target_parent").first
 
     def _mobile_parent_selector(self) -> Optional[str]:
         """返回移动端目标父级入口 selector；未配置时返回 None。"""
@@ -125,20 +100,6 @@ class NavigationPage(BasePage):
         if not selector:
             return None
         return self.primary_menu().locator(selector).first
-
-    def _mobile_target_top_link(self):
-        """使用 Locator 重新解析移动端顶层入口，避免跨 rerender 持有节点。"""
-        target = self.target_link().first
-        if target.count():
-            top_li = target.locator(
-                "xpath=ancestor::li[contains(concat(' ', normalize-space(@class), ' '), ' gm-level-0 ')][1]"
-            )
-            direct_link = top_li.locator(":scope > a").first
-            if direct_link.count():
-                return direct_link
-        # 目标可能在父级展开后才插入 DOM；空 Locator 是合法的暂态，
-        # open_menu() 会在有限窗口内重新查询，而不是立即判定为失败。
-        return self._mobile_parent_locator()
 
     def _mobile_menu_root_ready(self) -> bool:
         """移动端 drawer 打开后，确认实际菜单子树已挂载且可见。"""
@@ -213,19 +174,13 @@ class NavigationPage(BasePage):
     def is_menu_open(self) -> bool:
         """当前端菜单层级是否已打开。
 
-        Desktop：目标顶层项的子菜单（gm-submenu）可见。
-        Mobile：抽屉 drawer--is-open 类存在。
+        Desktop：配置的目标链接可见。
+        Mobile：配置的抽屉 open-state 定位器可见。
         """
         if self.viewport == "desktop":
-            handle = self._target_top_li()
-            if handle is None:
-                return False
-            submenu = handle.as_element().query_selector(":scope .gm-submenu")
-            if submenu is None:
-                return False
-            return submenu.is_visible()
-        drawer = self.locator("mobile_drawer").first
-        return "drawer--is-open" in (drawer.get_attribute("class") or "").split()
+            return self._target_visible()
+        open_state = self.locator("mobile_drawer_open").first
+        return bool(open_state.count() and open_state.is_visible())
 
     def _wait_open_state(self, timeout_ms: int = 10_000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
@@ -266,7 +221,7 @@ class NavigationPage(BasePage):
         子菜单（click_toggle），以目标链接可见为准。
         """
         if self.viewport == "desktop":
-            # Gm 菜单在页面加载后可能重渲染（节点被替换），
+            # 主题菜单在页面加载后可能重渲染（节点被替换），
             # 每次 hover 尝试重新查询目标链接，避免手持失效 ElementHandle。
             for _attempt in range(3):
                 link = self._target_top_link()
@@ -329,8 +284,8 @@ class NavigationPage(BasePage):
         close_btn = self.locator("mobile_close").first
         if close_btn.count() and close_btn.is_visible():
             close_btn.click()
-            expect(self.locator("mobile_drawer").first).not_to_have_class(
-                re.compile(r"(?:^|\s)drawer--is-open(?:\s|$)"), timeout=10_000
+            expect(self.locator("mobile_drawer_open").first).to_have_count(
+                0, timeout=10_000
             )
 
     # ------------------------------------------------------------ 目标导航

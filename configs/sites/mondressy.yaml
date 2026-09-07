@@ -125,6 +125,12 @@ pages:
         stability: HIGH
         notes: 顶层菜单项（gm-level-0）；含 mega 子菜单（gm-submenu gm-mega）
 
+      desktop_target_parent:
+        by: css
+        value: "ul.site-nav.gm-menu > li.gm-level-0 > a.gm-target[href*='/collections/new-collection']"
+        stability: HIGH
+        notes: New In 顶层入口；桌面端 hover 该配置父级展开目标链接
+
       desktop_submenu:
         by: css
         value: "ul.site-nav.gm-menu li.gm-level-0 .gm-submenu"
@@ -142,6 +148,12 @@ pages:
         value: "#NavDrawer"
         stability: HIGH
         notes: 移动端导航抽屉；drawer--is-open 类表示打开（过渡期 is_visible 会误报）
+
+      mobile_drawer_open:
+        by: css
+        value: "#NavDrawer.drawer--is-open"
+        stability: HIGH
+        notes: 抽屉正常点击打开后的配置 open-state 定位器
 
       mobile_menu:
         by: css
