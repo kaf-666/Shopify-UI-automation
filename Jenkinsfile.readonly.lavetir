@@ -4,10 +4,15 @@
  * This pipeline is intentionally fixed to site=lavetir. The Python runner
  * owns read-only business logic, mutation blocking, results.json and evidence;
  * this pipeline prepares the agent, binds Lavetir credentials, runs the gates,
- * and archives artifacts. It is manual-build only.
+ * and archives artifacts. It supports manual activation and the q4h
+ * scheduled Readonly pilot for the fixed Lavetir site.
  */
 pipeline {
     agent any
+
+    triggers {
+        cron('H H/4 * * *')
+    }
 
     options {
         skipDefaultCheckout(true)

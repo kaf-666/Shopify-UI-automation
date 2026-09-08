@@ -14,11 +14,14 @@ def _text() -> str:
     return PIPELINE.read_text(encoding="utf-8")
 
 
-def test_lavetir_pipeline_exists_and_is_manual_only() -> None:
+def test_lavetir_pipeline_has_q4h_schedule() -> None:
     assert PIPELINE.exists()
     content = _text()
 
-    for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\(", r"upstream\s*\("):
+    assert re.search(r"triggers\s*\{", content, flags=re.IGNORECASE)
+    assert "cron('H H/4 * * *')" in content
+    assert len(re.findall(r"\bcron\s*\(", content, flags=re.IGNORECASE)) == 1
+    for pattern in (r"pollSCM\s*\(", r"upstream\s*\("):
         assert re.search(pattern, content, flags=re.IGNORECASE) is None
 
 
@@ -33,6 +36,8 @@ def test_lavetir_pipeline_is_fixed_to_lavetir_and_keeps_viewport_parameter() -> 
     assert "buildDiscarder(" in content
     assert "name: 'SMOKE_VIEWPORT'" in content
     assert "choices: ['both', 'desktop', 'mobile']" in content
+    assert "name: 'VARIANT_DIAGNOSTIC'" in content
+    assert "defaultValue: false" in content
     assert "checkout scm" in content
     assert "env.GIT_COMMIT_SHA" in content
     assert "git checkout main" not in content

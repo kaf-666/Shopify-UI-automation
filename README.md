@@ -147,6 +147,45 @@ These fields do not mean that cart cleanup was called.
 
 The default viewport is `both`.
 
+## Lavetir q4h Readonly Pilot
+
+`Jenkinsfile.readonly.lavetir` is the fixed-site Readonly pipeline for the
+Lavetir observation pilot. It runs the same Readonly contract as the local
+runner with:
+
+```text
+site: lavetir
+viewport default: both
+diagnostic default: false
+schedule: H H/4 * * *
+```
+
+The `H` tokens let Jenkins distribute the approximate four-hour trigger time.
+The pipeline has no `pollSCM`, upstream, webhook, or retry trigger. Its only
+automatic source is the Declarative Pipeline cron above; manual Build with
+Parameters runs remain available for activation or investigation.
+
+Each scheduled build must be a real single run and must pass all of these
+gates:
+
+- Desktop: `11/11 PASS`
+- Mobile: `11/11 PASS`
+- Combined: `22/22 PASS`
+- Readonly Mutation Violations: `0`
+- Lavetir Site Access, Secret Leakage, and Result Schema: `PASS`
+- Jenkins result: `SUCCESS`
+
+The scheduled pilot counts only timer-triggered builds with
+`SMOKE_VIEWPORT=both` and `VARIANT_DIAGNOSTIC=false`. Manual builds and
+diagnostic builds are excluded. The target is **12 consecutive scheduled
+successes** on one frozen branch revision; a failure or branch HEAD change
+resets the counter. Jenkins Build History is the observation source for this
+pilot. It does not create a new Stability framework or Stability record.
+
+The pipeline is intentionally fixed to Lavetir and binds only the three
+`LAVETIR_US_SHOPIFY_SIGNATURE*` Jenkins credentials. Existing Mondressy
+pipelines and their schedules are independent.
+
 ## Exit code contract
 
 The exit-code contract is consumed directly by Jenkins.
@@ -325,8 +364,8 @@ The frozen scope covers Direct PDP Purchase, Search Purchase, and Browse Purchas
 
 ## Current verified Jenkins baseline
 
-- Date: `2026-08-28`
-- Verified commit: `ead320c7ca28d68b6ef4f7284d2b62f7aa86797b`
+- Date: `2026-09-08`
+- Verified commit: `7bfd5f356cfd5295ba66fa096befa118e70ec0a0`
 
 Readonly Jenkins manual gate:
 
@@ -341,33 +380,43 @@ Full Jenkins manual gate:
 - Mobile: `15/15 PASS`
 - Combined: `30/30 PASS`
 
-Full Stability executed successfully for the first new Job build; its initial
-status was `COLLECTING` while the stability window was being populated.
+Step 5A Manual Jenkins Pilot completed successfully on the same revision:
+
+- `#34`: mobile, `11/11 PASS`, Mutation `0`
+- `#35`: both, `22/22 PASS`, Mutation `0`
+- `#36`: both, `22/22 PASS`, Mutation `0`
+- `#37`: both, `22/22 PASS`, Mutation `0`
+
+The three consecutive `both` runs used `VARIANT_DIAGNOSTIC=false` and all
+passed Search-04, Site Access, Secret Leakage, and Result Schema gates. The
+Step 5B q4h counter starts separately at `0/12` after the schedule activation
+build and does not include these manual builds.
 
 ## Jenkins
 
-The repository currently has two formal Jenkins Jobs:
+The repository currently has two Mondressy formal Jenkins Jobs and one fixed
+site Lavetir pilot Job:
 
 | Job | Pipeline | Suite | Cases (`both`) | Schedule | Stability |
 | --- | --- | --- | ---: | --- | --- |
 | Mondressy - Website Smoke - Full | `Jenkinsfile.full` | `website_smoke_v1` | 30 | Daily | YES |
 | Mondressy - Website Smoke - Readonly | `Jenkinsfile.readonly` | `website_smoke_readonly_v1` | 22 | Every 4 hours | NO |
+| Monitoring / Shopify / UI automation / test | `Jenkinsfile.readonly.lavetir` | Lavetir `website_smoke_readonly_v1` pilot | 22 | `H H/4 * * *` | NO |
 
-Scheduling is configured at the Jenkins Job level / Jenkins UI, not in the new
-Jenkinsfiles:
+The two Mondressy schedules remain configured at the Jenkins Job level / UI:
 
 - Readonly: `H */4 * * *`
 - Full: `H H * * *`
 
 `Jenkinsfile.full` and `Jenkinsfile.readonly` contain no `triggers`, `cron`, or
-`pollSCM` configuration. The repository retains the original `Jenkinsfile` as
-a historical and rollback reference. The legacy `test` Job uses Script Path
-`Jenkinsfile` and is disabled, so its historical cron cannot create automatic
-builds. There is no duplicate automatic scheduling path.
+`pollSCM` configuration. The Lavetir pilot is the only repository pipeline
+with a trigger, and its only trigger is `cron('H H/4 * * *')`. The repository
+retains the original `Jenkinsfile` as a historical and rollback reference.
+There is no second UI cron for the Lavetir pilot.
 
 ### Jenkins pipeline stages
 
-Both formal pipelines use the following stages:
+The formal pipelines use the following stages:
 
 ```text
 Checkout
@@ -384,9 +433,11 @@ Artifact Archive
 ```
 
 The Full pipeline also records Stability after the build. Readonly does not
-execute `record_stability.py` and does not enter Full Stability history. If the
-Smoke stage fails, the pipeline preserves the failure result while allowing
-Secret Leakage Check, Result Validation, and artifact archiving to run.
+execute `record_stability.py` and does not enter Full Stability history. The
+Lavetir q4h pilot uses Jenkins Build History only; it does not add
+`record_stability.py`, `STABILITY_*`, or a stability history file. If the Smoke
+stage fails, the pipeline preserves the failure result while allowing Secret
+Leakage Check, Result Validation, and artifact archiving to run.
 
 The Checkout stage records the checked-out workspace SHA. Jenkins credentials
 are bound by credential ID and their values are redacted from logs; no
