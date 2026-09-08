@@ -23,6 +23,11 @@ pipeline {
             choices: ['both', 'desktop', 'mobile'],
             description: 'Run the Lavetir Website Smoke Readonly V1 target. Default target is both.'
         )
+        booleanParam(
+            name: 'VARIANT_DIAGNOSTIC',
+            defaultValue: false,
+            description: 'Run the readonly post-selection variant stability diagnostic before formal smoke.'
+        )
     }
 
     environment {
@@ -152,6 +157,25 @@ pipeline {
                         sh '.venv/bin/python scripts/validate_site_access.py --site lavetir --viewport both'
                     } else {
                         bat '.venv\\Scripts\\python.exe scripts\\validate_site_access.py --site lavetir --viewport both'
+                    }
+                }
+            }
+        }
+
+        stage('Variant Stability Diagnostic') {
+            when {
+                expression { params.VARIANT_DIAGNOSTIC == true }
+            }
+            steps {
+                script {
+                    // Diagnostic evidence is independent of the formal smoke
+                    // result and must not prevent the formal mobile run.
+                    catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
+                        if (isUnix()) {
+                            sh '.venv/bin/python scripts/diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
+                        } else {
+                            bat '.venv\\Scripts\\python.exe scripts\\diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
+                        }
                     }
                 }
             }
