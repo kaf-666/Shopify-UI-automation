@@ -18,6 +18,10 @@ SIZE_MODEL_01 = "SIZE_MODEL_01"
 SIZE_MODEL_02 = "SIZE_MODEL_02"
 SIZE_MODEL_03 = "SIZE_MODEL_03"
 DEFAULT_FREE_SIZE_MARKER = "free custom size"
+SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS = 1_000
+SIZE_SELECTION_POLL_INTERVAL_MS = 50
+SIZE_SELECTION_SETTLE_MS = 100
+SIZE_SELECTION_MAX_ATTEMPTS = 2
 
 
 class SizeGroupNotFoundError(LookupError):
@@ -332,20 +336,283 @@ class SizeOptionResolver:
             return normal[0].value
         raise RuntimeError("No available normal size option to select")
 
-    def select(self, value: str) -> str:
-        for option in self.available_options():
+    def _current_selection_state(self, requested_value: str) -> dict[str, Any]:
+        """Read selection metadata from the current DOM only.
+
+        This helper deliberately returns aggregate state instead of exposing
+        markup or locator details.  A theme may replace the complete size
+        group between any two reads, so callers treat every result as a
+        snapshot and re-detect on the next poll.
+        """
+        state: dict[str, Any] = {
+            "model": None,
+            "candidate_group_count": 0,
+            "option_total": 0,
+            "available_count": 0,
+            "selected_current_dom": None,
+            "target_option_present_current_dom": False,
+            "target_option_available_current_dom": False,
+            "group_present": False,
+        }
+        try:
+            state["candidate_group_count"] = self.candidate_group_count()
+        except Exception:
+            pass
+
+        try:
+            group = self.detect()
+            if group is None:
+                return state
+            state["group_present"] = True
+            state["model"] = group.model
+            options = self._options_for(group)
+            state["option_total"] = len(options)
+            state["available_count"] = sum(option.available for option in options)
+            state["selected_current_dom"] = next(
+                (option.value for option in options if option.selected), None
+            )
+            target = next(
+                (option for option in options if option.value == requested_value),
+                None,
+            )
+            state["target_option_present_current_dom"] = target is not None
+            state["target_option_available_current_dom"] = bool(
+                target is not None and target.available
+            )
+        except Exception:
+            # A transient detach during a theme replacement is a normal
+            # bounded-poll condition.  Keep the last safe aggregate shape.
+            pass
+        return state
+
+    def _current_selectable_option(self, value: str) -> Optional[SizeOption]:
+        """Return the requested option after re-parsing the current DOM."""
+        try:
+            options = self.options()
+        except Exception:
+            return None
+        for option in options:
             if option.value != value:
                 continue
             if option.custom_size:
-                raise RuntimeError("Automatic Free Custom Size selection is not allowed")
-            control = option.control_locator
-            if not self._actionable_control(control):
-                raise RuntimeError(f"Size option has no actionable control: {value}")
-            control.click()
-            if not option.locator.is_checked():
-                raise RuntimeError(f"Size selection did not take effect: {value}")
-            return value
-        raise LookupError(f"Size option unavailable: {value}")
+                raise RuntimeError(
+                    "Automatic Free Custom Size selection is not allowed"
+                )
+            if option.available and self._actionable_control(option.control_locator):
+                return option
+            return None
+        return None
+
+    def _wait_for_current_selectable_option(
+        self, value: str, timeout_ms: int
+    ) -> Optional[SizeOption]:
+        """Boundedly wait for a fresh, actionable requested option."""
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000
+        while True:
+            option = self._current_selectable_option(value)
+            if option is not None:
+                return option
+            if time.monotonic() >= deadline:
+                return None
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                self.page.wait_for_timeout(
+                    min(SIZE_SELECTION_POLL_INTERVAL_MS, remaining_ms)
+                )
+            except Exception:
+                return None
+
+    @staticmethod
+    def _merge_selection_state(
+        diagnostics: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        for key in (
+            "model",
+            "candidate_group_count",
+            "option_total",
+            "available_count",
+            "selected_current_dom",
+            "target_option_present_current_dom",
+            "target_option_available_current_dom",
+        ):
+            diagnostics[key] = state.get(key)
+
+    def _wait_selected_value(
+        self,
+        value: str,
+        diagnostics: dict[str, Any],
+        timeout_ms: int = SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS,
+    ) -> dict[str, Any]:
+        """Wait until fresh DOM snapshots converge on the requested value.
+
+        Two consecutive matching snapshots, with a short 100 ms settling
+        window, prevent an old checked radio from being accepted just before
+        a theme asynchronously replaces its group.  Every snapshot detects
+        the group and parses its options again; no element identity is used
+        as a business contract.
+        """
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000
+        started = time.monotonic()
+        matching_snapshots = 0
+        previous_group_present: Optional[bool] = None
+        previous_option_total: Optional[int] = None
+        final_state: dict[str, Any] = {}
+
+        while True:
+            state = self._current_selection_state(value)
+            final_state = state
+            self._merge_selection_state(diagnostics, state)
+
+            if previous_group_present is not None and (
+                previous_group_present != state["group_present"]
+            ):
+                diagnostics["rerender_observed"] = True
+            if previous_option_total is not None and (
+                previous_option_total != state["option_total"]
+            ):
+                diagnostics["rerender_observed"] = True
+            previous_group_present = state["group_present"]
+            previous_option_total = state["option_total"]
+
+            immediate = diagnostics.get("checked_immediately_after_click")
+            current = state["selected_current_dom"]
+            if immediate is not None and (
+                (immediate and current != value)
+                or (not immediate and current == value)
+            ):
+                # This is a safe state-transition signal that a current DOM
+                # read differs from the immediate post-click read.  It does
+                # not rely on comparing element objects.
+                diagnostics["rerender_observed"] = True
+
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            diagnostics["elapsed_ms"] = elapsed_ms
+            if current == value:
+                matching_snapshots += 1
+            else:
+                matching_snapshots = 0
+
+            if (
+                current == value
+                and matching_snapshots >= 2
+                and elapsed_ms >= min(SIZE_SELECTION_SETTLE_MS, timeout_ms)
+            ):
+                return final_state
+
+            if time.monotonic() >= deadline:
+                return final_state
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            try:
+                self.page.wait_for_timeout(
+                    min(SIZE_SELECTION_POLL_INTERVAL_MS, remaining_ms)
+                )
+            except Exception:
+                return final_state
+
+    @staticmethod
+    def _selection_failure_message(diagnostics: dict[str, Any]) -> str:
+        def display(value: Any, fallback: str = "NONE") -> Any:
+            return fallback if value is None or value == "" else value
+
+        return (
+            "Size selection did not converge: "
+            f"requested_size={diagnostics['requested_size']} "
+            f"model={display(diagnostics.get('model'), 'UNKNOWN')} "
+            f"candidate_group_count={diagnostics.get('candidate_group_count', 0)} "
+            f"option_total={diagnostics.get('option_total', 0)} "
+            f"available_count={diagnostics.get('available_count', 0)} "
+            f"selected_before={display(diagnostics.get('selected_before'))} "
+            "checked_immediately_after_click="
+            f"{diagnostics.get('checked_immediately_after_click')} "
+            f"selected_current_dom={display(diagnostics.get('selected_current_dom'))} "
+            "target_option_present_current_dom="
+            f"{diagnostics.get('target_option_present_current_dom', False)} "
+            "target_option_available_current_dom="
+            f"{diagnostics.get('target_option_available_current_dom', False)} "
+            f"elapsed_ms={diagnostics.get('elapsed_ms', 0)} "
+            f"rerender_observed={diagnostics.get('rerender_observed', False)} "
+            f"attempts={diagnostics.get('attempts', 0)}"
+        )
+
+    def select(self, value: str) -> str:
+        selection_started = time.monotonic()
+        initial_state = self._current_selection_state(value)
+        initial_options = self.options()
+        requested = next(
+            (option for option in initial_options if option.value == value), None
+        )
+        if requested is not None and requested.custom_size:
+            raise RuntimeError("Automatic Free Custom Size selection is not allowed")
+        if requested is None or not requested.available:
+            raise LookupError(f"Size option unavailable: {value}")
+        if not self._actionable_control(requested.control_locator):
+            raise RuntimeError(f"Size option has no actionable control: {value}")
+
+        diagnostics: dict[str, Any] = {
+            "requested_size": value,
+            "model": initial_state.get("model") or requested.model,
+            "candidate_group_count": initial_state.get("candidate_group_count", 0),
+            "option_total": initial_state.get("option_total", len(initial_options)),
+            "available_count": initial_state.get(
+                "available_count", sum(option.available for option in initial_options)
+            ),
+            "selected_before": initial_state.get("selected_current_dom")
+            or next(
+                (option.value for option in initial_options if option.selected), None
+            ),
+            "checked_immediately_after_click": None,
+            "selected_current_dom": initial_state.get("selected_current_dom"),
+            "target_option_present_current_dom": initial_state.get(
+                "target_option_present_current_dom", True
+            ),
+            "target_option_available_current_dom": initial_state.get(
+                "target_option_available_current_dom", requested.available
+            ),
+            "elapsed_ms": 0,
+            "rerender_observed": False,
+            "attempts": 0,
+        }
+
+        for attempt in range(1, SIZE_SELECTION_MAX_ATTEMPTS + 1):
+            option = self._wait_for_current_selectable_option(
+                value,
+                SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS,
+            )
+            if option is None:
+                break
+
+            diagnostics["attempts"] = attempt
+            diagnostics["model"] = option.model
+            try:
+                option.control_locator.click()
+            except Exception:
+                # A detached control is handled like any other non-converging
+                # current-DOM state; the next attempt must re-detect it.
+                if attempt >= SIZE_SELECTION_MAX_ATTEMPTS:
+                    break
+                continue
+
+            try:
+                diagnostics["checked_immediately_after_click"] = bool(
+                    option.locator.is_checked()
+                )
+            except Exception:
+                diagnostics["checked_immediately_after_click"] = None
+
+            state = self._wait_selected_value(
+                value,
+                diagnostics,
+                SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS,
+            )
+            if state.get("selected_current_dom") == value:
+                return value
+
+        final_state = self._current_selection_state(value)
+        self._merge_selection_state(diagnostics, final_state)
+        diagnostics["elapsed_ms"] = int(
+            (time.monotonic() - selection_started) * 1000
+        )
+        raise RuntimeError(self._selection_failure_message(diagnostics))
 
     def selected_value(self) -> Optional[str]:
         for option in self.options():
