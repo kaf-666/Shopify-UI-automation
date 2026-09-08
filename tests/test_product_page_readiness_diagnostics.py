@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from tests.website_smoke_readonly_v1_cases import WebsiteSmokeReadonlyV1Runner
@@ -28,6 +29,26 @@ def _snapshot(**overrides) -> dict:
     return snapshot
 
 
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def _product(snapshot_reader, wait_for_missing=None) -> ProductPage:
+    product = object.__new__(ProductPage)
+    product._readiness_snapshot = snapshot_reader
+    product._wait_for_missing_readiness_condition = wait_for_missing or (
+        lambda _snapshot_value, _timeout_ms: pytest.fail("unexpected readiness wait")
+    )
+    return product
+
+
 def test_missing_readiness_conditions_reports_size_loss() -> None:
     snapshot = _snapshot(size_count=0)
 
@@ -42,9 +63,125 @@ def test_missing_readiness_conditions_reports_disabled_atc() -> None:
     assert ProductPage._snapshot_ready(snapshot) is False
 
 
+def test_slow_initial_ready_passes_after_deadline_with_one_snapshot(
+    monkeypatch,
+) -> None:
+    clock = _Clock()
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        clock.advance(16.076)
+        return _snapshot()
+
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
+    product = _product(read_snapshot)
+
+    assert product.wait_purchase_ready(timeout_ms=15_000) == (2, 3, True)
+    assert calls == ["snapshot"]
+
+
+def test_fast_initial_ready_uses_one_snapshot_and_no_wait() -> None:
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        return _snapshot()
+
+    product = _product(read_snapshot)
+
+    assert product.wait_purchase_ready() == (2, 3, True)
+    assert calls == ["snapshot"]
+
+
+def test_initial_not_ready_then_ready_samples_waits_and_resamples(
+    monkeypatch,
+) -> None:
+    clock = _Clock()
+    calls = []
+    snapshots = iter((_snapshot(size_count=0), _snapshot()))
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        return next(snapshots)
+
+    def wait_for_missing(snapshot: dict, timeout_ms: int) -> None:
+        calls.append("wait")
+        assert snapshot["size_count"] == 0
+        assert timeout_ms > 0
+        clock.advance(0.001)
+
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
+    product = _product(read_snapshot, wait_for_missing)
+    timeline = []
+
+    assert product.wait_purchase_ready(
+        timeout_ms=100,
+        diagnostics_hook=timeline.append,
+    ) == (2, 3, True)
+    assert calls == ["snapshot", "wait", "snapshot"]
+    assert len(timeline) == 2
+    assert timeline[0]["size_count"] == 0
+    assert timeline[1]["size_count"] == 3
+
+
+def test_resample_that_crosses_deadline_still_passes_when_ready(
+    monkeypatch,
+) -> None:
+    clock = _Clock()
+    calls = []
+    snapshots = iter((_snapshot(size_count=0), _snapshot()))
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        snapshot = next(snapshots)
+        if len(calls) == 3:
+            clock.advance(0.020)
+        return snapshot
+
+    def wait_for_missing(_snapshot_value: dict, timeout_ms: int) -> None:
+        calls.append("wait")
+        assert timeout_ms == 15
+        clock.advance(0.005)
+        raise PlaywrightTimeoutError("synthetic bounded wait expired")
+
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
+    product = _product(read_snapshot, wait_for_missing)
+
+    assert product.wait_purchase_ready(timeout_ms=15) == (2, 3, True)
+    assert clock.now > 0.015
+    assert calls == ["snapshot", "wait", "snapshot"]
+
+
+def test_deadline_with_not_ready_snapshot_fails_without_extra_snapshot(
+    monkeypatch,
+) -> None:
+    clock = _Clock()
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        clock.advance(0.015)
+        return _snapshot(size_count=0)
+
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
+    product = _product(read_snapshot)
+
+    with pytest.raises(PurchaseAreaReadinessError) as captured:
+        product.wait_purchase_ready(timeout_ms=15)
+
+    assert calls == ["snapshot"]
+    assert "failing_conditions=size" in str(captured.value)
+
+
 def test_selected_size_is_diagnostic_not_readiness_gate() -> None:
-    product = object.__new__(ProductPage)
-    product._readiness_snapshot = lambda: _snapshot(selected_size=None)
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        return _snapshot(selected_size=None)
+
+    product = _product(read_snapshot)
     timeline = []
 
     colors, sizes, atc = product.wait_purchase_ready(
@@ -56,11 +193,17 @@ def test_selected_size_is_diagnostic_not_readiness_gate() -> None:
     assert timeline
     assert timeline[0]["selected_size"] is None
     assert ProductPage._snapshot_ready(timeline[0]) is True
+    assert calls == ["snapshot"]
 
 
 def test_readiness_error_exposes_initial_final_gates() -> None:
-    product = object.__new__(ProductPage)
-    product._readiness_snapshot = lambda: _snapshot(title_visible=False)
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        return _snapshot(title_visible=False)
+
+    product = _product(read_snapshot)
 
     with pytest.raises(PurchaseAreaReadinessError) as captured:
         product.wait_purchase_ready(timeout_ms=0)
@@ -75,6 +218,7 @@ def test_readiness_error_exposes_initial_final_gates() -> None:
     assert "atc_enabled_initial=True" in detail
     assert "atc_enabled_final=True" in detail
     assert "failing_conditions=title" in detail
+    assert calls == ["snapshot"]
 
 
 def test_diagnostic_failure_detail_reports_phase_first_gate_and_timeline(

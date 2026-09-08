@@ -361,31 +361,42 @@ class ProductPage(BasePage):
         timeout_ms: int = 15_000,
         diagnostics_hook: Optional[Callable[[dict], None]] = None,
     ) -> tuple[int, int, bool]:
-        """等待购买区业务条件在一个总 timeout 内同时成立。
+        """等待购买区业务条件在一个总 waiting/polling budget 内同时成立。
 
         轮询基于 Locator 当前状态；Theme/SPB 替换表单 DOM 后，下一轮会
-        自动解析新节点。无固定 sleep、reload 或无条件 retry。
+        自动解析新节点。``timeout_ms`` 限制 readiness 等待/轮询，不会
+        中断正在执行的同步 DOM inspection。即使 snapshot 完成时略过
+        deadline，只要该完整 snapshot 证明全部条件成立，仍返回成功。
+        无固定 sleep、reload 或无条件 retry。
         """
         started = time.monotonic()
         deadline = started + timeout_ms / 1000
-        initial = self._readiness_snapshot()
-        final = initial
-        self._emit_readiness_diagnostic(initial, started, diagnostics_hook)
-        while time.monotonic() < deadline:
-            final = self._readiness_snapshot()
-            self._emit_readiness_diagnostic(final, started, diagnostics_hook)
-            if self._snapshot_ready(final):
-                return final["color_count"], final["size_count"], True
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            try:
-                wait_ms = min(remaining_ms, 100) if diagnostics_hook is not None else remaining_ms
-                self._wait_for_missing_readiness_condition(final, wait_ms)
-            except PlaywrightTimeoutError:
-                if diagnostics_hook is None:
-                    break
+        snapshot = self._readiness_snapshot()
+        initial = snapshot
+        self._emit_readiness_diagnostic(snapshot, started, diagnostics_hook)
 
-        final = self._readiness_snapshot()
-        self._emit_readiness_diagnostic(final, started, diagnostics_hook)
+        while True:
+            if self._snapshot_ready(snapshot):
+                return snapshot["color_count"], snapshot["size_count"], True
+            now = time.monotonic()
+            if now >= deadline:
+                break
+
+            remaining_ms = max(1, int((deadline - now) * 1000))
+            try:
+                wait_ms = (
+                    min(remaining_ms, 100)
+                    if diagnostics_hook is not None
+                    else remaining_ms
+                )
+                self._wait_for_missing_readiness_condition(snapshot, wait_ms)
+            except PlaywrightTimeoutError:
+                pass
+
+            snapshot = self._readiness_snapshot()
+            self._emit_readiness_diagnostic(snapshot, started, diagnostics_hook)
+
+        final = snapshot
         failing_conditions = self._missing_readiness_conditions(final)
         raise PurchaseAreaReadinessError(
             "purchase_area_attached="
