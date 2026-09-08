@@ -9,6 +9,8 @@ Direct / Search / Browse 各自从自己的入口开始，只读取页面能力�
 
 from __future__ import annotations
 
+import json
+import os
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -313,23 +315,76 @@ class WebsiteSmokeReadonlyV1Runner:
     def _same_value(left: Optional[str], right: Optional[str]) -> bool:
         return bool(left and right and left.strip().casefold() == right.strip().casefold())
 
+    @staticmethod
+    def _variant_diagnostics_enabled() -> bool:
+        return os.environ.get("VARIANT_DIAGNOSTIC", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    @staticmethod
+    def _readiness_timeline_detail(timeline: List[dict]) -> str:
+        first_failure = next(
+            (
+                (snapshot["elapsed_ms"], ProductPage._missing_readiness_conditions(snapshot))
+                for snapshot in timeline
+                if ProductPage._missing_readiness_conditions(snapshot)
+            ),
+            None,
+        )
+        first_failure_ms = first_failure[0] if first_failure else "NONE"
+        first_conditions = ",".join(first_failure[1]) if first_failure else "NONE"
+        compact_timeline = json.dumps(timeline, ensure_ascii=True, separators=(",", ":"))
+        return (
+            f"first_failing_conditions={first_conditions} "
+            f"first_failure_ms={first_failure_ms} "
+            f"readiness_timeline={compact_timeline}"
+        )
+
+    def _wait_purchase_ready(
+        self,
+        prod: ProductPage,
+        phase: str,
+    ) -> tuple[int, int, bool]:
+        timeline: List[dict] = []
+        try:
+            if not self._variant_diagnostics_enabled():
+                return prod.wait_purchase_ready()
+            return prod.wait_purchase_ready(diagnostics_hook=timeline.append)
+        except PurchaseAreaReadinessError as exc:
+            detail = f"phase={phase} {exc}"
+            if timeline:
+                detail = f"{detail} {self._readiness_timeline_detail(timeline)}"
+            raise PurchaseAreaReadinessError(detail) from exc
+
     def _purchase_area_ready(self, prod: ProductPage, category: str) -> tuple[str, str, int, int]:
         """等待并验证 PDP 标题、价格、购买区、选项和 ATC 状态。"""
         try:
             title = prod.get_title().strip()
             price = prod.get_price().strip()
         except Exception as exc:
-            raise FlowError(category, f"title/price unreadable: {type(exc).__name__}") from exc
+            raise FlowError(
+                category,
+                f"phase=pre_selection title/price unreadable: {type(exc).__name__}",
+            ) from exc
         if not title or not price:
-            raise FlowError(category, f"title={bool(title)} price={bool(price)}")
+            raise FlowError(
+                category,
+                f"phase=pre_selection title={bool(title)} price={bool(price)}",
+            )
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready()
+            color_count, size_count, atc_available = self._wait_purchase_ready(
+                prod, "pre_selection"
+            )
         except PurchaseAreaReadinessError as exc:
             raise FlowError(category, str(exc)) from exc
         if color_count <= 0 or size_count <= 0 or not atc_available:
             raise FlowError(
                 category,
-                f"color_options={color_count} size_options={size_count} atc={atc_available}",
+                f"phase=pre_selection color_options={color_count} "
+                f"size_options={size_count} atc={atc_available}",
             )
         return title, price, color_count, size_count
 
@@ -349,11 +404,16 @@ class WebsiteSmokeReadonlyV1Runner:
                 f"expected color={color!r} size={size!r}",
             )
         try:
-            _colors, _sizes, atc_available = prod.wait_purchase_ready()
+            _colors, _sizes, atc_available = self._wait_purchase_ready(
+                prod, "post_selection"
+            )
         except PurchaseAreaReadinessError as exc:
-            raise FlowError(category, f"post-selection readiness: {exc}") from exc
+            raise FlowError(category, str(exc)) from exc
         if not atc_available:
-            raise FlowError(category, "Add To Cart is not enabled after legal variant selection")
+            raise FlowError(
+                category,
+                "phase=post_selection Add To Cart is not enabled after legal variant selection",
+            )
         self._assert_atc_available(prod, category)
         return color, size
 
@@ -484,7 +544,8 @@ class WebsiteSmokeReadonlyV1Runner:
         if not title:
             raise FlowError("SEARCH_PDP_NAVIGATION_FAILURE", "title empty")
         self.state["search_prod"] = prod
-        return f"url={product_page.url[:80]} title={title[:50]!r}"
+        product_path = urlparse(product_page.url).path
+        return f"path={product_path} title={title[:50]!r}"
 
     def _c_search04(self) -> str:
         """Search PDP Variant + ATC Available：只读验证搜索 PDP 购买能力。"""

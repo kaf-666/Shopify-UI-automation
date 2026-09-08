@@ -9,7 +9,7 @@ MODEL_02 的不可用状态识别，不作为 selected state。提供加购按�
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect
@@ -282,17 +282,49 @@ class ProductPage(BasePage):
         }
 
     @staticmethod
-    def _snapshot_ready(snapshot: dict) -> bool:
-        return all(
-            (
-                snapshot["purchase_area_attached"],
-                snapshot["title_visible"],
-                snapshot["color_count"] > 0,
-                snapshot["size_count"] > 0,
-                snapshot["atc_visible"],
-                snapshot["atc_enabled"],
-            )
+    def _missing_readiness_conditions(snapshot: dict) -> list[str]:
+        """Return failed gates from the canonical purchase-readiness contract."""
+        conditions = (
+            ("purchase_area", bool(snapshot["purchase_area_attached"])),
+            ("title", bool(snapshot["title_visible"])),
+            ("color", snapshot["color_count"] > 0),
+            ("size", snapshot["size_count"] > 0),
+            ("atc_visible", bool(snapshot["atc_visible"])),
+            ("atc_enabled", bool(snapshot["atc_enabled"])),
         )
+        return [name for name, ready in conditions if not ready]
+
+    @classmethod
+    def _snapshot_ready(cls, snapshot: dict) -> bool:
+        return not cls._missing_readiness_conditions(snapshot)
+
+    @staticmethod
+    def _emit_readiness_diagnostic(
+        snapshot: dict,
+        started: float,
+        diagnostics_hook: Optional[Callable[[dict], None]],
+    ) -> None:
+        """Emit one safe snapshot without allowing diagnostics to affect flow."""
+        if diagnostics_hook is None:
+            return
+        safe_snapshot = {
+            "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+            "purchase_area_attached": bool(snapshot["purchase_area_attached"]),
+            "title_visible": bool(snapshot["title_visible"]),
+            "color_count": int(snapshot["color_count"]),
+            "size_count": int(snapshot["size_count"]),
+            "size_group_detected": bool(snapshot["size_group_detected"]),
+            "size_option_total": int(snapshot["size_option_total"]),
+            "normal_size_available": int(snapshot["normal_size_available"]),
+            "selected_size": snapshot["selected_size"],
+            "atc_visible": bool(snapshot["atc_visible"]),
+            "atc_enabled": bool(snapshot["atc_enabled"]),
+        }
+        try:
+            diagnostics_hook(safe_snapshot)
+        except Exception:
+            # Instrumentation must never change the readiness result.
+            pass
 
     def _wait_for_missing_readiness_condition(self, snapshot: dict, timeout_ms: int) -> None:
         if not snapshot["purchase_area_attached"]:
@@ -324,29 +356,44 @@ class ProductPage(BasePage):
             self.page.wait_for_timeout(50)
         raise PlaywrightTimeoutError("No actionable color option became available")
 
-    def wait_purchase_ready(self, timeout_ms: int = 15_000) -> tuple[int, int, bool]:
+    def wait_purchase_ready(
+        self,
+        timeout_ms: int = 15_000,
+        diagnostics_hook: Optional[Callable[[dict], None]] = None,
+    ) -> tuple[int, int, bool]:
         """等待购买区业务条件在一个总 timeout 内同时成立。
 
         轮询基于 Locator 当前状态；Theme/SPB 替换表单 DOM 后，下一轮会
         自动解析新节点。无固定 sleep、reload 或无条件 retry。
         """
-        deadline = time.monotonic() + timeout_ms / 1000
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
         initial = self._readiness_snapshot()
         final = initial
+        self._emit_readiness_diagnostic(initial, started, diagnostics_hook)
         while time.monotonic() < deadline:
             final = self._readiness_snapshot()
+            self._emit_readiness_diagnostic(final, started, diagnostics_hook)
             if self._snapshot_ready(final):
                 return final["color_count"], final["size_count"], True
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
-                self._wait_for_missing_readiness_condition(final, remaining_ms)
+                wait_ms = min(remaining_ms, 100) if diagnostics_hook is not None else remaining_ms
+                self._wait_for_missing_readiness_condition(final, wait_ms)
             except PlaywrightTimeoutError:
-                break
+                if diagnostics_hook is None:
+                    break
 
         final = self._readiness_snapshot()
+        self._emit_readiness_diagnostic(final, started, diagnostics_hook)
+        failing_conditions = self._missing_readiness_conditions(final)
         raise PurchaseAreaReadinessError(
             "purchase_area_attached="
             f"{final['purchase_area_attached']} "
+            f"purchase_area_initial={initial['purchase_area_attached']} "
+            f"purchase_area_final={final['purchase_area_attached']} "
+            f"title_visible_initial={initial['title_visible']} "
+            f"title_visible_final={final['title_visible']} "
             f"size_count_initial={initial['size_count']} "
             f"size_count_final={final['size_count']} "
             f"color_count_initial={initial['color_count']} "
@@ -358,8 +405,13 @@ class ProductPage(BasePage):
             f"custom_size_present={final['custom_size_present']} "
             f"selected_size={final['selected_size'] or 'NONE'} "
             f"candidate_group_count={final['candidate_group_count']} "
+            f"atc_visible_initial={initial['atc_visible']} "
+            f"atc_visible_final={final['atc_visible']} "
+            f"atc_enabled_initial={initial['atc_enabled']} "
+            f"atc_enabled_final={final['atc_enabled']} "
             f"atc_visible={final['atc_visible']} "
             f"atc_enabled={final['atc_enabled']} "
+            f"failing_conditions={','.join(failing_conditions) or 'NONE'} "
             f"readiness_timeout_ms={timeout_ms}"
         )
 

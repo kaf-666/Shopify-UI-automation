@@ -133,3 +133,45 @@ def test_pdp02_only_reads_atc_state_without_clicking() -> None:
     assert "size_options={sizes}" not in detail
     assert product.button.click_calls == 0
     assert product.readiness_calls == 1
+
+
+def test_search03_reports_full_safe_product_pathname(monkeypatch) -> None:
+    product_path = (
+        "/products/very-long-product-handle-that-must-not-be-truncated-"
+        "before-the-final-identity-token-12010206p"
+    )
+
+    class _SearchProductPage:
+        url = f"https://www.example.com{product_path}?secret=query#private-fragment"
+
+        @staticmethod
+        def is_closed() -> bool:
+            return False
+
+    class _Search:
+        @staticmethod
+        def open_result(index: int):
+            assert index == 0
+            return _SearchProductPage()
+
+    class _Product:
+        def __init__(self, page, _site_config, _viewport) -> None:
+            assert page.url.startswith("https://www.example.com/products/")
+
+        @staticmethod
+        def get_title() -> str:
+            return "Example Dress"
+
+    monkeypatch.setattr(
+        "tests.website_smoke_readonly_v1_cases.ProductPage",
+        _Product,
+    )
+    runner = _runner()
+    runner.state["search"] = _Search()
+
+    detail = runner._c_search03()
+
+    assert detail == f"path={product_path} title='Example Dress'"
+    assert "example.com" not in detail
+    assert "?" not in detail
+    assert "#private-fragment" not in detail
