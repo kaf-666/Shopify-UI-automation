@@ -22,6 +22,7 @@ from pages.size_option_resolver import (
 )
 
 FREE_SIZE_MARKER = DEFAULT_FREE_SIZE_MARKER
+READINESS_SNAPSHOT_PROBE_TIMEOUT_MS = 100
 
 
 class PurchaseAreaReadinessError(TimeoutError):
@@ -119,7 +120,9 @@ class ProductPage(BasePage):
             # here.  Callers already obtained the control from a live radio;
             # one visibility query is sufficient for labels and native
             # controls, while radio disabled state is checked separately.
-            return bool(control.is_visible())
+            return bool(
+                control.is_visible(timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS)
+            )
         except Exception:
             return False
 
@@ -131,7 +134,13 @@ class ProductPage(BasePage):
     def _has_disabled_token(cls, locator, tokens: tuple[str, ...]) -> bool:
         if locator is None or not tokens:
             return False
-        classes = set(cls._normalized(locator.get_attribute("class")).split())
+        classes = set(
+            cls._normalized(
+                locator.get_attribute(
+                    "class", timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                )
+            ).split()
+        )
         return any(token in classes for token in tokens)
 
     def _associated_label(self, radio):
@@ -267,7 +276,16 @@ class ProductPage(BasePage):
         size = self._safe_state(self._size_resolver().snapshot, {})
         return {
             "purchase_area_attached": bool(self._safe_state(root.count, 0)),
-            "title_visible": bool(self._safe_state(title.is_visible)),
+            # Snapshot probes are polling observations, not waits. A full
+            # Playwright default timeout here can exceed the caller's bounded
+            # readiness budget while a theme temporarily replaces the DOM.
+            "title_visible": bool(
+                self._safe_state(
+                    lambda: title.is_visible(
+                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                    )
+                )
+            ),
             "color_count": self._safe_state(self.available_color_count, 0),
             "size_count": int(size.get("size_option_available", 0)),
             "size_model": size.get("size_model"),
@@ -277,8 +295,20 @@ class ProductPage(BasePage):
             "custom_size_present": bool(size.get("custom_size_present", False)),
             "selected_size": size.get("selected_size"),
             "candidate_group_count": int(size.get("candidate_group_count", 0)),
-            "atc_visible": bool(self._safe_state(atc.is_visible)),
-            "atc_enabled": bool(self._safe_state(atc.is_enabled)),
+            "atc_visible": bool(
+                self._safe_state(
+                    lambda: atc.is_visible(
+                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                    )
+                )
+            ),
+            "atc_enabled": bool(
+                self._safe_state(
+                    lambda: atc.is_enabled(
+                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                    )
+                )
+            ),
         }
 
     @staticmethod

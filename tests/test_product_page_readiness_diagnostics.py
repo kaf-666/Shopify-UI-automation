@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from pages.product_page import ProductPage, PurchaseAreaReadinessError
+from pages.product_page import (
+    READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ProductPage,
+    PurchaseAreaReadinessError,
+)
 from tests.website_smoke_readonly_v1_cases import WebsiteSmokeReadonlyV1Runner
 
 
@@ -219,6 +223,48 @@ def test_readiness_error_exposes_initial_final_gates() -> None:
     assert "atc_enabled_final=True" in detail
     assert "failing_conditions=title" in detail
     assert calls == ["snapshot"]
+
+
+def test_readiness_snapshot_uses_bounded_locator_probes() -> None:
+    class _Locator:
+        def __init__(self, *, visible: bool = False, enabled: bool = False) -> None:
+            self.visible = visible
+            self.enabled = enabled
+            self.visible_timeouts = []
+            self.enabled_timeouts = []
+
+        def count(self) -> int:
+            return 0
+
+        def is_visible(self, *, timeout=None) -> bool:
+            self.visible_timeouts.append(timeout)
+            return self.visible
+
+        def is_enabled(self, *, timeout=None) -> bool:
+            self.enabled_timeouts.append(timeout)
+            return self.enabled
+
+    root = _Locator()
+    title = _Locator()
+    atc = _Locator()
+    product = object.__new__(ProductPage)
+    product.purchase_area = lambda: root
+    product.title = lambda: title
+    product.add_to_cart_button = lambda: atc
+    product.available_color_count = lambda: 0
+    product._size_resolver = lambda: type(
+        "Resolver", (), {"snapshot": lambda _self: _snapshot(size_count=0)}
+    )()
+
+    snapshot = product._readiness_snapshot()
+
+    assert snapshot["purchase_area_attached"] is False
+    assert snapshot["title_visible"] is False
+    assert snapshot["atc_visible"] is False
+    assert snapshot["atc_enabled"] is False
+    assert title.visible_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
+    assert atc.visible_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
+    assert atc.enabled_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
 
 
 def test_diagnostic_failure_detail_reports_phase_first_gate_and_timeline(
