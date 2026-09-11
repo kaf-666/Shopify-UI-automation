@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import copy
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -223,3 +225,18 @@ def test_readonly_cli_suite_accepts_explicit_fixture(tmp_path: Path) -> None:
     assert schema.main(
         ["--suite", "website_smoke_readonly_v1", "--results", str(result_path)]
     ) == 0
+
+
+def test_latest_run_dir_discovers_site_scoped_results_and_legacy_results(tmp_path: Path) -> None:
+    root = tmp_path / "website-smoke-readonly-v1"
+    legacy = root / "legacy-run" / "results.json"
+    scoped = root / "lavetir" / "scoped-run" / "results.json"
+    legacy.parent.mkdir(parents=True)
+    scoped.parent.mkdir(parents=True)
+    legacy.write_text("{}", encoding="utf-8")
+    scoped.write_text("{}", encoding="utf-8")
+    newest = time.time_ns()
+    os.utime(legacy, ns=(newest - 10_000_000_000, newest - 10_000_000_000))
+    os.utime(scoped, ns=(newest, newest))
+
+    assert schema.latest_run_dir(root) == scoped.parent

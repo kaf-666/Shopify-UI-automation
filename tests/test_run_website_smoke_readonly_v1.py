@@ -153,7 +153,7 @@ def test_cli_offline_viewport_contract(
     assert [viewport for viewport, _artifact_dir, _site_name in calls] == expected_viewports
     assert all(site_name == "mondressy" for _viewport, _artifact_dir, site_name in calls)
 
-    result_path = artifact_root / "offline" / "results.json"
+    result_path = artifact_root / "mondressy" / "offline" / "results.json"
     payload = json.loads(result_path.read_text(encoding="utf-8"))
     assert payload["overall_status"] == "PASS"
     assert payload["summary"]["total"] == expected_total
@@ -210,7 +210,9 @@ def test_cli_out_of_scope_mutation_is_run_fatal(monkeypatch, tmp_path) -> None:
 
     assert cli.main(["--viewport", "desktop"]) == 1
     payload = json.loads(
-        (artifact_root / "outside-scope" / "results.json").read_text(encoding="utf-8")
+        (artifact_root / "mondressy" / "outside-scope" / "results.json").read_text(
+            encoding="utf-8"
+        )
     )
     assert payload["overall_status"] == "FAIL"
     assert payload["fatal_error"]["classification"] == "READONLY_MUTATION_VIOLATION"
@@ -242,3 +244,41 @@ def test_cli_explicit_site_overrides_default_site(monkeypatch, tmp_path) -> None
     assert cli.main(["--site", "mondressy", "--viewport", "desktop"]) == 0
     assert loaded_sites == ["mondressy"]
     assert runtime_sites == ["mondressy"]
+
+
+def test_cli_same_run_id_is_isolated_by_site(monkeypatch, tmp_path) -> None:
+    artifact_root = tmp_path / "artifacts" / "website-smoke-readonly-v1"
+    monkeypatch.setattr(cli, "ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(cli, "make_run_id", lambda: "shared-run")
+    monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
+    monkeypatch.setattr(
+        cli,
+        "load_site_config",
+        lambda site: {"base_url": f"https://{site}.example.test"},
+    )
+    monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
+    monkeypatch.setattr(
+        cli,
+        "run_viewport",
+        lambda _viewport, _artifact_dir, **_kwargs: (_pass_results(), _FakeRunner(), {}),
+    )
+
+    assert cli.main(["--site", "mondressy", "--viewport", "desktop"]) == 0
+    assert cli.main(["--site", "lavetir", "--viewport", "desktop"]) == 0
+
+    mondressy_result = artifact_root / "mondressy" / "shared-run" / "results.json"
+    lavetir_result = artifact_root / "lavetir" / "shared-run" / "results.json"
+    assert mondressy_result.exists()
+    assert lavetir_result.exists()
+    assert json.loads(mondressy_result.read_text(encoding="utf-8"))["site"] == "mondressy"
+    assert json.loads(lavetir_result.read_text(encoding="utf-8"))["site"] == "lavetir"
+
+
+def test_cli_rejects_invalid_site_before_creating_artifacts(monkeypatch, tmp_path) -> None:
+    artifact_root = tmp_path / "artifacts" / "website-smoke-readonly-v1"
+    monkeypatch.setattr(cli, "ARTIFACT_ROOT", artifact_root)
+    monkeypatch.setattr(cli, "make_run_id", lambda: "unsafe-run")
+    monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
+
+    assert cli.main(["--site", "../lavetir", "--viewport", "desktop"]) == 2
+    assert not artifact_root.exists()

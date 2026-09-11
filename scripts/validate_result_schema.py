@@ -83,10 +83,14 @@ def check(ok: bool, label: str, detail: str = "") -> bool:
 def latest_run_dir(root: Path) -> Path:
     if not root.exists():
         raise FileNotFoundError(f"artifact root not found: {root}")
-    runs = sorted(p for p in root.iterdir() if p.is_dir())
-    if not runs:
-        raise FileNotFoundError(f"no run artifact dirs under {root}")
-    return runs[-1]
+    result_paths = [path for path in root.rglob("results.json") if path.is_file()]
+    if not result_paths:
+        raise FileNotFoundError(f"no results.json artifacts under {root}")
+    latest = max(
+        result_paths,
+        key=lambda path: (path.stat().st_mtime_ns, str(path)),
+    )
+    return latest.parent
 
 
 def _summary_ok(summary: dict, label: str) -> bool:

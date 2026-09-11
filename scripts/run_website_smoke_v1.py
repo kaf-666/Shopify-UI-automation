@@ -10,8 +10,8 @@
         --traffic-reduction telemetry-v1
 
 产物：
-    artifacts/website-smoke-v1/<run_id>/results.json
-    artifacts/website-smoke-v1/<run_id>/<viewport>/<CASE_ID>-failure.png
+    artifacts/website-smoke-v1/<site>/<run_id>/results.json
+    artifacts/website-smoke-v1/<site>/<run_id>/<viewport>/<CASE_ID>-failure.png
 
 执行模型：
     每 viewport 一个 BrowserContext，顺序执行 Direct -> Search -> Browse
@@ -35,6 +35,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pages.base_page import BasePage
 from tests.website_smoke_v1_cases import WebsiteSmokeV1Runner
+from utils.artifacts import (
+    artifact_display_path,
+    canonical_site_name,
+    site_scoped_artifact_dir,
+)
 from utils.browser import close_browser, create_browser, load_site_config, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
@@ -173,7 +178,7 @@ def _write_traffic_inventory(
         print()
         print("Traffic Artifacts:")
         for name in ("requests.jsonl", "summary.json", "summary.txt"):
-            print(f"artifacts/website-smoke-v1/{artifact_dir.name}/traffic/{name}")
+            print(f"{artifact_display_path(artifact_dir)}/traffic/{name}")
     except Exception as exc:  # observation output cannot change business exit status
         try:
             inventory.record_error("console_output", exc)
@@ -192,7 +197,7 @@ def _write_traffic_reduction(
         path = artifact_dir / "traffic" / "blocking-summary.json"
         write_results_json(policy.build_summary(), path)
         print("Traffic Reduction Artifact:")
-        print(f"artifacts/website-smoke-v1/{artifact_dir.name}/traffic/{path.name}")
+        print(f"{artifact_display_path(artifact_dir)}/traffic/{path.name}")
     except Exception as exc:
         print(f"TRAFFIC_REDUCTION_ARTIFACT_FAILURE: {sanitize_message(exc)}")
 
@@ -221,25 +226,33 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--traffic-reduction requires --traffic-inventory")
 
     run_id = make_run_id()
-    artifact_dir = ARTIFACT_ROOT / run_id
+    started_at = iso_now()
+    started = time.perf_counter()
+    site = ""
+    base_url = ""
+    artifact_dir: Optional[Path] = None
+    vp_results: List[ViewportResult] = []
+    runtime_by_viewport: Dict[str, dict] = {}
+
+    try:
+        settings = load_settings()
+        site = canonical_site_name(args.site or str(settings.get("default_site") or ""))
+        artifact_dir = site_scoped_artifact_dir(ARTIFACT_ROOT, site, run_id)
+    except Exception as exc:
+        classification, exit_code = _fatal_classification(exc)
+        print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
+        return exit_code
+
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
 
-    started_at = iso_now()
-    started = time.perf_counter()
     traffic_inventory = TrafficInventory() if args.traffic_inventory else None
     traffic_reduction = create_traffic_reduction_policy(args.traffic_reduction)
-    site = ""
-    base_url = ""
-    vp_results: List[ViewportResult] = []
-    runtime_by_viewport: Dict[str, dict] = {}
 
     try:
-        settings = load_settings()
-        site = args.site or str(settings.get("default_site") or "")
         site_cfg = load_site_config(site)
         base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
     except Exception as exc:
@@ -367,7 +380,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"TOTAL:    {total}")
     print()
     print("Results:")
-    print(f"artifacts/website-smoke-v1/{run_id}/results.json")
+    print(f"{artifact_display_path(artifact_dir)}/results.json")
 
     _write_traffic_inventory(traffic_inventory, artifact_dir)
     _write_traffic_reduction(traffic_reduction, artifact_dir)
