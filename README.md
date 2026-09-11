@@ -200,11 +200,12 @@ The exit-code contract is consumed directly by Jenkins.
 Full and Readonly use separate artifact roots:
 
 ```text
-artifacts/website-smoke-v1/<run_id>/
-artifacts/website-smoke-readonly-v1/<run_id>/
+artifacts/website-smoke-v1/<site>/<run_id>/
+artifacts/website-smoke-readonly-v1/<site>/<run_id>/
 ```
 
-Each run contains `results.json`. Failed cases may also contain a
+`<site>` is the validated configured site identifier (for example, `mondressy`
+or `lavetir`), not a value encoded into `run_id`. Each run contains `results.json`. Failed cases may also contain a
 viewport-scoped failure screenshot or diagnostics. Full `both` runs may
 additionally contain `stability_record.json`; Readonly does not generate a
 Stability record. Jenkins archives `artifacts/**` after the pipeline stages
@@ -451,11 +452,13 @@ history.
 
 The Full collector consumes the existing `results.json` after a build. Only a
 complete `both` run is eligible for a formal stability sample. It writes a safe
-`artifacts/website-smoke-v1/<run_id>/stability_record.json` and atomically
+`artifacts/website-smoke-v1/<site>/<run_id>/stability_record.json` and atomically
 updates the ignored runtime cache
-`artifacts/website-smoke-v1/stability-history.jsonl`. The per-build
+`artifacts/website-smoke-v1/<site>/stability-history.jsonl`. The per-build
 `results.json` and `stability_record.json` archives remain the source of truth;
 the JSONL file is only a workspace cache and may be absent after cleanup.
+Stability identity is scoped by suite and site, so results from Mondressy and
+Lavetir never enter the same baseline or streak.
 
 The stability metadata contract uses the actual checked-out workspace HEAD:
 Jenkins captures `checkout scm`'s `GIT_COMMIT` (with `git rev-parse HEAD` as a
@@ -474,6 +477,7 @@ ACCESS_UNSTABLE
 FLAKY
 UNSTABLE
 MIXED_BASELINE
+MIXED_SITE
 ```
 
 Stability is observational: it does not change the Website Smoke V1 exit-code
@@ -482,6 +486,6 @@ or Jenkins result contract.
 Offline summary and validation commands:
 
 ```powershell
-python scripts/summarize_stability.py --last 10
+python scripts/summarize_stability.py --site mondressy --last 10
 python scripts/validate_stability.py
 ```

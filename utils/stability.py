@@ -20,7 +20,7 @@ from typing import Any, Iterable, Optional
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE_ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-v1"
 HISTORY_FILENAME = "stability-history.jsonl"
-STABILITY_SCHEMA_VERSION = 1
+STABILITY_SCHEMA_VERSION = 2
 VALID_TRIGGERS = {"TIMER", "MANUAL", "SCM", "OTHER", "UNKNOWN"}
 VALID_STABILITY_STATUSES = {
     "COLLECTING",
@@ -29,6 +29,7 @@ VALID_STABILITY_STATUSES = {
     "FLAKY",
     "UNSTABLE",
     "MIXED_BASELINE",
+    "MIXED_SITE",
 }
 GATE_STATES = {"PASS", "FAIL", "BLOCKED", "NOT_RUN", "PENDING", "UNKNOWN"}
 FORBIDDEN_MARKERS = (
@@ -87,6 +88,11 @@ def _normalize_result(value: Any, overall_status: str = "") -> str:
 def _normalize_trigger(value: Any) -> str:
     normalized = str(value or "").strip().upper()
     return normalized if normalized in VALID_TRIGGERS else "UNKNOWN"
+
+
+def _record_site(record: dict) -> str:
+    """Return the normalized site identity stored by new stability records."""
+    return str(record.get("site") or "").strip().lower()
 
 
 def trigger_from_environment(environ: Optional[dict[str, str]] = None) -> str:
@@ -300,6 +306,10 @@ def build_stability_record(
     env = environ if environ is not None else os.environ
     viewport = _source_viewport(results, requested_viewport)
     eligible, eligibility_reason = _eligible(results, viewport)
+    site = _record_site(results)
+    if not site:
+        eligible = False
+        eligibility_reason = f"{eligibility_reason}; site is missing"
     commit_sha = _read_commit(env)
     if not commit_sha:
         eligible = False
@@ -324,6 +334,7 @@ def build_stability_record(
     return {
         "schema_version": STABILITY_SCHEMA_VERSION,
         "suite": "website-smoke-v1",
+        "site": site,
         "run_id": str(results.get("run_id") or result_path.parent.name),
         "eligible": eligible,
         "eligibility_reason": eligibility_reason,
@@ -402,6 +413,10 @@ def _record_failures(record: dict) -> list[dict[str, str]]:
 
 def is_record_eligible(record: dict) -> bool:
     """Return whether a record may enter the stability window."""
+    if str(record.get("suite") or "").strip() != "website-smoke-v1":
+        return False
+    if not _record_site(record):
+        return False
     if not str(record.get("commit_sha") or "").strip():
         return False
     if "eligible" in record:
@@ -484,24 +499,70 @@ def summarize_records(
     last: int = 10,
     baseline_commit: Optional[str] = None,
     strict_mixed: bool = False,
+    site: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Summarize the latest N eligible records on one code baseline."""
+    """Summarize the latest N eligible records for one suite/site baseline."""
     target = max(1, int(last))
-    all_records = [record for record in records if isinstance(record, dict)]
-    all_records.sort(key=_record_sort_key)
-    commits = _record_commits(all_records)
+    raw_records = [record for record in records if isinstance(record, dict)]
+    suite_records = [
+        record
+        for record in raw_records
+        if str(record.get("suite") or "").strip() == "website-smoke-v1"
+    ]
+    requested_site = str(site or "").strip().lower()
+    available_sites = sorted({_record_site(record) for record in suite_records if _record_site(record)})
+
+    if requested_site:
+        selected_site = requested_site
+        scoped_records = [
+            record for record in suite_records if _record_site(record) == selected_site
+        ]
+        mixed_sites_ignored = len([item for item in available_sites if item != selected_site])
+    elif len(available_sites) == 1:
+        selected_site = available_sites[0]
+        scoped_records = [
+            record for record in suite_records if _record_site(record) == selected_site
+        ]
+        mixed_sites_ignored = 0
+    elif len(available_sites) > 1:
+        return {
+            "site": "",
+            "all_sites": available_sites,
+            "mixed_sites_ignored": len(available_sites),
+            "baseline_commit": "",
+            "all_commits": [],
+            "mixed_commits_ignored": 0,
+            "eligible_builds": 0,
+            "eligible_builds_on_baseline": 0,
+            "target_builds": target,
+            "records": [],
+            "status": "MIXED_SITE",
+        }
+    else:
+        # Legacy records without a site remain readable, but never qualify for
+        # a new site-scoped streak.
+        selected_site = ""
+        scoped_records = []
+        mixed_sites_ignored = 0
+
+    scoped_records.sort(key=_record_sort_key)
+    commits = _record_commits(scoped_records)
     requested_baseline = str(baseline_commit or "").strip()
     if requested_baseline:
         baseline = requested_baseline
     else:
         baseline = ""
-        for record in reversed(all_records):
+        for record in reversed(scoped_records):
             candidate = str(record.get("commit_sha") or "").strip()
             if candidate:
                 baseline = candidate
                 break
 
-    baseline_records = [record for record in all_records if str(record.get("commit_sha") or "").strip() == baseline]
+    baseline_records = [
+        record
+        for record in scoped_records
+        if str(record.get("commit_sha") or "").strip() == baseline
+    ]
     eligible = [record for record in baseline_records if is_record_eligible(record)]
     selected = eligible[-target:]
     mixed_baseline = strict_mixed and not requested_baseline and len(commits) > 1
@@ -511,6 +572,9 @@ def summarize_records(
         else _status_for_records(selected, target, strict_mixed=False)
     )
     return {
+        "site": selected_site,
+        "all_sites": available_sites,
+        "mixed_sites_ignored": mixed_sites_ignored,
         "baseline_commit": baseline,
         "all_commits": sorted(commits),
         "mixed_commits_ignored": max(0, len(commits) - (1 if baseline else 0)),
@@ -559,8 +623,10 @@ def load_archived_records(root: Path) -> list[dict]:
     return records
 
 
-def _record_key(record: dict) -> tuple[str, str, str]:
+def _record_key(record: dict) -> tuple[str, str, str, str, str]:
     return (
+        str(record.get("suite") or ""),
+        _record_site(record),
         str(record.get("run_id") or ""),
         str(record.get("source_results") or ""),
         f"{record.get('build_number', 0)}:{record.get('commit_sha', '')}:{record.get('finished_at', '')}",
@@ -568,7 +634,7 @@ def _record_key(record: dict) -> tuple[str, str, str]:
 
 
 def merge_records(*record_groups: Iterable[dict]) -> list[dict]:
-    merged: dict[tuple[str, str, str], dict] = {}
+    merged: dict[tuple[str, str, str, str, str], dict] = {}
     for group in record_groups:
         for record in group:
             if isinstance(record, dict):

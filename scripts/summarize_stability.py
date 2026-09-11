@@ -4,6 +4,7 @@ Examples:
 
     python scripts/summarize_stability.py
     python scripts/summarize_stability.py --last 10
+    python scripts/summarize_stability.py --site mondressy --last 10
     python scripts/summarize_stability.py --history path/to/stability-history.jsonl
 
 The summary selects one baseline commit (the newest commit in the available
@@ -37,6 +38,8 @@ from utils.stability import (
     merge_records,
     summarize_records,
 )
+from utils.artifacts import canonical_site_name, site_scoped_artifact_root
+from utils.errors import CliConfigError
 
 
 def _rate(success: int, total: int) -> str:
@@ -56,11 +59,16 @@ def render_summary(summary: dict) -> None:
     records = summary["records"]
     print("=== Website Smoke V1 Stability Summary ===")
     print()
+    print(f"Site: {summary.get('site') or 'MIXED_OR_UNSPECIFIED'}")
+    if summary.get("all_sites"):
+        print(f"Observed Sites: {', '.join(summary['all_sites'])}")
     print(f"Baseline Commit: {summary['baseline_commit'] or 'UNKNOWN'}")
     print(f"Eligible Builds: {summary['eligible_builds']}")
     print(f"Eligible Builds On Baseline: {summary['eligible_builds_on_baseline']}")
     if summary.get("mixed_commits_ignored"):
         print(f"Mixed Commits Ignored: {summary['mixed_commits_ignored']}")
+    if summary.get("mixed_sites_ignored"):
+        print(f"Mixed Sites Ignored: {summary['mixed_sites_ignored']}")
     print()
 
     successful = sum(1 for record in records if record.get("jenkins_result") == "SUCCESS")
@@ -114,14 +122,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--last", type=int, default=10, help="number of eligible records to summarize")
     parser.add_argument(
         "--history",
-        default=str(WEBSITE_ARTIFACT_ROOT / HISTORY_FILENAME),
-        help="stability-history.jsonl path",
+        help="stability-history.jsonl path (defaults to the selected site scope)",
     )
     parser.add_argument(
         "--records-root",
         default=str(WEBSITE_ARTIFACT_ROOT),
         help="archived stability_record.json root",
     )
+    parser.add_argument("--site", help="configured site identifier to summarize")
     parser.add_argument("--baseline-commit", help="explicit baseline SHA")
     parser.add_argument(
         "--strict-mixed-baseline",
@@ -133,13 +141,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.last <= 0:
         parser.error("--last must be positive")
 
-    history_records, history_errors = load_history(Path(args.history))
-    archived_records = load_archived_records(Path(args.records_root))
+    records_root = Path(args.records_root)
+    try:
+        site = canonical_site_name(args.site) if args.site else None
+    except CliConfigError as exc:
+        parser.error(str(exc))
+    history_path = (
+        Path(args.history)
+        if args.history
+        else (
+            site_scoped_artifact_root(records_root, site) / HISTORY_FILENAME
+            if site
+            else records_root / HISTORY_FILENAME
+        )
+    )
+
+    history_records, history_errors = load_history(history_path)
+    archived_records = load_archived_records(records_root)
     summary = summarize_records(
         merge_records(history_records, archived_records),
         last=args.last,
         baseline_commit=args.baseline_commit,
         strict_mixed=args.strict_mixed_baseline,
+        site=site,
     )
     summary["history_parse_errors"] = history_errors
 
@@ -155,4 +179,3 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

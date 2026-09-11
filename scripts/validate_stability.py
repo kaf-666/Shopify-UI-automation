@@ -52,6 +52,7 @@ def _record(
     index: int,
     commit: str = "stable-commit",
     *,
+    site: str = "mondressy",
     http: dict[str, int] | None = None,
     cart_failure: bool = False,
 ) -> dict[str, Any]:
@@ -71,6 +72,7 @@ def _record(
     return {
         "schema_version": STABILITY_SCHEMA_VERSION,
         "suite": "website-smoke-v1",
+        "site": site,
         "run_id": f"run-{commit}-{index}",
         "eligible": True,
         "eligibility_reason": "complete both run",
@@ -99,7 +101,7 @@ def _record(
         "python_exit_code": 0 if not cart_failure else 1,
         "jenkins_result": "SUCCESS" if not cart_failure else "FAILURE",
         "overall_status": "PASS" if not cart_failure else "FAIL",
-        "source_results": f"artifacts/website-smoke-v1/run-{commit}-{index}/results.json",
+        "source_results": f"artifacts/website-smoke-v1/{site}/run-{commit}-{index}/results.json",
     }
 
 
@@ -119,6 +121,7 @@ def _metadata_results() -> dict[str, Any]:
         )
     return {
         "run_id": "metadata-contract",
+        "site": "mondressy",
         "started_at": "2026-08-21T00:00:00+08:00",
         "finished_at": "2026-08-21T00:01:00+08:00",
         "duration_ms": 60_000,
@@ -136,6 +139,7 @@ def validate_metadata_contract() -> bool:
         PROJECT_ROOT
         / "artifacts"
         / "website-smoke-v1"
+        / "mondressy"
         / "metadata-contract"
         / "results.json"
     )
@@ -216,7 +220,7 @@ def validate_metadata_contract() -> bool:
 
 def validate_record_shape(record: dict) -> bool:
     required = {
-        "schema_version", "suite", "run_id", "eligible", "build_number", "commit_sha",
+        "schema_version", "suite", "site", "run_id", "eligible", "build_number", "commit_sha",
         "viewport", "trigger", "started_at", "finished_at", "duration_seconds",
         "python_version", "playwright_version", "desktop", "mobile", "combined",
         "pre_clean", "cleanup", "http", "failure_cases", "failure_classifications",
@@ -224,6 +228,7 @@ def validate_record_shape(record: dict) -> bool:
     }
     ok = check(required.issubset(record), "record required fields")
     ok = check(record.get("suite") == "website-smoke-v1", "record suite") and ok
+    ok = check(bool(record.get("site")), "record site") and ok
     ok = check(record.get("viewport") == "both", "record viewport") and ok
     ok = check(set((record.get("http") or {})) == {"403", "429", "5xx"}, "record HTTP metrics") and ok
     ok = check(contains_forbidden_marker(record) is None, "record contains no secret marker") and ok
@@ -268,6 +273,23 @@ def main() -> int:
 
     empty_result = summarize_records([], last=10)
     ok_all = check(empty_result["status"] == "COLLECTING", "Scenario F: missing history", empty_result["status"]) and ok_all
+
+    site_records = [_record(index, site="mondressy") for index in range(1, 7)]
+    site_records.extend(_record(index, site="lavetir") for index in range(1, 7))
+    mondressy_summary = summarize_records(site_records, last=10, site="mondressy")
+    lavetir_summary = summarize_records(site_records, last=10, site="lavetir")
+    mixed_site_summary = summarize_records(site_records, last=10)
+    ok_all = check(
+        mondressy_summary["eligible_builds_on_baseline"] == 6
+        and lavetir_summary["eligible_builds_on_baseline"] == 6
+        and mixed_site_summary["status"] == "MIXED_SITE",
+        "Scenario G: site histories never merge",
+        (
+            f"mondressy={mondressy_summary['eligible_builds_on_baseline']} "
+            f"lavetir={lavetir_summary['eligible_builds_on_baseline']} "
+            f"mixed={mixed_site_summary['status']}"
+        ),
+    ) and ok_all
 
     with tempfile.TemporaryDirectory(prefix="stability_validate_") as temp_dir:
         temp = Path(temp_dir)

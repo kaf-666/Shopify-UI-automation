@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from utils.artifacts import canonical_site_name, site_scoped_artifact_root
+from utils.errors import CliConfigError
 from utils.stability import (
     HISTORY_FILENAME,
     WEBSITE_ARTIFACT_ROOT,
@@ -98,8 +100,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Stability Record: forbidden secret marker detected ({marker})")
         return 1
 
+    try:
+        site = canonical_site_name(record.get("site") or "")
+        record["site"] = site
+        default_history_root = site_scoped_artifact_root(artifacts_root, site)
+    except CliConfigError:
+        print("Stability Record: invalid site scope in results")
+        return 1
+
     record_path = result_path.parent / "stability_record.json"
-    history_path = Path(args.history) if args.history else artifacts_root / HISTORY_FILENAME
+    history_path = (
+        Path(args.history)
+        if args.history
+        else default_history_root / HISTORY_FILENAME
+    )
     try:
         atomic_write_json(record_path, record)
         write_history_record(history_path, record)
@@ -109,7 +123,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     history_records, history_errors = load_history(history_path)
     archived_records = load_archived_records(artifacts_root)
-    summary = summarize_records(merge_records(history_records, archived_records), last=10)
+    summary = summarize_records(
+        merge_records(history_records, archived_records), last=10, site=site
+    )
     print(f"Stability Record: {record_path.as_posix()}")
     print(f"History JSONL: {history_path.as_posix()}")
     print(f"Eligible Builds On Baseline: {summary['eligible_builds_on_baseline']}")
