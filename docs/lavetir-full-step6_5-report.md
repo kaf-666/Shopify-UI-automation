@@ -22,6 +22,7 @@ a scheduled observation that was not executed from this environment.
 | --- | --- | --- | --- |
 | Lavetir Full | `artifacts/website-smoke-v1/lavetir/20260914_132621/results.json` | Desktop 15/15 PASS | Expected 11; Unexpected 0; High-risk 0 |
 | Lavetir Full | `artifacts/website-smoke-v1/lavetir/20260914_131529/results.json` | Mobile 15/15 PASS | Expected 11; Unexpected 0; High-risk 0 |
+| Lavetir Full | `artifacts/website-smoke-v1/lavetir/20260914_133510/results.json` | Both 30/30 PASS | Expected 22; Unexpected 0; High-risk 0 |
 | Mondressy Full | `artifacts/website-smoke-v1/mondressy/20260914_130347/results.json` | Both 30/30 PASS | Expected 14; Unexpected 0; High-risk 0 |
 | Lavetir Readonly | `artifacts/website-smoke-readonly-v1/lavetir/20260914_131955/results.json` | Both 22/22 PASS | Readonly violations 0 |
 | Mondressy Readonly | `artifacts/website-smoke-readonly-v1/mondressy/20260914_132010/results.json` | Both 22/22 PASS | Readonly violations 0 |
