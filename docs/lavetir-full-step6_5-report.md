@@ -29,7 +29,7 @@ a scheduled observation that was not executed from this environment.
 
 Offline gates also passed: `pytest` (163 passed), site-config validation for
 both sites, runtime contract (`--check full`), result-schema validation for all
-five evidence files, traffic-inventory validation, stability validation,
+six evidence files, traffic-inventory validation, stability validation,
 secret-leakage scan, `compileall`, and `git diff --check`.
 
 ## 6.5C–6.5F — Delivery state
