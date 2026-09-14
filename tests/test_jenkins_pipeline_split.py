@@ -11,6 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ORIGINAL_PIPELINE = PROJECT_ROOT / "Jenkinsfile"
 FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full"
 READONLY_PIPELINE = PROJECT_ROOT / "Jenkinsfile.readonly"
+LAVETIR_FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full.lavetir"
 
 COMMON_STAGES = (
     "Checkout",
@@ -37,6 +38,29 @@ def _text(path: Path) -> str:
 def test_split_pipeline_files_exist() -> None:
     assert FULL_PIPELINE.exists()
     assert READONLY_PIPELINE.exists()
+    assert LAVETIR_FULL_PIPELINE.exists()
+
+
+def test_lavetir_full_pipeline_is_manual_only_and_fixed_to_site() -> None:
+    content = _text(LAVETIR_FULL_PIPELINE)
+    assert "agent any" in content
+    assert "name: 'SMOKE_VIEWPORT'" in content
+    assert "choices: ['both', 'desktop', 'mobile']" in content
+    assert "stage('Website Smoke V1')" in content
+    assert "scripts/run_website_smoke_v1.py --site lavetir" in content
+    assert "scripts/validate_site_config.py --site lavetir --suite website_smoke_v1" in content
+    assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
+    assert "scripts/record_stability.py" in content
+    assert "artifacts/website-smoke-v1/lavetir" in content
+    assert "MONDRESSY" not in content
+    for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\("):
+        assert re.search(pattern, content, flags=re.IGNORECASE) is None
+    for credential_id in (
+        "LAVETIR_US_SHOPIFY_SIGNATURE",
+        "LAVETIR_US_SHOPIFY_SIGNATURE_INPUT",
+        "LAVETIR_US_SHOPIFY_SIGNATURE_AGENT",
+    ):
+        assert f"credentials('{credential_id}')" in content
 
 
 def test_new_pipelines_are_manual_only() -> None:

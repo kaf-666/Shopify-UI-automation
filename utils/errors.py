@@ -39,6 +39,23 @@ SENSITIVE_ENV_NAMES = (
     "SHOPIFY_PROXY_PASSWORD",
     "PLAYWRIGHT_PROXY_PASSWORD",
 )
+SIGNED_REQUEST_ENV_NAME_RE = re.compile(
+    r"(?:^|_)SHOPIFY_SIGNATURE(?:_INPUT|_AGENT)?$", flags=re.IGNORECASE
+)
+
+
+def sensitive_env_names(environ=None) -> tuple[str, ...]:
+    """Return known plus convention-matched Signed Request env names safely.
+
+    Site profiles provide the exact mapping at runtime.  This convention-based
+    supplement keeps error and artifact redaction safe for a future profile
+    without adding that site's secret variable names to source code.
+    """
+
+    env = environ if environ is not None else os.environ
+    names = set(SENSITIVE_ENV_NAMES)
+    names.update(name for name in env if SIGNED_REQUEST_ENV_NAME_RE.search(str(name)))
+    return tuple(sorted(names))
 
 
 def sanitize_message(message: object) -> str:
@@ -49,7 +66,7 @@ def sanitize_message(message: object) -> str:
     """
 
     text = str(message or "")
-    for name in SENSITIVE_ENV_NAMES:
+    for name in sensitive_env_names():
         value = os.environ.get(name)
         if value:
             text = text.replace(value, "[REDACTED]")

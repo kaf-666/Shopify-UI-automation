@@ -6,12 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from utils.readonly_mutation_guard import ReadonlyMutationGuard
+from utils.readonly_mutation_guard import (
+    ReadonlyMutationGuard,
+    TransactionalMutationPolicy,
+    merge_transactional_mutation_summaries,
+)
 
 
 class _FakeRoute:
-    def __init__(self, url: str, method: str) -> None:
-        self.request = SimpleNamespace(url=url, method=method)
+    def __init__(self, url: str, method: str, post_data=None) -> None:
+        self.request = SimpleNamespace(url=url, method=method, post_data=post_data)
         self.calls: list[str] = []
 
     def abort(self) -> None:
@@ -118,3 +122,161 @@ def test_guard_records_safe_path_without_query_or_credentials() -> None:
     assert violation["path"] == "/cart/update.js"
     assert "secret" not in str(violation)
     assert ReadonlyMutationGuard.safe_detail(violation) == "blocked cart mutation: PATCH /cart/update.js"
+
+
+def test_transactional_policy_allows_expected_cart_mutations() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com", "www.mondressy.com"))
+    policy.attach(context)
+    policy.set_scope("desktop", "browse", "WSMOKE-CART-01", "CASE")
+
+    route = _FakeRoute("https://www.mondressy.com/cart/add.js?token=redacted", "POST")
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events()[0]["classification"] == policy.EXPECTED
+    assert policy.events()[0]["blocked"] is False
+    summary = policy.summary()
+    assert summary["status"] == "PASS"
+    assert summary["expected_mutation"] == 1
+    assert summary["unexpected_mutation"] == 0
+    assert summary["high_risk_mutation"] == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://www.mondressy.com/wishlist/add", "UNEXPECTED_MUTATION"),
+        ("https://www.mondressy.com/account/login", "HIGH_RISK_MUTATION"),
+        ("https://www.mondressy.com/checkouts/token/payment", "HIGH_RISK_MUTATION"),
+        ("https://paypal.com/checkout", "HIGH_RISK_MUTATION"),
+    ],
+)
+def test_transactional_policy_aborts_unexpected_and_high_risk_mutations(url: str, expected: str) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com", "www.mondressy.com"))
+    policy.attach(context)
+    policy.set_scope("mobile", "browse", "WSMOKE-CHECKOUT-01", "CASE")
+
+    route = _FakeRoute(url, "POST")
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.events()[0]["classification"] == expected
+    assert policy.events()[0]["blocked"] is True
+    assert policy.summary()["status"] == "FAIL"
+
+
+def test_transactional_policy_ignores_third_party_telemetry() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("www.mondressy.com",))
+    policy.attach(context)
+
+    route = _FakeRoute("https://www.google-analytics.com/collect", "POST")
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events() == []
+    assert policy.summary()["status"] == "PASS"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/.well-known/shopify/monorail/unstable/produce_batch",
+        "/.well-known/shopify/fec/produce",
+        "/api/collect",
+        "/api/event/collect",
+        "/cdn-cgi/rum",
+    ],
+)
+def test_transactional_policy_ignores_first_party_platform_telemetry(path: str) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("www.mondressy.com",))
+    policy.attach(context)
+    route = _FakeRoute(f"https://www.mondressy.com{path}", "POST")
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events() == []
+
+
+def test_transactional_policy_treats_checkout_entry_and_read_graphql_as_safe_scope() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("www.mondressy.com",))
+    policy.attach(context)
+
+    checkout_entry = _FakeRoute("https://www.mondressy.com/checkouts", "POST")
+    context.handler(checkout_entry)
+    graphql_read = _FakeRoute(
+        "https://www.mondressy.com/api/2026-01/graphql.json",
+        "POST",
+        '{"query":"query CartPreview { cart { id } }"}',
+    )
+    context.handler(graphql_read)
+
+    assert checkout_entry.calls == ["fallback"]
+    assert graphql_read.calls == ["fallback"]
+    assert policy.summary()["expected_mutation"] == 1
+    assert policy.summary()["status"] == "PASS"
+
+
+def test_transactional_policy_blocks_post_to_existing_checkout_session() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("www.mondressy.com",))
+    policy.attach(context)
+    route = _FakeRoute("https://www.mondressy.com/checkouts/session-token", "POST")
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.summary()["high_risk_mutation"] == 1
+
+
+def test_transactional_policy_blocks_graphql_state_change() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("www.mondressy.com",))
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://www.mondressy.com/api/2026-01/graphql.json",
+        "POST",
+        '{"query":"mutation SubmitOrder { submitOrder { id } }"}',
+    )
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.summary()["unexpected_mutation"] == 1
+    assert policy.summary()["high_risk_mutation"] == 0
+    assert policy.summary()["status"] == "FAIL"
+
+
+def test_transactional_mutation_summaries_merge_without_request_data() -> None:
+    merged = merge_transactional_mutation_summaries(
+        [
+            {
+                "mode": "TRANSACTIONAL_SAFE",
+                "status": "PASS",
+                "expected_mutation": 2,
+                "unexpected_mutation": 0,
+                "high_risk_mutation": 0,
+                "blocked_mutation": 0,
+                "by_path": [
+                    {"classification": "EXPECTED_MUTATION", "method": "POST", "path": "/cart/add.js", "count": 2}
+                ],
+            },
+            {
+                "mode": "TRANSACTIONAL_SAFE",
+                "status": "FAIL",
+                "expected_mutation": 1,
+                "unexpected_mutation": 0,
+                "high_risk_mutation": 1,
+                "blocked_mutation": 1,
+                "by_path": [
+                    {"classification": "HIGH_RISK_MUTATION", "method": "POST", "path": "/account/login", "count": 1}
+                ],
+            },
+        ]
+    )
+    assert merged["status"] == "FAIL"
+    assert merged["expected_mutation"] == 3
+    assert merged["high_risk_mutation"] == 1
+    assert "token" not in str(merged)

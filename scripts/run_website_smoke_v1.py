@@ -28,6 +28,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -40,7 +41,7 @@ from utils.artifacts import (
     canonical_site_name,
     site_scoped_artifact_dir,
 )
-from utils.browser import close_browser, create_browser, load_site_config, load_settings
+from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.result import (
@@ -51,6 +52,11 @@ from utils.result import (
     make_run_id,
     write_results_json,
 )
+from utils.readonly_mutation_guard import (
+    TransactionalMutationPolicy,
+    merge_transactional_mutation_summaries,
+)
+from utils.site_config_validator import WEBSITE_SMOKE_V1, validate_site_config
 from utils.suite_runner import guarded_main
 from utils.traffic_inventory import TrafficInventory
 from utils.traffic_reduction import (
@@ -62,12 +68,48 @@ from utils.traffic_reduction import (
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-v1"
 
 
+def _runner_mutation_summary(runner) -> dict:
+    """Return a normalized policy summary, including legacy test doubles."""
+    method = getattr(runner, "mutation_summary", None)
+    if callable(method):
+        value = method()
+        if isinstance(value, dict):
+            return value
+    return {
+        "mode": "TRANSACTIONAL_SAFE",
+        "status": "PASS",
+        "expected_mutation": 0,
+        "unexpected_mutation": 0,
+        "high_risk_mutation": 0,
+        "blocked_mutation": 0,
+        "by_path": [],
+    }
+
+
+def _traffic_first_party_hosts(site_config: dict, base_url: str) -> tuple[str, ...]:
+    """Use the active site's explicit allowlist for observation classification."""
+    access = site_config.get("access") or {}
+    raw_hosts = access.get("allowed_hosts") if isinstance(access, dict) else None
+    hosts = tuple(
+        str(host).strip().lower()
+        for host in (raw_hosts or [])
+        if str(host).strip()
+    )
+    if hosts:
+        return hosts
+    host = (urlsplit(base_url).hostname or "").lower()
+    if host:
+        return (host,)
+    raise CliConfigError("unable to derive first-party hosts", category="INVALID_ACCESS_CONFIG")
+
+
 def run_viewport(
     viewport: str,
     artifact_dir: Path,
     traffic_inventory: Optional[TrafficInventory] = None,
     traffic_reduction: Optional[TrafficReductionPolicy] = None,
     site_name: Optional[str] = None,
+    mutation_policy: Optional[TransactionalMutationPolicy] = None,
 ) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
     runtime = create_browser(viewport, site_name=site_name)
     try:
@@ -80,6 +122,11 @@ def run_viewport(
                 traffic_inventory.attach_context(runtime.context, viewport, runtime.page)
             except Exception as exc:  # observation must not affect business execution
                 traffic_inventory.record_error("attach_context", exc)
+        if mutation_policy is not None:
+            # Register after Signed Request, traffic reduction, and inventory
+            # so expected mutations fall through the complete route chain,
+            # while high-risk requests are aborted before reaching Shopify.
+            mutation_policy.attach(runtime.context)
         runtime_meta = runtime.metadata()
         if traffic_reduction is not None and traffic_reduction.enabled:
             runtime_meta["traffic_reduction"] = traffic_reduction.runtime_summary()
@@ -90,10 +137,13 @@ def run_viewport(
             viewport,
             artifact_dir=artifact_dir,
             traffic_inventory=traffic_inventory,
+            mutation_policy=mutation_policy,
         )
         results = runner.run_all()
         return results, runner, runtime_meta
     finally:
+        if mutation_policy is not None:
+            mutation_policy.detach()
         close_browser(runtime)
 
 
@@ -111,6 +161,13 @@ def print_viewport(viewport: str, results: List, runner: Optional[WebsiteSmokeV1
             f"{'':<20} Pre-clean: {runner.pre_clean_status} | Cleanup: {runner.cleanup_status} "
             f"| Search recovery: {runner.search_recovery_used} | CF interruption: {runner.cf_interruption}"
         )
+        mutation = _runner_mutation_summary(runner)
+        print(
+            f"{'':<20} Mutation: {mutation.get('status')} "
+            f"EXPECTED={mutation.get('expected_mutation', 0)} "
+            f"UNEXPECTED={mutation.get('unexpected_mutation', 0)} "
+            f"HIGH_RISK={mutation.get('high_risk_mutation', 0)}"
+        )
     print()
 
 
@@ -127,6 +184,7 @@ def _write_run_result(
     started: float,
     viewports: List[ViewportResult],
     runtime: Optional[dict] = None,
+    mutation_summary: Optional[dict] = None,
     fatal_error: Optional[dict] = None,
 ) -> bool:
     """统一写正常 / partial / fatal results.json。"""
@@ -147,6 +205,7 @@ def _write_run_result(
         runtime=runtime or {},
         summary={**counts, "total": total},
         viewports=viewports,
+        mutation_summary=mutation_summary,
         fatal_error=fatal_error,
     )
     try:
@@ -233,10 +292,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     artifact_dir: Optional[Path] = None
     vp_results: List[ViewportResult] = []
     runtime_by_viewport: Dict[str, dict] = {}
+    mutation_summaries: List[dict] = []
 
     try:
         settings = load_settings()
-        site = canonical_site_name(args.site or str(settings.get("default_site") or ""))
+        requested_site = args.site if args.site is not None else str(settings.get("default_site") or "")
+        site = canonical_site_name(requested_site)
+        site_cfg = validate_site_config(site, suite=WEBSITE_SMOKE_V1)
+        base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
         artifact_dir = site_scoped_artifact_dir(ARTIFACT_ROOT, site, run_id)
     except Exception as exc:
         classification, exit_code = _fatal_classification(exc)
@@ -249,30 +312,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
 
-    traffic_inventory = TrafficInventory() if args.traffic_inventory else None
+    traffic_inventory = (
+        TrafficInventory(first_party_hosts=_traffic_first_party_hosts(site_cfg, base_url))
+        if args.traffic_inventory
+        else None
+    )
     traffic_reduction = create_traffic_reduction_policy(args.traffic_reduction)
-
-    try:
-        site_cfg = load_site_config(site)
-        base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
-    except Exception as exc:
-        if traffic_inventory is not None:
-            traffic_inventory.record_error("startup", exc)
-        classification, exit_code = _fatal_classification(exc)
-        ok = _write_run_result(
-            artifact_dir,
-            run_id,
-            site,
-            base_url,
-            started_at,
-            started,
-            [],
-            fatal_error={"classification": classification, "message": sanitize_message(exc)},
-        )
-        print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
-        _write_traffic_inventory(traffic_inventory, artifact_dir)
-        _write_traffic_reduction(traffic_reduction, artifact_dir)
-        return exit_code if ok else exit_code
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 
@@ -282,22 +327,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         for vp in viewports:
             vp_started_ts = iso_now()
             vp_started = time.perf_counter()
+            mutation_policy = TransactionalMutationPolicy(
+                _traffic_first_party_hosts(site_cfg, base_url)
+            )
             results, runner, runtime_meta = run_viewport(
                 vp,
                 artifact_dir,
                 traffic_inventory=traffic_inventory,
                 traffic_reduction=traffic_reduction,
                 site_name=site,
+                mutation_policy=mutation_policy,
             )
             runtime_by_viewport[vp] = runtime_meta
             vp_duration = int((time.perf_counter() - vp_started) * 1000)
 
             counts = count_statuses(results)
+            mutation_summary = _runner_mutation_summary(runner)
+            mutation_summaries.append(mutation_summary)
             cases_ok = counts["FAIL"] == 0 and counts["BLOCKED"] == 0
             base_states_ok = (
                 runner.pre_clean_status == "PASS" and runner.cleanup_status == "PASS"
             )
-            vp_status = "PASS" if cases_ok and base_states_ok else "FAIL"
+            vp_status = (
+                "PASS"
+                if cases_ok and base_states_ok and mutation_summary.get("status") == "PASS"
+                else "FAIL"
+            )
             vp_results.append(
                 ViewportResult(
                     viewport=vp,
@@ -321,6 +376,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         "detail": runner.cleanup_error or runner.cleanup_detail,
                     },
                     cases=results,
+                    mutation_summary=mutation_summary,
                 )
             )
             print_viewport(vp, results, runner)
@@ -335,6 +391,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             started,
             vp_results,
             runtime={"viewports": runtime_by_viewport},
+            mutation_summary=merge_transactional_mutation_summaries(mutation_summaries),
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
@@ -348,7 +405,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         "blocked": sum(v.summary["blocked"] for v in vp_results),
     }
     total = sum(len(v.cases) for v in vp_results)
-    overall = "PASS" if all(v.status == "PASS" for v in vp_results) else "FAIL"
+    mutation_summary = merge_transactional_mutation_summaries(mutation_summaries)
+    overall = (
+        "PASS"
+        if all(v.status == "PASS" for v in vp_results)
+        and mutation_summary.get("status") == "PASS"
+        else "FAIL"
+    )
 
     if not _write_run_result(
         artifact_dir,
@@ -359,6 +422,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         started,
         vp_results,
         runtime={"viewports": runtime_by_viewport},
+        mutation_summary=mutation_summary,
     ):
         _write_traffic_inventory(traffic_inventory, artifact_dir)
         _write_traffic_reduction(traffic_reduction, artifact_dir)
@@ -378,6 +442,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"FAIL:     {total_counts['fail']}")
     print(f"BLOCKED:  {total_counts['blocked']}")
     print(f"TOTAL:    {total}")
+    print()
+    print("Mutation")
+    print(f"MODE:             {mutation_summary['mode']}")
+    print(f"STATUS:           {mutation_summary['status']}")
+    print(f"EXPECTED_MUTATION:{mutation_summary['expected_mutation']}")
+    print(f"UNEXPECTED_MUTATION: {mutation_summary['unexpected_mutation']}")
+    print(f"HIGH_RISK_MUTATION:  {mutation_summary['high_risk_mutation']}")
+    print(f"BLOCKED_MUTATION:    {mutation_summary['blocked_mutation']}")
     print()
     print("Results:")
     print(f"{artifact_display_path(artifact_dir)}/results.json")

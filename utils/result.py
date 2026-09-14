@@ -91,6 +91,7 @@ class ViewportResult:
     pre_clean: dict
     cleanup: dict
     cases: List[CaseResult] = field(default_factory=list)
+    mutation_summary: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +105,11 @@ class ViewportResult:
             "pre_clean": _safe_mapping(self.pre_clean),
             "cleanup": _safe_mapping(self.cleanup),
             "cases": [c.to_dict() for c in self.cases],
+            "mutation_summary": (
+                _safe_mapping(self.mutation_summary)
+                if self.mutation_summary is not None
+                else None
+            ),
         }
 
 
@@ -121,6 +127,7 @@ class RunResult:
     summary: dict
     viewports: List[ViewportResult] = field(default_factory=list)
     schema_version: str = SCHEMA_VERSION
+    mutation_summary: Optional[dict] = None
     fatal_error: Optional[dict] = None
 
     def to_dict(self) -> dict:
@@ -137,6 +144,9 @@ class RunResult:
             "runtime": _safe_mapping(self.runtime),
             "summary": dict(self.summary),
             "viewports": [v.to_dict() for v in self.viewports],
+            "mutation_summary": (
+                _safe_mapping(self.mutation_summary) if self.mutation_summary is not None else None
+            ),
             "fatal_error": (
                 {
                     "classification": self.fatal_error.get("classification", "RUNTIME_ERROR"),

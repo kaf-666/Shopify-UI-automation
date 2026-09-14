@@ -36,8 +36,8 @@ def test_full_cli_writes_to_a_site_scoped_artifact_directory(monkeypatch, tmp_pa
     monkeypatch.setattr(full_cli, "load_settings", lambda: {"default_site": "mondressy"})
     monkeypatch.setattr(
         full_cli,
-        "load_site_config",
-        lambda site: {"base_url": f"https://{site}.example.test"},
+        "validate_site_config",
+        lambda site, **_kwargs: {"base_url": f"https://{site}.example.test"},
     )
     monkeypatch.setattr(full_cli, "resolve_url", lambda value, _field: value)
     monkeypatch.setattr(

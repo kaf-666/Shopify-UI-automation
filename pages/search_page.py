@@ -133,8 +133,34 @@ class SearchPage(BasePage):
                     except TimeoutError:
                         # 结果页未就绪：可能被 Cloudflare 挑战弹回首页
                         raise SearchSessionReloaded("results page did not settle") from None
+                # The navigation can complete between the key press and the
+                # wait_for_url subscription (especially when the result page
+                # is served from a warm cache). Accept the already-settled
+                # same-page state instead of treating a missed event as an
+                # overlay/reload failure.
+                if "/search" in self.page.url and (
+                    query is None or self.current_query() == query
+                ):
+                    try:
+                        self.wait_results()
+                        return recovered
+                    except TimeoutError:
+                        raise SearchSessionReloaded("results page did not settle") from None
             except SearchSessionReloaded as exc:
                 last_reason = str(exc)
+                # A reload/overlay can race with the navigation watcher while
+                # the final /search document is already settling. If the
+                # business URL and query are correct, use the result grid as
+                # the authoritative completion signal before rebuilding the
+                # session.
+                if "/search" in self.page.url and (
+                    query is None or self.current_query() == query
+                ):
+                    try:
+                        self.wait_results()
+                        return recovered
+                    except TimeoutError:
+                        pass
             if attempt == 0:
                 recovered = True
                 self._reopen_session()

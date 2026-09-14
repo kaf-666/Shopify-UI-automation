@@ -20,12 +20,7 @@ from urllib.parse import urlparse
 
 from utils.errors import CliConfigError
 
-SECRET_VAR_MAP = {
-    "MONDRESSY_US_SHOPIFY_SIGNATURE": "Signature",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT": "Signature-Input",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT": "Signature-Agent",
-}
-DEFAULT_ALLOWED_HOSTS = ("mondressy.com", "www.mondressy.com")
+SIGNATURE_HEADERS = ("Signature", "Signature-Input", "Signature-Agent")
 EXPIRY_WARN_SECONDS = 7 * 24 * 3600
 
 
@@ -42,7 +37,24 @@ def parse_expires(signature_input: str) -> Optional[int]:
     return int(match.group(1)) if match else None
 
 
-def parse_secret_file(path) -> Dict[str, str]:
+def _configured_env_names(env_names: Optional[Mapping[str, str]]) -> Dict[str, str]:
+    """Require an explicit header-to-environment mapping for each site."""
+
+    if not isinstance(env_names, Mapping):
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "signed_request env mapping is required")
+    names: Dict[str, str] = {}
+    for header in SIGNATURE_HEADERS:
+        name = str(env_names.get(header) or "").strip()
+        if not name:
+            raise SiteAccessError(
+                "SITE_ACCESS_CONFIG_FAILURE",
+                f"signed_request env mapping is missing: {header}",
+            )
+        names[header] = name
+    return names
+
+
+def parse_secret_file(path, env_names: Mapping[str, str]) -> Dict[str, str]:
     """以文本方式读取 .ps1 环境文件（绝不执行）→ {请求头: 值}。"""
     p = Path(path)
     if not p.exists():
@@ -52,8 +64,8 @@ def parse_secret_file(path) -> Dict[str, str]:
         text = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
         raise SiteAccessError("SIGNED_REQUEST_PARSE_FAILURE", "secret file could not be read") from exc
-    for var, header in SECRET_VAR_MAP.items():
-        m = re.search(rf"\$env:{var}\s*=\s*'([^']*)'", text)
+    for header, variable in _configured_env_names(env_names).items():
+        m = re.search(rf"\$env:{re.escape(variable)}\s*=\s*'([^']*)'", text)
         if m:
             headers[header] = m.group(1)
     return headers
@@ -66,16 +78,7 @@ def parse_env_headers(
     """从进程环境读取 Signed Request，不回显任何凭证值。"""
 
     env = environ if environ is not None else os.environ
-    configured = dict(env_names or {})
-    names = {
-        header: str(
-            configured.get(header)
-            or configured.get(header.lower())
-            or configured.get(var)
-            or var
-        )
-        for var, header in SECRET_VAR_MAP.items()
-    }
+    names = _configured_env_names(env_names)
     headers = {header: str(env.get(name) or "") for header, name in names.items()}
     missing = [name for header, name in names.items() if not headers.get(header)]
     if missing:
@@ -88,8 +91,7 @@ def parse_env_headers(
 
 def validate_signature_headers(headers: Dict[str, str]) -> Optional[int]:
     """校验凭证集合完整性并返回过期时间戳。"""
-    required = ["Signature", "Signature-Input", "Signature-Agent"]
-    missing = [k for k in required if not headers.get(k)]
+    missing = [k for k in SIGNATURE_HEADERS if not headers.get(k)]
     if missing:
         raise SiteAccessError("SIGNED_REQUEST_INCOMPLETE", "required headers missing: " + ", ".join(missing))
     expires = parse_expires(headers["Signature-Input"])
@@ -202,37 +204,39 @@ def create_site_access_policy(site_name: str, site_config: dict) -> SiteAccessPo
     access = site_config.get("access") or {}
     if not isinstance(access, dict):
         raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "access config must be a mapping")
-    policy_type = str(access.get("type") or "none").lower()
-    if policy_type != "signed_request":
+    policy_type = str(access.get("mode") or access.get("type") or "").strip().lower()
+    if policy_type == "none":
         return NoAccessPolicy()
+    if policy_type != "signed_request":
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "access mode must be explicitly configured")
     allowed_hosts = _validate_allowed_hosts(
-        access.get("allowed_hosts") or list(DEFAULT_ALLOWED_HOSTS)
+        access.get("allowed_hosts")
     )
     source = str(access.get("source") or "").strip().lower()
     secret_file = access.get("secret_file")
     if not source:
-        # 兼容旧开发配置，但新配置必须显式使用 source: env。
-        source = "file" if secret_file else "env"
+        raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "signed_request source must be explicit")
+    env_names = access.get("env") or access.get("environment")
 
     if source in ("env", "environment"):
         headers = parse_env_headers(
-            env_names=access.get("env") or access.get("environment") or {}
+            env_names=env_names
         )
     elif source in ("file", "secret_file"):
         if not secret_file:
             raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", "file source requires an explicit secret_file")
-        headers = parse_secret_file(secret_file)
+        headers = parse_secret_file(secret_file, env_names)
     elif source in ("env_or_file", "environment_or_file"):
         if secret_file:
             try:
                 headers = parse_env_headers(
-                    env_names=access.get("env") or access.get("environment") or {}
+                    env_names=env_names
                 )
             except SiteAccessError:
-                headers = parse_secret_file(secret_file)
+                headers = parse_secret_file(secret_file, env_names)
         else:
             headers = parse_env_headers(
-                env_names=access.get("env") or access.get("environment") or {}
+                env_names=env_names
             )
     else:
         raise SiteAccessError("SITE_ACCESS_CONFIG_FAILURE", f"unsupported signed_request source: {source}")

@@ -1,18 +1,12 @@
 /*
- * Jenkins orchestration for the Lavetir Website Smoke Readonly V1 pilot.
+ * Jenkins orchestration for the fixed Lavetir Website Smoke V1 contract.
  *
- * This pipeline is intentionally fixed to site=lavetir. The Python runner
- * owns read-only business logic, mutation blocking, results.json and evidence;
- * this pipeline prepares the agent, binds Lavetir credentials, runs the gates,
- * and archives artifacts. It supports manual activation and the q4h
- * scheduled Readonly pilot for the fixed Lavetir site.
+ * This definition is intentionally manual-only while the four-job joint
+ * observation gate is pending. The Python runner owns business behavior,
+ * transactional mutation policy, exit codes, results.json and evidence.
  */
 pipeline {
     agent any
-
-    triggers {
-        cron('H H/4 * * *')
-    }
 
     options {
         skipDefaultCheckout(true)
@@ -26,18 +20,12 @@ pipeline {
         choice(
             name: 'SMOKE_VIEWPORT',
             choices: ['both', 'desktop', 'mobile'],
-            description: 'Run the Lavetir Website Smoke Readonly V1 target. Default target is both.'
-        )
-        booleanParam(
-            name: 'VARIANT_DIAGNOSTIC',
-            defaultValue: false,
-            description: 'Run the readonly post-selection variant stability diagnostic before formal smoke.'
+            description: 'Run the Lavetir Website Smoke V1 target. Default target is both.'
         )
     }
 
     environment {
         // These IDs are Jenkins credential IDs, never credential values.
-        // The credentials are Secret Text entries in the global store.
         LAVETIR_US_SHOPIFY_SIGNATURE = credentials('LAVETIR_US_SHOPIFY_SIGNATURE')
         LAVETIR_US_SHOPIFY_SIGNATURE_INPUT = credentials('LAVETIR_US_SHOPIFY_SIGNATURE_INPUT')
         LAVETIR_US_SHOPIFY_SIGNATURE_AGENT = credentials('LAVETIR_US_SHOPIFY_SIGNATURE_AGENT')
@@ -47,19 +35,17 @@ pipeline {
         stage('Checkout') {
             steps {
                 script {
+                    env.STABILITY_SECRET_GATE = 'NOT_RUN'
+                    env.STABILITY_SCHEMA_GATE = 'NOT_RUN'
+                    env.STABILITY_PYTHON_EXIT_CODE = 'UNKNOWN'
+
                     def scmVars = checkout scm
                     def checkoutSha = "${scmVars?.GIT_COMMIT ?: ''}".trim()
                     if (!checkoutSha) {
                         if (isUnix()) {
-                            checkoutSha = sh(
-                                returnStdout: true,
-                                script: 'git rev-parse HEAD'
-                            ).trim()
+                            checkoutSha = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
                         } else {
-                            checkoutSha = bat(
-                                returnStdout: true,
-                                script: '@git rev-parse HEAD'
-                            ).trim()
+                            checkoutSha = bat(returnStdout: true, script: '@git rev-parse HEAD').trim()
                         }
                     }
                     if (!checkoutSha) {
@@ -77,8 +63,8 @@ pipeline {
                     echo 'Site: lavetir'
                     echo 'Signed Request: configured by Jenkins Credentials Binding (values redacted)'
                     echo env.SHOPIFY_PROXY_SERVER?.trim() ?
-                        'Proxy: configured' :
-                        'Proxy: direct mode'
+                        'Proxy: configured through the Jenkins environment (server value redacted)' :
+                        'Proxy: direct mode; SHOPIFY_PROXY_SERVER is not configured'
                     if (isUnix()) {
                         env.SYSTEM_PYTHON = sh(
                             returnStdout: true,
@@ -136,10 +122,10 @@ pipeline {
                 script {
                     if (isUnix()) {
                         sh '.venv/bin/python -m compileall .'
-                        sh '.venv/bin/python scripts/validate_site_config.py --site lavetir --suite website_smoke_readonly_v1'
+                        sh '.venv/bin/python scripts/validate_site_config.py --site lavetir --suite website_smoke_v1'
                     } else {
                         bat '.venv\\Scripts\\python.exe -m compileall .'
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_site_config.py --site lavetir --suite website_smoke_readonly_v1'
+                        bat '.venv\\Scripts\\python.exe scripts\\validate_site_config.py --site lavetir --suite website_smoke_v1'
                     }
                 }
             }
@@ -157,7 +143,7 @@ pipeline {
             }
         }
 
-        stage('Site Access') {
+        stage('Signed Request / Site Access') {
             steps {
                 script {
                     if (isUnix()) {
@@ -169,46 +155,25 @@ pipeline {
             }
         }
 
-        stage('Variant Stability Diagnostic') {
-            when {
-                expression { params.VARIANT_DIAGNOSTIC == true }
-            }
+        stage('Website Smoke V1') {
             steps {
                 script {
-                    // Diagnostic evidence is independent of the formal smoke
-                    // result and must not prevent the formal mobile run.
-                    catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                        if (isUnix()) {
-                            sh '.venv/bin/python scripts/diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
-                        } else {
-                            bat '.venv\\Scripts\\python.exe scripts\\diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
-                        }
-                    }
-                }
-            }
-        }
-
-        stage('Website Smoke Readonly V1') {
-            steps {
-                script {
-                    // Preserve failure status while allowing later gates and
-                    // post(always) artifact archiving to run.
                     catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                        int readonlyExitCode
+                        int smokeExitCode
                         if (isUnix()) {
-                            readonlyExitCode = sh(
+                            smokeExitCode = sh(
                                 returnStatus: true,
-                                script: ".venv/bin/python scripts/run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT}"
+                                script: ".venv/bin/python scripts/run_website_smoke_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --traffic-inventory"
                             )
                         } else {
-                            readonlyExitCode = bat(
+                            smokeExitCode = bat(
                                 returnStatus: true,
-                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT}"
+                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --traffic-inventory"
                             )
                         }
-                        env.READONLY_PYTHON_EXIT_CODE = "${readonlyExitCode}"
-                        if (readonlyExitCode != 0) {
-                            error("Website Smoke Readonly V1 exited with code ${readonlyExitCode}")
+                        env.STABILITY_PYTHON_EXIT_CODE = "${smokeExitCode}"
+                        if (smokeExitCode != 0) {
+                            error("Lavetir Website Smoke V1 exited with code ${smokeExitCode}")
                         }
                     }
                 }
@@ -220,16 +185,11 @@ pipeline {
                 script {
                     int gateExitCode
                     if (isUnix()) {
-                        gateExitCode = sh(
-                            returnStatus: true,
-                            script: '.venv/bin/python scripts/validate_ci_safe_outputs.py'
-                        )
+                        gateExitCode = sh(returnStatus: true, script: '.venv/bin/python scripts/validate_ci_safe_outputs.py')
                     } else {
-                        gateExitCode = bat(
-                            returnStatus: true,
-                            script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
-                        )
+                        gateExitCode = bat(returnStatus: true, script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py')
                     }
+                    env.STABILITY_SECRET_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
                     if (gateExitCode != 0) {
                         error("Secret Leakage Check exited with code ${gateExitCode}")
                     }
@@ -242,16 +202,11 @@ pipeline {
                 script {
                     int gateExitCode
                     if (isUnix()) {
-                        gateExitCode = sh(
-                            returnStatus: true,
-                            script: '.venv/bin/python scripts/validate_result_schema.py --suite website_smoke_readonly_v1'
-                        )
+                        gateExitCode = sh(returnStatus: true, script: '.venv/bin/python scripts/validate_result_schema.py --suite website_smoke_v1')
                     } else {
-                        gateExitCode = bat(
-                            returnStatus: true,
-                            script: '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_readonly_v1'
-                        )
+                        gateExitCode = bat(returnStatus: true, script: '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_v1')
                     }
+                    env.STABILITY_SCHEMA_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
                     if (gateExitCode != 0) {
                         error("Result Validation exited with code ${gateExitCode}")
                     }
@@ -262,6 +217,33 @@ pipeline {
 
     post {
         always {
+            script {
+                try {
+                    def causeText = "${currentBuild.getBuildCauses()}"
+                    if (causeText.contains('TimerTriggerCause')) {
+                        env.STABILITY_TRIGGER = 'TIMER'
+                    } else if (causeText.contains('SCMTriggerCause')) {
+                        env.STABILITY_TRIGGER = 'SCM'
+                    } else if (causeText.contains('UserIdCause')) {
+                        env.STABILITY_TRIGGER = 'MANUAL'
+                    } else {
+                        env.STABILITY_TRIGGER = 'OTHER'
+                    }
+                } catch (ignored) {
+                    env.STABILITY_TRIGGER = 'UNKNOWN'
+                }
+                env.STABILITY_JENKINS_RESULT = currentBuild.currentResult ?: 'UNKNOWN'
+                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                    def commitSha = env.GIT_COMMIT_SHA ?: ''
+                    def schemaGate = env.STABILITY_SCHEMA_GATE ?: 'NOT_RUN'
+                    def secretGate = env.STABILITY_SECRET_GATE ?: 'NOT_RUN'
+                    if (isUnix()) {
+                        sh ".venv/bin/python scripts/record_stability.py --artifacts-root artifacts/website-smoke-v1/lavetir --commit-sha \"${commitSha}\" --schema-gate \"${schemaGate}\" --secret-gate \"${secretGate}\""
+                    } else {
+                        bat ".venv\\Scripts\\python.exe scripts\\record_stability.py --artifacts-root artifacts\\website-smoke-v1\\lavetir --commit-sha \"${commitSha}\" --schema-gate \"${schemaGate}\" --secret-gate \"${secretGate}\""
+                    }
+                }
+            }
             archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
         }
     }

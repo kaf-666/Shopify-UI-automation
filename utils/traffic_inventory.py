@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 from urllib.parse import urlsplit
 
+from utils.errors import sensitive_env_names
+
 
 CLASSIFICATIONS = (
     "REQUIRED",
@@ -26,7 +28,6 @@ CLASSIFICATIONS = (
     "UNKNOWN",
 )
 CONFIDENCE_LEVELS = ("HIGH", "MEDIUM", "LOW")
-FIRST_PARTY_HOSTS = ("mondressy.com", "www.mondressy.com")
 OPTIONAL_RESOURCE_TYPES = {"image", "font", "media"}
 STATIC_RESOURCE_TYPES = {"script", "stylesheet", "image", "font", "media"}
 STATIC_SUFFIXES = (
@@ -46,13 +47,6 @@ STATIC_SUFFIXES = (
     ".otf",
     ".mp4",
     ".webm",
-)
-SENSITIVE_ENV_NAMES = (
-    "MONDRESSY_US_SHOPIFY_SIGNATURE",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT",
-    "SHOPIFY_PROXY_PASSWORD",
-    "PLAYWRIGHT_PROXY_PASSWORD",
 )
 FORBIDDEN_OUTPUT_TERMS = (
     "signature-input",
@@ -210,7 +204,7 @@ def _redact_forbidden_terms(value: str) -> str:
     )
     for term in sorted(FORBIDDEN_OUTPUT_TERMS, key=len, reverse=True):
         text = re.sub(re.escape(term), "[REDACTED_FIELD]", text, flags=re.I)
-    for env_name in SENSITIVE_ENV_NAMES:
+    for env_name in sensitive_env_names():
         secret = os.environ.get(env_name)
         if secret:
             text = text.replace(secret, "[REDACTED_VALUE]")
@@ -292,7 +286,7 @@ class TrafficInventory:
 
     def __init__(
         self,
-        first_party_hosts: Iterable[str] = FIRST_PARTY_HOSTS,
+        first_party_hosts: Iterable[str],
         classifier: Optional[RequestClassifier] = None,
     ) -> None:
         self.first_party_hosts = {str(host).lower() for host in first_party_hosts}

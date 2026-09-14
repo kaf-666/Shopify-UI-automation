@@ -1,10 +1,30 @@
 # Mondressy site config — Phase 3 selector freeze
 # Theme: Shopify Brooklyn (theme_store_id 857) + SPB custom options + cbb recommendations
+schema_version: 1
 site: mondressy
 base_url: "@url:`https://mondressy.com`"
 
+capabilities:
+  suites:
+    website_smoke_readonly_v1: true
+    website_smoke_v1: true
+
+  navigation:
+    desktop: mega_menu_hover
+    mobile: drawer_accordion
+
+  collection:
+    product_cards: true
+    filters: true
+    sort: true
+
+  product:
+    color: true
+    size: true
+    custom_size: true
+
 access:
-  type: signed_request
+  mode: signed_request
   source: env
   env:
     Signature: MONDRESSY_US_SHOPIFY_SIGNATURE
@@ -201,6 +221,18 @@ pages:
         stability: MEDIUM
         notes: Brooklyn card wrapper; must match multiple cards
 
+      product_link:
+        by: css
+        value: "a.grid-product__link"
+        stability: HIGH
+        notes: Card product link; resolved relative to the configured product card
+
+      product_title:
+        by: css
+        value: ".grid-product__title"
+        stability: HIGH
+        notes: Card title; resolved relative to the configured product card
+
       filter:
         by: css
         value: ".collection-filter"
@@ -341,6 +373,13 @@ pages:
         status: NOT_OBSERVABLE_WITH_EMPTY_CART
         notes: Brooklyn cart page line item; unverifiable with empty cart
 
+      item_title:
+        by: css
+        value: ".cart__item-name, a[href*='/products/']"
+        stability: MEDIUM
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Cart line title/link; scoped to the configured cart item
+
       quantity:
         by: css
         value: "input[name=\"updates[]\"]"
@@ -350,10 +389,17 @@ pages:
 
       remove:
         by: css
-        value: "a[href*=\"/cart/change\"]"
+        value: ".cart__remove, .cart__remove-button, a[href*=\"/cart/change\"], button[name=\"remove\"]"
         stability: HIGH
         status: NOT_OBSERVABLE_WITH_EMPTY_CART
-        notes: Shopify standard remove link; unverifiable with empty cart
+        notes: Shopify standard remove control; unverifiable with empty cart
+
+      variant_properties:
+        by: css
+        value: ".cart__item--variants, .cart__item--properties"
+        stability: MEDIUM
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Cart line variant/property rows; scoped to the configured cart item
 
       quantity_input:
         by: css

@@ -46,12 +46,20 @@ class CartDrawer(BasePage):
     # ----------------------------------------------------------------- 商品项
     def cart_items(self):
         """返回抽屉内商品行定位器集合。"""
-        return self.locator("cart_item")
+        item_sel = self.resolve_selector("cart_item")["value"]
+        try:
+            drawer = self.drawer()
+            if drawer.count():
+                return drawer.locator(item_sel)
+        except Exception:
+            # Minimal synthetic/legacy profiles may only declare cart_item;
+            # retain the page-level lookup used by the original object.
+            pass
+        return self.page.locator(item_sel)
 
     def wait_item(self, timeout: int = 10_000) -> None:
         """等待抽屉内至少渲染出一个商品行。"""
-        item_sel = self.resolve_selector("cart_item")["value"]
-        self.page.wait_for_selector(f"#CartDrawer {item_sel}", timeout=timeout)
+        self.cart_items().first.wait_for(state="attached", timeout=timeout)
 
     def item_count(self) -> int:
         """返回抽屉内商品行数量。"""
@@ -64,10 +72,27 @@ class CartDrawer(BasePage):
             raise IndexError(f"Cart item index out of range: {index} (item_count={total})")
         return items.nth(index)
 
+    def _item_locator(self, index: int, selector_name: str, fallback: str):
+        """Resolve a configured item control relative to one cart row.
+
+        The fallback keeps the public PageObject compatible with legacy site
+        profiles while allowing each site to provide a stable selector-first
+        contract for its own cart markup.
+        """
+        item = self._item(index)
+        try:
+            selector = self.resolve_selector(selector_name)["value"]
+        except Exception:
+            selector = fallback
+        locator = item.locator(selector).first
+        if locator.count() == 0 and selector != fallback:
+            locator = item.locator(fallback).first
+        return locator
+
     def get_item_title(self, index: int = 0) -> str:
         """返回第 index 个商品行的标题文本。"""
         item = self._item(index)
-        name = item.locator(".cart__item-name").first
+        name = self._item_locator(index, "item_title", ".cart__item-name")
         if name.count():
             return name.inner_text().strip()
         return item.locator("a[href*='/products/']").first.inner_text().strip()
@@ -82,8 +107,7 @@ class CartDrawer(BasePage):
 
     def get_item_quantity(self, index: int = 0) -> str:
         """返回第 index 个商品行的实时数量 property。"""
-        item = self._item(index)
-        qty = item.locator('input[name="updates[]"]').first
+        qty = self._item_locator(index, "quantity_input", 'input[name="updates[]"]')
         if qty.count() == 0:
             return ""
         return qty.input_value()
@@ -139,7 +163,13 @@ class CartDrawer(BasePage):
 
     def _variant_part(self, item, key: str) -> str:
         """从商品行的变体元数据容器读取变体行文本。"""
-        containers = item.locator(".cart__item--variants, .cart__item--properties")
+        try:
+            selector = self.resolve_selector("variant_properties")["value"]
+        except Exception:
+            selector = ".cart__item--variants, .cart__item--properties"
+        containers = item.locator(selector)
+        if containers.count() == 0 and selector != ".cart__item--variants, .cart__item--properties":
+            containers = item.locator(".cart__item--variants, .cart__item--properties")
         for i in range(containers.count()):
             text = containers.nth(i).inner_text()
             if key.lower() in text.lower():
@@ -148,10 +178,11 @@ class CartDrawer(BasePage):
 
     def remove_item(self, index: int = 0) -> None:
         """通过真实 UI 点击第 index 个商品行的移除控件。"""
-        item = self._item(index)
-        remove = item.locator(
-            ".cart__remove, a[href*='/cart/change'], button[name='remove']"
-        ).first
+        remove = self._item_locator(
+            index,
+            "remove",
+            ".cart__remove, .cart__remove-button, a[href*='/cart/change'], button[name='remove']",
+        )
         if remove.count() == 0:
             raise RuntimeError(f"No remove control found on cart item {index}")
         remove.click()
@@ -159,7 +190,13 @@ class CartDrawer(BasePage):
     # ------------------------------------------------------------ Checkout
     def checkout_button(self):
         """返回标准 Checkout 按钮定位器（button[name=checkout]，排除快捷支付）。"""
-        return self.locator("checkout_button").first
+        selector = self.resolve_selector("checkout_button")["value"]
+        button = self.drawer().locator(selector).first
+        if button.count() == 0:
+            # Backward-compatible fallback for profiles that stored a fully
+            # scoped selector such as ``#CartDrawer button[name=checkout]``.
+            button = self.locator("checkout_button").first
+        return button
 
     def checkout(self) -> None:
         """通过抽屉内标准 Checkout 控件进入 Shopify Checkout（真实 UI 点击）。"""

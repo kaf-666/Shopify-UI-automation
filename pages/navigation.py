@@ -1,13 +1,8 @@
-"""Header / Navigation 页面对象（选择器和拓扑均由站点配置提供）。
+"""Header / Navigation page object with configuration-selected strategies.
 
-导航交互模型保持稳定：
-    Desktop : MEGA_MENU_HOVER
-        hover 配置的目标父级，等待配置的目标链接变为可见。
-    Mobile  : DRAWER_ACCORDION
-        点击配置的抽屉触发器，再点击配置的目标父级展开菜单。
-
-打开状态和目标链接都通过 site config 解析，页面对象不假设主题的
-class、DOM ancestor 或子菜单命名。
+Selectors and interaction behavior are both site-profile data.  The public
+``open_collection()`` API stays unchanged while the configured desktop/mobile
+strategy selects the actual interaction model.
 """
 
 from __future__ import annotations
@@ -24,11 +19,119 @@ from pages.base_page import BasePage
 
 MODE_DESKTOP = "MEGA_MENU_HOVER"
 MODE_MOBILE = "DRAWER_ACCORDION"
+MODE_DIRECT_LINK = "DIRECT_LINK"
+MODE_DRAWER_DIRECT = "DRAWER_DIRECT"
 
 MOBILE_MENU_ROOT_TIMEOUT_MS = 5_000
 MOBILE_MENU_RETRY_ATTEMPTS = 4
 MOBILE_MENU_RETRY_INTERVAL_MS = 250
 MOBILE_MENU_TARGET_WAIT_MS = 4_000
+
+
+class NavigationStrategyError(RuntimeError):
+    """Raised when a page object receives an unsupported navigation strategy."""
+
+
+class NavigationStrategy:
+    """Small behavior contract implemented by each supported interaction model."""
+
+    key = ""
+    mode = ""
+
+    def is_menu_open(self, navigation: "NavigationPage") -> bool:
+        raise NotImplementedError
+
+    def open_menu(self, navigation: "NavigationPage") -> None:
+        raise NotImplementedError
+
+    def close_menu(self, navigation: "NavigationPage") -> None:
+        return None
+
+    def wait_ready(self, navigation: "NavigationPage", timeout_ms: int) -> None:
+        raise NotImplementedError
+
+
+class MegaMenuHoverStrategy(NavigationStrategy):
+    key = "mega_menu_hover"
+    mode = MODE_DESKTOP
+
+    def is_menu_open(self, navigation: "NavigationPage") -> bool:
+        return navigation._target_visible()
+
+    def open_menu(self, navigation: "NavigationPage") -> None:
+        navigation._open_desktop_hover_menu()
+
+    def wait_ready(self, navigation: "NavigationPage", timeout_ms: int) -> None:
+        navigation._wait_desktop_ready(timeout_ms)
+
+
+class DirectLinkStrategy(NavigationStrategy):
+    key = "direct_link"
+    mode = MODE_DIRECT_LINK
+
+    def is_menu_open(self, navigation: "NavigationPage") -> bool:
+        return navigation._target_visible()
+
+    def open_menu(self, navigation: "NavigationPage") -> None:
+        navigation._open_direct_link_menu()
+
+    def wait_ready(self, navigation: "NavigationPage", timeout_ms: int) -> None:
+        navigation._wait_desktop_ready(timeout_ms)
+
+
+class DrawerAccordionStrategy(NavigationStrategy):
+    key = "drawer_accordion"
+    mode = MODE_MOBILE
+
+    def is_menu_open(self, navigation: "NavigationPage") -> bool:
+        return navigation._drawer_is_open()
+
+    def open_menu(self, navigation: "NavigationPage") -> None:
+        navigation._open_drawer_accordion_menu()
+
+    def close_menu(self, navigation: "NavigationPage") -> None:
+        navigation._close_drawer_menu()
+
+    def wait_ready(self, navigation: "NavigationPage", timeout_ms: int) -> None:
+        navigation._wait_drawer_ready(timeout_ms)
+
+
+class DrawerDirectStrategy(NavigationStrategy):
+    key = "drawer_direct"
+    mode = MODE_DRAWER_DIRECT
+
+    def is_menu_open(self, navigation: "NavigationPage") -> bool:
+        return navigation._drawer_is_open()
+
+    def open_menu(self, navigation: "NavigationPage") -> None:
+        navigation._open_drawer_direct_menu()
+
+    def close_menu(self, navigation: "NavigationPage") -> None:
+        navigation._close_drawer_menu()
+
+    def wait_ready(self, navigation: "NavigationPage", timeout_ms: int) -> None:
+        navigation._wait_drawer_ready(timeout_ms)
+
+
+STRATEGY_TYPES = {
+    strategy.key: strategy
+    for strategy in (
+        MegaMenuHoverStrategy,
+        DirectLinkStrategy,
+        DrawerAccordionStrategy,
+        DrawerDirectStrategy,
+    )
+}
+
+
+def resolve_navigation_strategy(value: str) -> NavigationStrategy:
+    """Return a supported strategy or fail explicitly without a fallback."""
+
+    key = str(value or "").strip().lower()
+    strategy_type = STRATEGY_TYPES.get(key)
+    if strategy_type is None:
+        raise NavigationStrategyError(f"unsupported navigation strategy: {key or '<missing>'}")
+    return strategy_type()
 
 
 class NavigationPage(BasePage):
@@ -37,9 +140,24 @@ class NavigationPage(BasePage):
     PAGE_NAME = "navigation"
 
     # ------------------------------------------------------------------ 模式
+    def strategy_name(self) -> str:
+        """Return the configured interaction strategy for this viewport."""
+        capabilities = self.site_config.get("capabilities") or {}
+        navigation = capabilities.get("navigation") if isinstance(capabilities, dict) else None
+        if not isinstance(navigation, dict):
+            raise NavigationStrategyError("missing capabilities.navigation")
+        value = str(navigation.get(self.viewport) or "").strip().lower()
+        if not value:
+            raise NavigationStrategyError(f"missing navigation strategy for viewport={self.viewport}")
+        return value
+
+    def strategy(self) -> NavigationStrategy:
+        """Resolve the current viewport's configured strategy without site-name logic."""
+        return resolve_navigation_strategy(self.strategy_name())
+
     def current_mode(self) -> str:
         """返回当前端的导航交互模型。"""
-        return MODE_DESKTOP if self.viewport == "desktop" else MODE_MOBILE
+        return self.strategy().mode
 
     def _menu_scope(self) -> str:
         """返回当前端菜单作用域 CSS（目标链接定位共用）。"""
@@ -99,7 +217,13 @@ class NavigationPage(BasePage):
         selector = self._mobile_parent_selector()
         if not selector:
             return None
-        return self.primary_menu().locator(selector).first
+        # Mobile themes can keep a hidden duplicate of the menu while the
+        # drawer hydrates.  Selecting ``.first`` may therefore return that
+        # duplicate even though a visible parent is already actionable.  Keep
+        # the locator live and let each caller re-evaluate visibility on the
+        # current DOM; this also preserves the bounded retry behavior while
+        # the menu is being replaced.
+        return self.primary_menu().locator(selector).filter(visible=True).first
 
     def _mobile_menu_root_ready(self) -> bool:
         """移动端 drawer 打开后，确认实际菜单子树已挂载且可见。"""
@@ -172,20 +296,18 @@ class NavigationPage(BasePage):
 
     # ------------------------------------------------------------------ 状态
     def is_menu_open(self) -> bool:
-        """当前端菜单层级是否已打开。
+        """Return whether the configured strategy's menu state is open."""
+        return self.strategy().is_menu_open(self)
 
-        Desktop：配置的目标链接可见。
-        Mobile：配置的抽屉 open-state 定位器可见。
-        """
-        if self.viewport == "desktop":
-            return self._target_visible()
+    def _drawer_is_open(self) -> bool:
+        """Return the configured drawer open-state without assuming a site."""
         open_state = self.locator("mobile_drawer_open").first
         return bool(open_state.count() and open_state.is_visible())
 
     def _wait_open_state(self, timeout_ms: int = 10_000) -> None:
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
-            if self.is_menu_open():
+            if self._drawer_is_open():
                 return
             self.page.wait_for_timeout(200)
         raise TimeoutError(f"Navigation menu did not open ({self.current_mode()})")
@@ -212,40 +334,45 @@ class NavigationPage(BasePage):
     def _wait_target_visible(self, timeout_ms: int = 5_000) -> None:
         expect(self.target_link().filter(visible=True).first).to_be_visible(timeout=timeout_ms)
 
-    def open_menu(self) -> None:
-        """按当前端真实交互打开商品导航层级并使目标链接可见。
+    def _open_desktop_hover_menu(self) -> None:
+        """Open a configured mega menu through the real hover interaction."""
+        # Themes can replace menu nodes immediately after initial render.  Each
+        # retry resolves a fresh locator rather than retaining an old handle.
+        for _attempt in range(3):
+            link = self._target_top_link()
+            if link is None:
+                raise RuntimeError("target collection parent not found in desktop menu")
+            try:
+                link.hover()
+            except Exception:
+                continue
+            try:
+                self._wait_target_visible(timeout_ms=4000)
+                return
+            except TimeoutError:
+                continue
+        raise TimeoutError("desktop mega menu did not open after 3 hover attempts")
 
-        Desktop：真实 hover 目标顶层项（重试 ≤3 次——主题 hover 展开
-        并非每次触发，以目标链接可见为准）。
-        Mobile：抽屉未开时点击汉堡；随后真实点击目标顶层项展开
-        子菜单（click_toggle），以目标链接可见为准。
-        """
-        if self.viewport == "desktop":
-            # 主题菜单在页面加载后可能重渲染（节点被替换），
-            # 每次 hover 尝试重新查询目标链接，避免手持失效 ElementHandle。
-            for _attempt in range(3):
-                link = self._target_top_link()
-                if link is None:
-                    raise RuntimeError("target collection not found in desktop menu")
-                try:
-                    link.hover()
-                except Exception:
-                    # 节点在 hover 前被替换：重新查询后再试
-                    continue
-                try:
-                    self._wait_target_visible(timeout_ms=4000)
-                    return
-                except TimeoutError:
-                    continue
-            raise TimeoutError("desktop mega menu did not open after 3 hover attempts")
+    def _open_direct_link_menu(self) -> None:
+        """Validate a visible direct collection link; no hidden fallback interaction."""
+        if not self._target_visible():
+            self._wait_target_visible(timeout_ms=4_000)
+
+    def _ensure_drawer_open(self) -> None:
+        """Open the configured drawer when its strategy needs one."""
         if not self.is_menu_open():
             trigger = self.menu_trigger()
+            if trigger is None:
+                raise RuntimeError("drawer navigation requires a mobile menu trigger")
             if not trigger.is_visible():
                 raise RuntimeError("mobile menu trigger is not visible")
             trigger.click()
             self._wait_open_state()
 
-        # Drawer open 只代表外层状态；菜单子树可能还在异步挂载。
+    def _open_drawer_accordion_menu(self) -> None:
+        """Open a drawer and expand its configured accordion parent when needed."""
+        self._ensure_drawer_open()
+        # Drawer open only marks the outer shell; wait for the mounted menu tree.
         self._wait_mobile_menu_root()
         attempts = 0
         for _attempt in range(MOBILE_MENU_RETRY_ATTEMPTS):
@@ -277,16 +404,29 @@ class NavigationPage(BasePage):
             )
         )
 
-    def close_menu(self) -> None:
-        """关闭移动端导航抽屉（桌面端 hover 菜单无关闭控件，跳过）。"""
-        if self.viewport != "mobile":
-            return
+    def _open_drawer_direct_menu(self) -> None:
+        """Open a drawer whose collection target is directly reachable."""
+        self._ensure_drawer_open()
+        self._wait_mobile_menu_root()
+        if not self._target_visible():
+            self._wait_target_visible(timeout_ms=MOBILE_MENU_TARGET_WAIT_MS)
+
+    def open_menu(self) -> None:
+        """Open the current strategy's navigation state and reveal its target link."""
+        self.strategy().open_menu(self)
+
+    def _close_drawer_menu(self) -> None:
+        """Close a configured drawer; non-drawer strategies use a no-op strategy method."""
         close_btn = self.locator("mobile_close").first
         if close_btn.count() and close_btn.is_visible():
             close_btn.click()
             expect(self.locator("mobile_drawer_open").first).to_have_count(
                 0, timeout=10_000
             )
+
+    def close_menu(self) -> None:
+        """Close the current strategy when it exposes an explicit close action."""
+        self.strategy().close_menu(self)
 
     # ------------------------------------------------------------ 目标导航
     def target_path(self) -> str:
@@ -295,20 +435,34 @@ class NavigationPage(BasePage):
         return str((cfg.get("smoke_collection") or {}).get("path") or "")
 
     def wait_ready(self, timeout_ms: int = 12_000) -> None:
-        """等待当前端导航容器和入口完成渲染。"""
+        """Wait for the configured navigation strategy's entry controls."""
+        self.strategy().wait_ready(self, timeout_ms)
+
+    def _wait_desktop_ready(self, timeout_ms: int) -> None:
         expect(self.header()).to_be_visible(timeout=timeout_ms)
-        if self.viewport == "desktop":
-            expect(self.primary_items().first).to_be_visible(timeout=timeout_ms)
-        else:
-            expect(self.menu_trigger()).to_be_visible(timeout=timeout_ms)
+        expect(self.primary_items().first).to_be_visible(timeout=timeout_ms)
+
+    def _wait_drawer_ready(self, timeout_ms: int) -> None:
+        expect(self.header()).to_be_visible(timeout=timeout_ms)
+        trigger = self.menu_trigger()
+        if trigger is None:
+            raise RuntimeError("drawer navigation requires a mobile menu trigger")
+        expect(trigger).to_be_visible(timeout=timeout_ms)
 
     def _wait_url_path(self, path: str, timeout_ms: int = 15_000) -> None:
+        # A fast same-page navigation may finish before Playwright subscribes
+        # to the URL event. The current URL is authoritative once the click
+        # has returned, so avoid turning that race into a false failure.
+        if urlparse(str(self.page.url)).path == path:
+            return
         try:
             self.page.wait_for_url(
                 lambda url: urlparse(str(url)).path == path,
                 timeout=timeout_ms,
             )
         except PlaywrightTimeoutError as exc:
+            if urlparse(str(self.page.url)).path == path:
+                return
             raise TimeoutError(f"navigation to {path} not observed (url={self.page.url[:100]})") from exc
 
     def open_collection(self) -> str:

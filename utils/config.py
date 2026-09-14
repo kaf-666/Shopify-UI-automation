@@ -74,3 +74,14 @@ def site_config_path(sites_dir: Path, site_name: str) -> Path:
     if root not in path.parents:
         raise CliConfigError("site config path escapes configured directory", category="SITE_CONFIG_ERROR")
     return path
+
+
+def configured_site_name(config: Mapping[str, Any]) -> str:
+    """Return an explicit valid site identity; never infer a legacy default."""
+
+    if not isinstance(config, Mapping):
+        raise CliConfigError("site config must be a mapping", category="SITE_CONFIG_ERROR")
+    name = str(config.get("site") or "").strip()
+    if not SITE_NAME_RE.fullmatch(name):
+        raise CliConfigError("site config has no valid site identity", category="SITE_CONFIG_ERROR")
+    return name

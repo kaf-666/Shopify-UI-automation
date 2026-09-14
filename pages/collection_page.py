@@ -30,6 +30,32 @@ class CollectionPage(BasePage):
         """返回商品卡定位器集合。"""
         return self.locator("product_card")
 
+    def _card_descendant(self, card, selector_name: str):
+        """Resolve a configured product-card descendant without theme classes.
+
+        Card selectors are deliberately site-profile data because themes often
+        change their card DOM independently of collection behavior.  CSS and
+        XPath are supported here because both can be scoped to a card locator.
+        """
+        selector = self.resolve_selector(selector_name)
+        by = str(selector.get("by") or "css").lower()
+        value = str(selector.get("value") or "")
+        if by == "css":
+            return card.locator(value)
+        if by == "xpath":
+            return card.locator(f"xpath={value}")
+        raise RuntimeError(
+            f"collection selector '{selector_name}' must use css or xpath for card-relative lookup"
+        )
+
+    def product_link(self, card):
+        """Return the configured primary product link for one card."""
+        return self._card_descendant(card, "product_link").first
+
+    def product_title(self, card):
+        """Return the configured user-visible product title for one card."""
+        return self._card_descendant(card, "product_title").first
+
     def product_count(self) -> int:
         """返回当前页可见商品卡数量。"""
         return self.product_cards().count()
@@ -60,7 +86,7 @@ class CollectionPage(BasePage):
         total = cards.count()
         if index < 0 or index >= total:
             raise IndexError(f"Product index out of range: {index} (product_count={total})")
-        href = cards.nth(index).locator("a.grid-product__link").first.get_attribute("href")
+        href = self.product_link(cards.nth(index)).get_attribute("href")
         if not href:
             raise RuntimeError(f"No product link found on card {index}")
         canonical_href = self._canonical_product_href(href)
@@ -85,7 +111,7 @@ class CollectionPage(BasePage):
         handles = []
         cards = self.product_cards()
         for i in range(min(n, cards.count())):
-            href = cards.nth(i).locator("a.grid-product__link").first.get_attribute("href")
+            href = self.product_link(cards.nth(i)).get_attribute("href")
             clean = self._clean_handle(href)
             if clean and clean not in handles:
                 handles.append(clean)
@@ -96,7 +122,7 @@ class CollectionPage(BasePage):
         titles = []
         cards = self.product_cards()
         for i in range(min(n, cards.count())):
-            loc = cards.nth(i).locator(".grid-product__title").first
+            loc = self.product_title(cards.nth(i))
             if loc.count():
                 titles.append(" ".join(loc.inner_text().split()))
         return titles
@@ -208,7 +234,7 @@ class CollectionPage(BasePage):
             self.page.wait_for_load_state("domcontentloaded", timeout=30000)
         except Exception:
             pass
-        self.page.locator(".grid-product").first.wait_for(state="visible", timeout=15000)
+        self.product_cards().first.wait_for(state="visible", timeout=15000)
 
     @staticmethod
     def classify_color_behavior(

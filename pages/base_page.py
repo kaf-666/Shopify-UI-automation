@@ -37,7 +37,7 @@ class BasePage:
         if path:
             return load_yaml_mapping(Path(path), "site config")
         settings = load_settings()
-        selected = site_name or str(settings.get("default_site") or "")
+        selected = str(settings.get("default_site") if site_name is None else site_name).strip()
         try:
             cfg_path = site_config_path(SITES_DIR, selected)
             return load_yaml_mapping(cfg_path, "site config")

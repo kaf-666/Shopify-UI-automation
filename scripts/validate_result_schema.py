@@ -127,6 +127,59 @@ def _summary_matches_cases(summary: dict, cases: list, label: str) -> bool:
     return ok_all
 
 
+def _validate_mutation_summary(value: object) -> bool:
+    """Validate the optional Full-suite transactional mutation audit."""
+    if value is None:
+        # Keep validation compatible with historical Full artifacts written
+        # before the transactional policy field was introduced.
+        return True
+    if not isinstance(value, dict):
+        return check(False, "mutation_summary mapping")
+
+    ok_all = check(
+        value.get("mode") == "TRANSACTIONAL_SAFE",
+        "mutation_summary mode",
+        "expected=TRANSACTIONAL_SAFE",
+    )
+    counts = {}
+    for key in (
+        "expected_mutation",
+        "unexpected_mutation",
+        "high_risk_mutation",
+        "blocked_mutation",
+    ):
+        raw = value.get(key)
+        valid = isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+        ok_all = check(valid, f"mutation_summary {key}", "non-negative integer") and ok_all
+        counts[key] = raw if valid else 0
+    expected_status = "PASS" if counts["unexpected_mutation"] == 0 and counts["high_risk_mutation"] == 0 else "FAIL"
+    ok_all = check(
+        value.get("status") == expected_status,
+        "mutation_summary status",
+        f"expected={expected_status}",
+    ) and ok_all
+    rows = value.get("by_path", [])
+    ok_all = check(isinstance(rows, list), "mutation_summary by_path list") and ok_all
+    if isinstance(rows, list):
+        for index, row in enumerate(rows):
+            valid_row = isinstance(row, dict)
+            if valid_row:
+                valid_row = (
+                    row.get("classification") in {
+                        "EXPECTED_MUTATION",
+                        "UNEXPECTED_MUTATION",
+                        "HIGH_RISK_MUTATION",
+                    }
+                    and str(row.get("method") or "") in {"POST", "PUT", "PATCH", "DELETE"}
+                    and str(row.get("path") or "").startswith("/")
+                    and isinstance(row.get("count"), int)
+                    and not isinstance(row.get("count"), bool)
+                    and row.get("count") >= 0
+                )
+            ok_all = check(valid_row, f"mutation_summary by_path[{index}] contract") and ok_all
+    return ok_all
+
+
 def _validate_readonly_lifecycle(
     suite: str, viewport: str, cases: list, value: dict, field: str, expected_count: int
 ) -> bool:
@@ -183,6 +236,7 @@ def validate_json(run_dir: Path, suite: str) -> bool:
 
     ok_all = _summary_ok(data.get("summary", {}), "run") and ok_all
     ok_all = check(data.get("overall_status") in ("PASS", "FAIL"), "overall_status value") and ok_all
+    ok_all = _validate_mutation_summary(data.get("mutation_summary")) and ok_all
 
     fatal = data.get("fatal_error")
     if fatal is not None:
@@ -237,6 +291,8 @@ def validate_json(run_dir: Path, suite: str) -> bool:
             ok_all = _validate_readonly_lifecycle(
                 suite, str(vp_name), cases, value, base_name, len(expected_ids)
             ) and ok_all
+        if vp.get("mutation_summary") is not None:
+            ok_all = _validate_mutation_summary(vp.get("mutation_summary")) and ok_all
 
     expected_total = len(expected_ids) * len(viewports)
     ok_all = check(total_case_count == expected_total, "case count matches viewport count", f"{total_case_count}/{expected_total}") and ok_all

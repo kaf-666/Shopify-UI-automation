@@ -25,6 +25,7 @@ from playwright.sync_api import Browser, BrowserContext, Page, Playwright, sync_
 from utils.config import load_yaml_mapping, resolve_config_value, resolve_url, site_config_path
 from utils.errors import CliConfigError
 from utils.site_access import SiteAccessPolicy, create_site_access_policy
+from utils.site_config_validator import validate_site_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SETTINGS_PATH = PROJECT_ROOT / "configs" / "settings.yaml"
@@ -230,7 +231,11 @@ def create_browser(
     调用方负责关闭返回的运行时（close_browser / runtime.close）。
     """
     settings = settings if settings is not None else load_settings()
-    site_name = site_name or str(settings.get("default_site") or "mondressy")
+    selected_site = str(
+        settings.get("default_site") if site_name is None else site_name
+    ).strip()
+    if not selected_site:
+        raise BrowserConfigError("site name is required", category="SITE_CONFIG_ERROR")
 
     viewport_key = str(viewport).lower()
     browsers = settings.get("browsers") or {}
@@ -253,12 +258,14 @@ def create_browser(
             f"unsupported browser engine: {engine}", category="BROWSER_CONFIG_ERROR"
         )
 
-    site_config = load_site_config(site_name)
     try:
-        resolve_url(site_config.get("base_url"), "site.base_url")
+        # This happens before sync_playwright().start(), so config errors never
+        # become a browser-start or late-selector failure.
+        site_config = validate_site_config(selected_site)
     except CliConfigError as exc:
         raise BrowserConfigError(str(exc), category=exc.category) from exc
-    access_policy = create_site_access_policy(site_name, site_config)
+    resolved_site_name = str(site_config["site"])
+    access_policy = create_site_access_policy(resolved_site_name, site_config)
     proxy = resolve_proxy(settings)
     proxy_server = _safe_proxy_server(proxy["server"]) if proxy else None
 
@@ -312,7 +319,7 @@ def create_browser(
             viewport_size=size,
             proxy_server=proxy_server,
             access_policy=access_policy,
-            site_name=site_name,
+            site_name=resolved_site_name,
             site_config=site_config,
         )
     except Exception:

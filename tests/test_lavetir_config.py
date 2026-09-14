@@ -13,6 +13,7 @@ LAVETIR = load_site_config("lavetir")
 
 
 def test_lavetir_profile_contains_current_page_groups() -> None:
+    assert LAVETIR["schema_version"] == 1
     assert LAVETIR["site"] == "lavetir"
     assert resolve_url(LAVETIR["base_url"], "site.base_url") == "https://www.lavetir.com"
     assert set(LAVETIR["pages"]) == {
@@ -21,13 +22,15 @@ def test_lavetir_profile_contains_current_page_groups() -> None:
         "navigation",
         "collection",
         "product",
+        "cart",
+        "checkout",
     }
 
 
 def test_lavetir_signed_request_access_contract() -> None:
     access = LAVETIR["access"]
 
-    assert access["type"] == "signed_request"
+    assert access["mode"] == "signed_request"
     assert access["source"] == "env"
     assert access["env"] == {
         "Signature": "LAVETIR_US_SHOPIFY_SIGNATURE",
@@ -35,6 +38,21 @@ def test_lavetir_signed_request_access_contract() -> None:
         "Signature-Agent": "LAVETIR_US_SHOPIFY_SIGNATURE_AGENT",
     }
     assert access["allowed_hosts"] == ["lavetir.com", "www.lavetir.com"]
+
+
+def test_lavetir_capabilities_describe_full_and_readonly_safe_suites() -> None:
+    assert LAVETIR["capabilities"] == {
+        "suites": {
+            "website_smoke_readonly_v1": True,
+            "website_smoke_v1": True,
+        },
+        "navigation": {
+            "desktop": "mega_menu_hover",
+            "mobile": "drawer_accordion",
+        },
+        "collection": {"product_cards": True, "filters": False, "sort": False},
+        "product": {"color": True, "size": True, "custom_size": True},
+    }
 
 
 def test_lavetir_home_and_search_selector_contract_resolves() -> None:
@@ -114,10 +132,29 @@ def test_lavetir_navigation_has_full_step4c_journey_contract() -> None:
             assert selector["value"]
 
 
-def test_lavetir_profile_does_not_require_deferred_page_groups() -> None:
-    pages = LAVETIR["pages"]
-    for deferred in ("cart", "checkout"):
-        assert deferred not in pages
+def test_lavetir_full_cart_and_checkout_selector_contract() -> None:
+    cart = LAVETIR["pages"]["cart"]
+    assert cart["url"] == "/cart"
+    cart_selectors = cart["selectors"]
+    for name in (
+        "drawer",
+        "cart_item",
+        "quantity_input",
+        "quantity_plus",
+        "quantity_minus",
+        "remove",
+        "subtotal",
+        "checkout_button",
+    ):
+        assert cart_selectors[name]["by"] == "css"
+        assert cart_selectors[name]["value"]
+    assert "cart__remove-button" in cart_selectors["remove"]["value"]
+
+    checkout = LAVETIR["pages"]["checkout"]
+    checkout_selectors = checkout["selectors"]
+    for name in ("root", "contact", "delivery", "shipping_form", "email", "express"):
+        assert checkout_selectors[name]["by"] == "css"
+        assert checkout_selectors[name]["value"]
 
 
 def test_lavetir_collection_and_product_readonly_contract() -> None:
@@ -128,6 +165,8 @@ def test_lavetir_collection_and_product_readonly_contract() -> None:
         collection["selectors"]["product_card"]["value"]
         == "#CollectionAjaxContent .grid-product"
     )
+    assert collection["selectors"]["product_link"]["value"] == "a.grid-product__link"
+    assert collection["selectors"]["product_title"]["value"] == ".grid-product__title"
 
     product = LAVETIR["pages"]["product"]
     assert product["url"] == (

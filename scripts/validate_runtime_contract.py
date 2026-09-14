@@ -750,7 +750,12 @@ def validate_runtime_contract() -> bool:
         "MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT": 'sig1=("@authority");expires=4102444800',
         "MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT": '"https://shopify.com"',
     }
-    headers = parse_env_headers(env)
+    env_mapping = {
+        "Signature": "MONDRESSY_US_SHOPIFY_SIGNATURE",
+        "Signature-Input": "MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT",
+        "Signature-Agent": "MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT",
+    }
+    headers = parse_env_headers(env, env_mapping)
     validate_signature_headers(headers)
     policy = SignedRequestPolicy(headers, ["mondressy.com", "www.mondressy.com"], source="env")
     ok = check(bool(policy.request_headers("https://mondressy.com/cart.js")), "exact allowlist host receives Signed Request") and ok
@@ -761,7 +766,7 @@ def validate_runtime_contract() -> bool:
         ok = check(not policy.request_headers(url), f"lookalike host rejected: {url.split('/')[2]}") and ok
 
     try:
-        parse_env_headers({})
+        parse_env_headers({}, env_mapping)
         ok = check(False, "missing Signed Request env rejected") and ok
     except SiteAccessError as exc:
         ok = check(exc.category == "SIGNED_REQUEST_MISSING", "missing Signed Request env rejected") and ok

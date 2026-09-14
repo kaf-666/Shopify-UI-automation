@@ -35,7 +35,7 @@ from utils.artifacts import (
     canonical_site_name,
     site_scoped_artifact_dir,
 )
-from utils.browser import close_browser, create_browser, load_site_config, load_settings
+from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.readonly_mutation_guard import ReadonlyMutationGuard
@@ -47,6 +47,7 @@ from utils.result import (
     make_run_id,
     write_results_json,
 )
+from utils.site_config_validator import WEBSITE_SMOKE_READONLY_V1, validate_site_config
 from utils.suite_runner import guarded_main
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-readonly-v1"
@@ -190,7 +191,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         settings = load_settings()
-        site = canonical_site_name(args.site or str(settings.get("default_site") or ""))
+        requested_site = args.site if args.site is not None else str(settings.get("default_site") or "")
+        site = canonical_site_name(requested_site)
+        site_config = validate_site_config(site, suite=WEBSITE_SMOKE_READONLY_V1)
+        base_url = resolve_url(site_config.get("base_url"), "site.base_url")
         artifact_dir = site_scoped_artifact_dir(ARTIFACT_ROOT, site, run_id)
     except Exception as exc:
         classification, exit_code = _fatal_classification(exc)
@@ -202,24 +206,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except OSError as exc:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
-
-    try:
-        site_config = load_site_config(site)
-        base_url = resolve_url(site_config.get("base_url"), "site.base_url")
-    except Exception as exc:
-        classification, exit_code = _fatal_classification(exc)
-        _write_run_result(
-            artifact_dir,
-            run_id,
-            site,
-            base_url,
-            started_at,
-            started,
-            [],
-            fatal_error={"classification": classification, "message": sanitize_message(exc)},
-        )
-        print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
-        return exit_code
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 

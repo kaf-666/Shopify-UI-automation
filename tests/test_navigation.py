@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from pages.navigation import NavigationPage
+from pages.navigation import NavigationPage, NavigationStrategyError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
+from utils.browser import load_site_config
 
 
 SYNTHETIC_HTML = """
@@ -61,10 +62,22 @@ SYNTHETIC_HTML = """
 """
 
 
+def _strategy_config() -> dict:
+    return {
+        "capabilities": {
+            "navigation": {
+                "desktop": "mega_menu_hover",
+                "mobile": "drawer_accordion",
+            }
+        }
+    }
+
+
 def _synthetic_config() -> dict:
     return {
         "site": "synthetic",
         "base_url": "https://synthetic.test",
+        **_strategy_config(),
         "pages": {
             "navigation": {
                 "smoke_collection": {
@@ -166,7 +179,7 @@ def _mobile_nav(monkeypatch, *, menu_open: bool = False):
     nav = object.__new__(NavigationPage)
     nav.page = _FakePage()
     nav.viewport = "mobile"
-    nav.site_config = {}
+    nav.site_config = _strategy_config()
 
     trigger = _FakeLocator()
     monkeypatch.setattr(nav, "is_menu_open", lambda: menu_open)
@@ -255,7 +268,7 @@ def test_mobile_wrong_destination_still_fails_path_validation(monkeypatch) -> No
     nav = object.__new__(NavigationPage)
     nav.page = _FakePage("https://mondressy.com/collections/wrong-destination")
     nav.viewport = "mobile"
-    nav.site_config = {}
+    nav.site_config = _strategy_config()
     target = _FakeLocator()
     nav.target_path = lambda: "/collections/wedding-guest-dresses"
     nav.is_menu_open = lambda: True
@@ -272,7 +285,7 @@ def test_desktop_navigation_keeps_hover_flow(monkeypatch) -> None:
     nav = object.__new__(NavigationPage)
     nav.page = _FakePage()
     nav.viewport = "desktop"
-    nav.site_config = {}
+    nav.site_config = _strategy_config()
     link = _FakeLocator()
     nav._target_top_link = lambda: link
     nav._wait_target_visible = lambda timeout_ms: None
@@ -286,7 +299,7 @@ def test_mobile_menu_root_waits_for_mount_and_visibility() -> None:
     nav = object.__new__(NavigationPage)
     nav.page = _FakePage()
     nav.viewport = "mobile"
-    nav.site_config = {}
+    nav.site_config = _strategy_config()
     roots = iter([
         _FakeLocator(count=0, visible=False),
         _FakeLocator(count=1, visible=True),
@@ -297,6 +310,41 @@ def test_mobile_menu_root_waits_for_mount_and_visibility() -> None:
     nav._wait_mobile_menu_root(timeout_ms=1_000)
 
     assert nav.page.waits
+
+
+@pytest.mark.parametrize(
+    ("site", "viewport", "expected_strategy", "expected_mode"),
+    [
+        ("mondressy", "desktop", "mega_menu_hover", "MEGA_MENU_HOVER"),
+        ("mondressy", "mobile", "drawer_accordion", "DRAWER_ACCORDION"),
+        ("lavetir", "desktop", "mega_menu_hover", "MEGA_MENU_HOVER"),
+        ("lavetir", "mobile", "drawer_accordion", "DRAWER_ACCORDION"),
+    ],
+)
+def test_real_site_navigation_strategy_mappings(site, viewport, expected_strategy, expected_mode) -> None:
+    nav = NavigationPage(None, load_site_config(site), viewport)
+
+    assert nav.strategy_name() == expected_strategy
+    assert nav.current_mode() == expected_mode
+
+
+def test_direct_strategies_resolve_without_a_site_name_branch() -> None:
+    config = _strategy_config()
+    config["capabilities"]["navigation"] = {
+        "desktop": "direct_link",
+        "mobile": "drawer_direct",
+    }
+
+    assert NavigationPage(None, config, "desktop").current_mode() == "DIRECT_LINK"
+    assert NavigationPage(None, config, "mobile").current_mode() == "DRAWER_DIRECT"
+
+
+def test_unknown_navigation_strategy_fails_without_silent_fallback() -> None:
+    config = _strategy_config()
+    config["capabilities"]["navigation"]["desktop"] = "hover_then_guess"
+
+    with pytest.raises(NavigationStrategyError, match="unsupported navigation strategy"):
+        NavigationPage(None, config, "desktop").strategy()
 
 
 def test_synthetic_navigation_supports_distinct_desktop_and_mobile_topologies() -> None:

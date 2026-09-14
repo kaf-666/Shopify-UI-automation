@@ -695,7 +695,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         artifact_dir.mkdir(parents=True, exist_ok=True)
         settings = load_settings()
-        site = args.site or str(settings.get("default_site") or "")
+        site = args.site if args.site is not None else str(settings.get("default_site") or "")
         site_config = load_site_config(site)
         base_url = resolve_url(site_config.get("base_url"), "site.base_url")
     except Exception as exc:

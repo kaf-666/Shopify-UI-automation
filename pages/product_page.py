@@ -22,7 +22,9 @@ from pages.size_option_resolver import (
 )
 
 FREE_SIZE_MARKER = DEFAULT_FREE_SIZE_MARKER
-READINESS_SNAPSHOT_PROBE_TIMEOUT_MS = 100
+# A short per-node probe keeps readiness bounded while allowing a busy
+# storefront to resolve a freshly hydrated Locator under CI load.
+READINESS_SNAPSHOT_PROBE_TIMEOUT_MS = 250
 
 
 class PurchaseAreaReadinessError(TimeoutError):
@@ -134,13 +136,19 @@ class ProductPage(BasePage):
     def _has_disabled_token(cls, locator, tokens: tuple[str, ...]) -> bool:
         if locator is None or not tokens:
             return False
-        classes = set(
-            cls._normalized(
-                locator.get_attribute(
-                    "class", timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-                )
-            ).split()
-        )
+        try:
+            classes = set(
+                cls._normalized(
+                    locator.get_attribute(
+                        "class", timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                    )
+                ).split()
+            )
+        except Exception:
+            # A single transient DOM replacement must not collapse the whole
+            # option group to color_count=0; the next readiness poll resolves
+            # a fresh locator and rechecks the node.
+            return False
         return any(token in classes for token in tokens)
 
     def _associated_label(self, radio):

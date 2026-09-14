@@ -35,7 +35,7 @@ def _access_type(site_config: dict) -> str:
     access = site_config.get("access") or {}
     if not isinstance(access, dict):
         return ""
-    return str(access.get("type") or "none").strip().lower()
+    return str(access.get("mode") or access.get("type") or "none").strip().lower()
 
 
 def _allowed_hosts(policy_summary: dict, site_config: dict) -> List[str]:
@@ -216,7 +216,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     settings = load_settings()
-    site = args.site or str(settings.get("default_site") or "")
+    site = args.site if args.site is not None else str(settings.get("default_site") or "")
     site_config = load_site_config(site)
     resolve_url(site_config.get("base_url"), "site.base_url")
     configured_access_type = _access_type(site_config)

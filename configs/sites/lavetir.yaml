@@ -1,8 +1,28 @@
+schema_version: 1
 site: lavetir
 base_url: "https://www.lavetir.com"
 
+capabilities:
+  suites:
+    website_smoke_readonly_v1: true
+    website_smoke_v1: true
+
+  navigation:
+    desktop: mega_menu_hover
+    mobile: drawer_accordion
+
+  collection:
+    product_cards: true
+    filters: false
+    sort: false
+
+  product:
+    color: true
+    size: true
+    custom_size: true
+
 access:
-  type: signed_request
+  mode: signed_request
   source: env
   env:
     Signature: LAVETIR_US_SHOPIFY_SIGNATURE
@@ -196,6 +216,18 @@ pages:
         stability: HIGH
         notes: Product cards scoped to the main collection content root
 
+      product_link:
+        by: css
+        value: "a.grid-product__link"
+        stability: HIGH
+        notes: Product link resolved relative to each configured card
+
+      product_title:
+        by: css
+        value: ".grid-product__title"
+        stability: HIGH
+        notes: Product title resolved relative to each configured card
+
   product:
     url: /products/a-line-princess-chiffon-scoop-3-4-sleeves-mother-of-the-bride-dresses-with-appliques-ruffles-12010206a1
 
@@ -265,3 +297,119 @@ pages:
         value: "form.product-single__form button[name=\"add\"]"
         stability: HIGH
         notes: Main product ATC only; scoped to product-single form and excludes recommendation/sticky buttons
+
+  cart:
+    url: /cart
+
+    selectors:
+      drawer:
+        by: css
+        value: "#CartDrawer"
+        stability: HIGH
+        notes: Verified open cart drawer root on Lavetir desktop and mobile
+
+      cart_item:
+        by: css
+        value: ".cart__item"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Verified item row rendered after the public Flow add-to-cart action
+
+      item_title:
+        by: css
+        value: ".cart__item-name, a[href*='/products/']"
+        stability: MEDIUM
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Cart item title/link, scoped to one cart row
+
+      quantity:
+        by: css
+        value: "input[name=\"updates[]\"]"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Shopify cart quantity input; unverifiable with empty cart
+
+      quantity_input:
+        by: css
+        value: "input[name=\"updates[]\"]"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Verified visible js-qty__num input in the Lavetir cart drawer
+
+      quantity_plus:
+        by: css
+        value: "button.js-qty__adjust--plus"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Verified Increase item quantity by one control
+
+      quantity_minus:
+        by: css
+        value: "button.js-qty__adjust--minus"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Verified Reduce item quantity by one control
+
+      remove:
+        by: css
+        value: ".cart__remove-button, .cart__remove, a[href*='/cart/change'], button[name='remove']"
+        stability: HIGH
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Verified Lavetir remove control (cart__remove-button) with public fallback selectors
+
+      variant_properties:
+        by: css
+        value: ".cart__item--variants, .cart__item--properties"
+        stability: MEDIUM
+        status: NOT_OBSERVABLE_WITH_EMPTY_CART
+        notes: Cart line variant/property rows; scoped to the configured cart item
+
+      subtotal:
+        by: css
+        value: "#CartDrawer .drawer__footer .money.done"
+        stability: MEDIUM
+        notes: Verified subtotal amount node in the open drawer; auxiliary consistency signal
+
+      checkout_button:
+        by: css
+        value: "button[name=\"checkout\"]"
+        stability: HIGH
+        notes: Verified standard cart checkout button; quick-pay controls are excluded
+
+  checkout:
+    selectors:
+      root:
+        by: css
+        value: "main#checkout-main"
+        stability: HIGH
+        notes: Verified Shopify hosted Checkout root on Lavetir
+
+      contact:
+        by: css
+        value: "h2#contact"
+        stability: HIGH
+        notes: Verified Contact section heading; read-only presence check
+
+      delivery:
+        by: css
+        value: "h2#deliveryAddress"
+        stability: HIGH
+        notes: Verified Delivery address heading; read-only presence check
+
+      shipping_form:
+        by: css
+        value: "#shippingAddressForm"
+        stability: HIGH
+        notes: Verified shipping address form container; never filled
+
+      email:
+        by: css
+        value: "input#email"
+        stability: HIGH
+        notes: Verified email field presence; never filled
+
+      express:
+        by: css
+        value: "#express-checkout-heading"
+        stability: HIGH
+        notes: Verified express checkout heading; never clicked

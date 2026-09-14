@@ -71,6 +71,7 @@ class WebsiteSmokeV1Runner:
         viewport: str,
         artifact_dir: Optional[Path] = None,
         traffic_inventory=None,
+        mutation_policy=None,
     ):
         self.runtime = runtime
         self.viewport = viewport
@@ -92,6 +93,7 @@ class WebsiteSmokeV1Runner:
         self._extra_pages: List = []
         self._journey = ""
         self._traffic_inventory = traffic_inventory
+        self._mutation_policy = mutation_policy
 
         self._cases: Dict[str, tuple] = {
             # ------------------------------------------------------- Direct
@@ -189,6 +191,18 @@ class WebsiteSmokeV1Runner:
 
     def _traffic_observe(self, operation: str, *args, **kwargs) -> None:
         """Best-effort observation hook; collection can never fail a business Case."""
+        if operation == "set_scope" and self._mutation_policy is not None:
+            try:
+                self._mutation_policy.set_scope(
+                    kwargs.get("viewport", args[0] if args else self.viewport),
+                    kwargs.get("journey", args[1] if len(args) > 1 else self._journey),
+                    kwargs.get("case_id", args[2] if len(args) > 2 else None),
+                    kwargs.get("scope_name"),
+                )
+            except Exception:
+                # Mutation policy attachment is a safety boundary; a scope
+                # attribution failure must not break the business case.
+                pass
         inventory = self._traffic_inventory
         if inventory is None:
             return
@@ -376,6 +390,20 @@ class WebsiteSmokeV1Runner:
             return " ".join(prod.title().evaluate("el => el.textContent").split())
         except Exception:
             return fallback
+
+    def mutation_summary(self) -> dict:
+        """Return the transactional mutation audit for this viewport."""
+        if self._mutation_policy is not None:
+            return self._mutation_policy.summary()
+        return {
+            "mode": "TRANSACTIONAL_SAFE",
+            "status": "PASS",
+            "expected_mutation": 0,
+            "unexpected_mutation": 0,
+            "high_risk_mutation": 0,
+            "blocked_mutation": 0,
+            "by_path": [],
+        }
 
     # -------------------------------------------------------------------- API
     def run_all(self) -> List[CaseResult]:

@@ -45,6 +45,7 @@ def test_lavetir_pipeline_is_fixed_to_lavetir_and_keeps_viewport_parameter() -> 
     assert "echo 'Site: lavetir'" in content
     assert "stage('Site Access')" in content
     assert "stage('Signed Request / Site Access')" not in content
+    assert "scripts/validate_site_config.py --site lavetir --suite website_smoke_readonly_v1" in content
     assert "--site lavetir --viewport both" in content
     assert "--site lavetir --viewport ${params.SMOKE_VIEWPORT}" in content
 

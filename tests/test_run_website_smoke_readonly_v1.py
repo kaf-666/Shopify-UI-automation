@@ -138,8 +138,8 @@ def test_cli_offline_viewport_contract(
     monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
     monkeypatch.setattr(
         cli,
-        "load_site_config",
-        lambda _site: {"base_url": "https://mondressy.com"},
+        "validate_site_config",
+        lambda _site, **_kwargs: {"base_url": "https://mondressy.com"},
     )
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
 
@@ -169,8 +169,8 @@ def test_cli_result_write_failure_is_nonzero(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
     monkeypatch.setattr(
         cli,
-        "load_site_config",
-        lambda _site: {"base_url": "https://mondressy.com"},
+        "validate_site_config",
+        lambda _site, **_kwargs: {"base_url": "https://mondressy.com"},
     )
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
     monkeypatch.setattr(
@@ -194,8 +194,8 @@ def test_cli_out_of_scope_mutation_is_run_fatal(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
     monkeypatch.setattr(
         cli,
-        "load_site_config",
-        lambda _site: {"base_url": "https://mondressy.com"},
+        "validate_site_config",
+        lambda _site, **_kwargs: {"base_url": "https://mondressy.com"},
     )
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
     monkeypatch.setattr(
@@ -228,11 +228,11 @@ def test_cli_explicit_site_overrides_default_site(monkeypatch, tmp_path) -> None
     monkeypatch.setattr(cli, "make_run_id", lambda: "explicit-site")
     monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "settings-site"})
 
-    def fake_load_site_config(site_name):
+    def fake_validate_site_config(site_name, **_kwargs):
         loaded_sites.append(site_name)
         return {"base_url": "https://mondressy.com"}
 
-    monkeypatch.setattr(cli, "load_site_config", fake_load_site_config)
+    monkeypatch.setattr(cli, "validate_site_config", fake_validate_site_config)
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
 
     def fake_run_viewport(_viewport, _artifact_dir, *, site_name=None):
@@ -253,8 +253,8 @@ def test_cli_same_run_id_is_isolated_by_site(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
     monkeypatch.setattr(
         cli,
-        "load_site_config",
-        lambda site: {"base_url": f"https://{site}.example.test"},
+        "validate_site_config",
+        lambda site, **_kwargs: {"base_url": f"https://{site}.example.test"},
     )
     monkeypatch.setattr(cli, "resolve_url", lambda value, _field: value)
     monkeypatch.setattr(

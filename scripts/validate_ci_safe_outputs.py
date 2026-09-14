@@ -16,7 +16,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.errors import SENSITIVE_ENV_NAMES
+from utils.errors import sensitive_env_names
 
 
 SKIP_PARTS = {".git", ".venv", "node_modules", "__pycache__"}
@@ -51,7 +51,7 @@ def text_files(root: Path):
 def main() -> int:
     values = {
         name: os.environ.get(name, "")
-        for name in SENSITIVE_ENV_NAMES
+        for name in sensitive_env_names()
     }
     values = {name: value for name, value in values.items() if value}
     scanned = 0

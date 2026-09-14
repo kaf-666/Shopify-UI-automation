@@ -63,7 +63,7 @@ class _FakeCard:
         self.link = _FakeLink(href)
 
     def locator(self, selector: str):
-        assert selector == "a.grid-product__link"
+        assert selector == ".product-link"
         return self.link
 
 
@@ -101,7 +101,8 @@ def test_open_product_navigates_to_canonical_product_route() -> None:
         "pages": {
             "collection": {
                 "selectors": {
-                    "product_card": {"by": "css", "value": ".product-card"}
+                    "product_card": {"by": "css", "value": ".product-card"},
+                    "product_link": {"by": "css", "value": ".product-link"},
                 }
             }
         },
@@ -120,7 +121,8 @@ def test_open_product_keeps_existing_canonical_route() -> None:
         "pages": {
             "collection": {
                 "selectors": {
-                    "product_card": {"by": "css", "value": ".product-card"}
+                    "product_card": {"by": "css", "value": ".product-card"},
+                    "product_link": {"by": "css", "value": ".product-link"},
                 }
             }
         },

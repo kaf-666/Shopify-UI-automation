@@ -75,6 +75,7 @@ def _readonly_result(viewports: list[dict] | None = None) -> dict:
         "runtime": {"fixture": True},
         "summary": _summary(all_cases),
         "viewports": viewports,
+        "mutation_summary": None,
         "fatal_error": None,
     }
 
@@ -94,6 +95,22 @@ def _full_result() -> dict:
         "runtime": {"fixture": True},
         "summary": _summary(all_cases),
         "viewports": [viewport],
+        "mutation_summary": {
+            "mode": "TRANSACTIONAL_SAFE",
+            "status": "PASS",
+            "expected_mutation": 4,
+            "unexpected_mutation": 0,
+            "high_risk_mutation": 0,
+            "blocked_mutation": 0,
+            "by_path": [
+                {
+                    "classification": "EXPECTED_MUTATION",
+                    "method": "POST",
+                    "path": "/cart/add.js",
+                    "count": 4,
+                }
+            ],
+        },
         "fatal_error": None,
     }
 

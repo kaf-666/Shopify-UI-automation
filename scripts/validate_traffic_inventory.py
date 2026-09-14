@@ -220,7 +220,7 @@ def main() -> int:
 
     context = FakeContext()
     active_page = FakePage()
-    inventory = TrafficInventory()
+    inventory = TrafficInventory(first_party_hosts={"mondressy.com", "www.mondressy.com"})
     inventory.attach_context(context, "mobile", active_page)
     inventory.set_scope(
         "mobile", journey="search", case_id="WSMOKE-SEARCH-03", scope_name="CASE"

@@ -27,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pages.base_page import BasePage
 from tests.smoke_cases import SmokeCaseRunner
 from utils.browser import close_browser, create_browser
-from utils.config import resolve_url
+from utils.config import configured_site_name, resolve_url
 from utils.errors import sanitize_message
 from utils.result import (
     ResultWriteError,
@@ -103,7 +103,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     site_cfg = BasePage.load_site_config()
-    site = str(site_cfg.get("site") or "mondressy")
+    site = configured_site_name(site_cfg)
     base_url = resolve_url(site_cfg.get("base_url"), "site.base_url")
 
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]

@@ -1,7 +1,7 @@
 # Shopify UI Automation
 
-Standalone Shopify / DTC UI Automation Framework for Mondressy. The repository
-provides two independent production smoke contracts:
+Standalone Shopify / DTC UI Automation Framework for Mondressy and Lavetir.
+The repository provides two independent production smoke contracts:
 
 - **Website Smoke V1 (Full)** validates positive shopping journeys through cart
   and checkout entry.
@@ -53,6 +53,15 @@ identity/variant consistency, quantity changes, and checkout entry. It does
 not enter payment information, use accelerated payment, submit an order, or
 complete a real payment.
 
+Full runs use the `TRANSACTIONAL_SAFE` mutation policy. Cart Add/Change/Clear
+requests are recorded as `EXPECTED_MUTATION`; known Shopify/analytics transport
+posts are observed but excluded from the business mutation count. Any other
+first-party state-changing request is `UNEXPECTED_MUTATION`, while order,
+payment, account/customer, and checkout-session mutations are
+`HIGH_RISK_MUTATION` and are aborted before reaching the site. A Full result
+contains per-viewport and aggregate `mutation_summary` fields; PASS requires
+`unexpected_mutation=0` and `high_risk_mutation=0`.
+
 ### Main commands
 
 ```powershell
@@ -62,6 +71,27 @@ complete a real payment.
 ```
 
 The default viewport is `both`.
+
+## Versioned site profiles and capability gates
+
+Every `configs/sites/<site>.yaml` profile declares `schema_version: 1` and a
+`capabilities` contract. The contract records the suites, navigation strategy,
+collection-card features, and product-option features the framework actually
+automates for that site. It is not a claim about every storefront feature the
+site may expose.
+
+Validate profiles without starting Playwright or reading Signed Request values:
+
+```powershell
+python scripts/validate_site_config.py --site mondressy
+python scripts/validate_site_config.py --site lavetir
+python scripts/validate_site_config.py --all
+```
+
+Formal runners apply the matching suite gate before creating a browser. Lavetir
+now declares both `website_smoke_readonly_v1` and the transactional-safe
+`website_smoke_v1` capability; incomplete profiles still exit with
+`SITE_CAPABILITY_UNSUPPORTED` rather than starting a partial run.
 
 ## Website Smoke Readonly V1
 
@@ -175,12 +205,17 @@ gates:
 - Lavetir Site Access, Secret Leakage, and Result Schema: `PASS`
 - Jenkins result: `SUCCESS`
 
-The scheduled pilot counts only timer-triggered builds with
-`SMOKE_VIEWPORT=both` and `VARIANT_DIAGNOSTIC=false`. Manual builds and
-diagnostic builds are excluded. The target is **12 consecutive scheduled
-successes** on one frozen branch revision; a failure or branch HEAD change
-resets the counter. Jenkins Build History is the observation source for this
-pilot. It does not create a new Stability framework or Stability record.
+The completed observation counted timer-triggered builds with
+`SMOKE_VIEWPORT=both` and `VARIANT_DIAGNOSTIC=false`; manual and diagnostic
+builds were excluded. Jenkins Build History remains its only observation
+source and no new Stability framework or Stability record was created. The
+final result is frozen at Jenkins `#57–#74` on
+`2e57992bb8beaa2ab7e1c59ace9b7ea4814b8e1d`: `18` consecutive scheduled
+successes against the `12`-run gate, `22/22 PASS` Readonly, and `0` mutations.
+The detailed immutable phase baseline is recorded in
+[docs/lavetir-multi-site-pilot-result.md](docs/lavetir-multi-site-pilot-result.md).
+The observation work is now closed; Step 6 hardens the shared architecture and
+does not add a third site.
 
 The pipeline is intentionally fixed to Lavetir and binds only the three
 `LAVETIR_US_SHOPIFY_SIGNATURE*` Jenkins credentials. Existing Mondressy
@@ -396,13 +431,16 @@ build and does not include these manual builds.
 ## Jenkins
 
 The repository currently has two Mondressy formal Jenkins Jobs and one fixed
-site Lavetir pilot Job:
+site Lavetir Readonly pilot Job. Lavetir Full is locally validated and its
+manual-only pipeline definition is prepared separately; no new cron is enabled
+until the joint observation gate is complete:
 
 | Job | Pipeline | Suite | Cases (`both`) | Schedule | Stability |
 | --- | --- | --- | ---: | --- | --- |
 | Mondressy - Website Smoke - Full | `Jenkinsfile.full` | `website_smoke_v1` | 30 | Daily | YES |
 | Mondressy - Website Smoke - Readonly | `Jenkinsfile.readonly` | `website_smoke_readonly_v1` | 22 | Every 4 hours | NO |
 | Monitoring / Shopify / UI automation / test | `Jenkinsfile.readonly.lavetir` | Lavetir `website_smoke_readonly_v1` pilot | 22 | `H H/4 * * *` | NO |
+| Lavetir - Website Smoke - Full | `Jenkinsfile.full.lavetir` | `website_smoke_v1` | 30 | Manual (pending formal Job) | YES (pending 6-run gate) |
 
 The two Mondressy schedules remain configured at the Jenkins Job level / UI:
 
