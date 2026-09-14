@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from utils.readonly_mutation_guard import (
+    LOCALIZATION_CONTEXT_REASON,
     ReadonlyMutationGuard,
     TransactionalMutationPolicy,
     merge_transactional_mutation_summaries,
@@ -141,6 +142,106 @@ def test_transactional_policy_allows_expected_cart_mutations() -> None:
     assert summary["expected_mutation"] == 1
     assert summary["unexpected_mutation"] == 0
     assert summary["high_risk_mutation"] == 0
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["mondressy.com", "www.mondressy.com", "lavetir.com", "www.lavetir.com"],
+)
+def test_transactional_policy_allows_first_party_localization_context(host: str) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com", "www.mondressy.com", "lavetir.com", "www.lavetir.com")
+    )
+    policy.attach(context)
+
+    route = _FakeRoute(f"https://{host}/localization", "POST")
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events()[0]["classification"] == policy.EXPECTED
+    assert policy.events()[0]["classification_reason"] == LOCALIZATION_CONTEXT_REASON
+    assert policy.events()[0]["blocked"] is False
+    assert policy.summary() == {
+        "mode": "TRANSACTIONAL_SAFE",
+        "status": "PASS",
+        "expected_mutation": 1,
+        "unexpected_mutation": 0,
+        "high_risk_mutation": 0,
+        "blocked_mutation": 0,
+        "by_path": [
+            {
+                "classification": "EXPECTED_MUTATION",
+                "method": "POST",
+                "path": "/localization",
+                "count": 1,
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://mondressy.com/localization/unsafe",
+        "https://mondressy.com/localization/foo",
+        "https://mondressy.com/unknown-write",
+        "https://mondressy.com/localization?country=US",
+    ],
+)
+def test_transactional_policy_blocks_localization_lookalikes_and_query_variants(url: str) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com", "www.mondressy.com"))
+    policy.attach(context)
+
+    route = _FakeRoute(url, "POST")
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.events()[0]["classification"] == policy.UNEXPECTED
+    assert policy.events()[0]["blocked"] is True
+    assert policy.summary()["status"] == "FAIL"
+
+
+def test_transactional_policy_localization_normalization_keeps_trailing_slash_safe() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com", "www.mondressy.com"))
+    policy.attach(context)
+
+    route = _FakeRoute("https://MONDRESSY.COM/LOCALIZATION/", "POST")
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events()[0]["path"] == "/localization"
+    assert policy.events()[0]["classification_reason"] == LOCALIZATION_CONTEXT_REASON
+
+
+def test_transactional_policy_does_not_treat_get_or_third_party_localization_as_expected() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com", "www.mondressy.com"))
+    policy.attach(context)
+
+    get_route = _FakeRoute("https://mondressy.com/localization", "GET")
+    third_party_route = _FakeRoute("https://third-party.example/localization", "POST")
+    context.handler(get_route)
+    context.handler(third_party_route)
+
+    assert get_route.calls == ["fallback"]
+    assert third_party_route.calls == ["fallback"]
+    assert policy.events() == []
+
+
+def test_transactional_policy_high_risk_host_precedes_localization_context_rule() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("paypal.com",))
+    policy.attach(context)
+
+    route = _FakeRoute("https://paypal.com/localization", "POST")
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.events()[0]["classification"] == policy.HIGH_RISK
+    assert policy.summary()["high_risk_mutation"] == 1
 
 
 @pytest.mark.parametrize(

@@ -81,6 +81,8 @@ NON_BUSINESS_MUTATION_PATH_PREFIXES = (
     "/cdn-cgi/rum",
     "/xoplatform/logger/api/logger",
 )
+LOCALIZATION_CONTEXT_PATH = "/localization"
+LOCALIZATION_CONTEXT_REASON = "FIRST_PARTY_LOCALIZATION_CONTEXT"
 
 
 class ReadonlyMutationGuard:
@@ -204,11 +206,11 @@ class ReadonlyMutationGuard:
 class TransactionalMutationPolicy:
     """Fail-closed mutation policy for the safe Full Smoke suite.
 
-    Expected cart mutations are allowed and recorded. Any first-party
-    mutation outside that small allowlist, plus all checkout/payment/account
-    mutations, is aborted before it can reach the storefront. Third-party
-    telemetry POSTs are outside the storefront mutation boundary and are left
-    to the existing TrafficInventory observer.
+    Expected cart and verified first-party context mutations are allowed and
+    recorded. Any first-party mutation outside that small allowlist, plus all
+    checkout/payment/account mutations, is aborted before it can reach the
+    storefront. Third-party telemetry POSTs are outside the storefront
+    mutation boundary and are left to the existing TrafficInventory observer.
     """
 
     EXPECTED = "EXPECTED_MUTATION"
@@ -269,6 +271,25 @@ class TransactionalMutationPolicy:
         # explicit token check is deliberately narrow to avoid logging values.
         return bool(text and ("mutation" in text or "operationname\\\":\\\"mutation" in text))
 
+    def _is_localization_context(
+        self, url: str, method: str, host: str, path: str
+    ) -> bool:
+        """Match the verified first-party localization context request only."""
+        if str(method or "").upper() != "POST" or host not in self.first_party_hosts:
+            return False
+        try:
+            parsed = urlsplit(str(url or ""))
+        except ValueError:
+            return False
+        return path == LOCALIZATION_CONTEXT_PATH and not parsed.query
+
+    def _classification_reason(
+        self, url: str, method: str, host: str, path: str, category: str
+    ) -> Optional[str]:
+        if category == self.EXPECTED and self._is_localization_context(url, method, host, path):
+            return LOCALIZATION_CONTEXT_REASON
+        return None
+
     def _classify(self, url: str, method: str, request=None) -> Optional[str]:
         normalized_method = str(method or "").upper()
         if normalized_method not in MUTATION_METHODS:
@@ -297,6 +318,8 @@ class TransactionalMutationPolicy:
         if self._is_high_risk(path, host):
             return self.HIGH_RISK
         if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
+            return self.EXPECTED
+        if self._is_localization_context(url, normalized_method, host, path):
             return self.EXPECTED
         return self.UNEXPECTED
 
@@ -334,6 +357,15 @@ class TransactionalMutationPolicy:
             **self._scope,
             "blocked": category != self.EXPECTED,
         }
+        reason = self._classification_reason(
+            getattr(request, "url", ""),
+            getattr(request, "method", ""),
+            self._host(getattr(request, "url", "")),
+            event["path"],
+            category,
+        )
+        if reason is not None:
+            event["classification_reason"] = reason
         self._events.append(event)
         if category == self.EXPECTED:
             if callable(fallback):
