@@ -33,8 +33,9 @@ secret-leakage scan, `compileall`, and `git diff --check`.
 
 ## 6.5C–6.5F — Delivery state
 
-- **6.5C main merge:** not executed. The worktree remains on
-  `feat/multi-site-pilot`; no merge or push was performed.
+- **6.5C main merge:** local fast-forward completed. Both local
+  `feat/multi-site-pilot` and `main` now point at the validated commit; the
+  remote branches were not pushed.
 - **6.5D main manual Jenkins run:** not executed; Jenkins access is not
   available in this environment.
 - **6.5E formal Lavetir jobs:** `Jenkinsfile.full.lavetir` is prepared as a
