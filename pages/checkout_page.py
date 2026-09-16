@@ -16,7 +16,6 @@ DOM 说明：Shopify Checkout 使用 hash class，不稳定；
 from __future__ import annotations
 
 import re
-from typing import List, Optional
 from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -29,6 +28,18 @@ class CheckoutPage(BasePage):
     """Checkout 落地页对象：上下文判定、核心 UI 存在性与商品摘要读取。"""
 
     PAGE_NAME = "checkout"
+
+    _CELL_SNAPSHOT_JS = r"""
+        cells => cells.map(cell => {
+            const normalize = value => (value || '').replace(/\s+/g, ' ').trim();
+            return {
+                text: normalize(cell.innerText || cell.textContent),
+                paragraphs: Array.from(cell.querySelectorAll('p'))
+                    .map(node => normalize(node.innerText || node.textContent))
+                    .filter(Boolean),
+            };
+        })
+    """
 
     # ------------------------------------------------------------------ 上下文
     def is_checkout(self) -> bool:
@@ -98,6 +109,21 @@ class CheckoutPage(BasePage):
         """
         return self.page.locator('[role="cell"]')
 
+    def _cell_snapshots(self) -> list[dict]:
+        """Atomically snapshot current cell text from the live DOM.
+
+        Shopify Checkout is a React application and can replace the mobile
+        Order Summary subtree after it becomes visible.  Selecting a cell in
+        one DOM generation and reading a descendant in a later call can leave
+        Playwright waiting on a locator that no longer has that descendant.
+        ``evaluate_all`` resolves the live cell set and all required text in
+        one browser task, so no locator is retained across a render boundary.
+        """
+        raw = self._cells().evaluate_all(self._CELL_SNAPSHOT_JS)
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
     def cells_visible(self) -> bool:
         """Order Summary 单元格是否任一可见（移动端展开后可见）。"""
         cells = self._cells()
@@ -154,31 +180,31 @@ class CheckoutPage(BasePage):
         return "Order summary" in self.order_summary_text()
 
     # ------------------------------------------------------------ 商品摘要
-    def _description_cell(self, index: int = 0):
-        """返回第 index 个商品描述单元格（文本最长的 role=cell）。
+    def _description_snapshot(self, index: int = 0) -> dict | None:
+        """返回商品描述单元格的原子文本快照（文本最长的 role=cell）。
 
         描述单元格包含标题 + 变体文本，长度显著大于数量 / 价格单元格。
+        当前 checkout smoke 只允许单件商品；保留 ``index`` 参数以维持
+        公共 getter 签名，并在非零索引时返回不可读。
         """
-        cells = self._cells()
+        if index != 0:
+            return None
         best = None
         best_len = -1
-        for i in range(cells.count()):
-            try:
-                text = " ".join(cells.nth(i).inner_text().split())
-            except Exception:
-                continue
+        for snapshot in self._cell_snapshots():
+            text = str(snapshot.get("text") or "")
             if len(text) > best_len:
                 best_len = len(text)
-                best = cells.nth(i)
+                best = snapshot
         return best
 
     def get_product_title(self, index: int = 0) -> str:
         """返回商品标题（描述单元格内第一个 p 的文本）。"""
-        cell = self._description_cell(index)
-        if cell is None:
+        snapshot = self._description_snapshot(index)
+        if snapshot is None:
             return ""
-        p = cell.locator("p").first
-        return " ".join(p.inner_text().split()) if p.count() else ""
+        paragraphs = snapshot.get("paragraphs") or []
+        return str(paragraphs[0]) if paragraphs else ""
 
     def product_count_readable(self) -> int:
         """返回可读取的商品行数（文本较长的描述单元格数量）。
@@ -186,48 +212,40 @@ class CheckoutPage(BasePage):
         数量单元格 / 价格单元格文本短，描述单元格（标题+变体）显著更长，
         用于无显式数量时推断单件商品状态。
         """
-        count = 0
-        cells = self._cells()
-        for i in range(cells.count()):
-            try:
-                text = " ".join(cells.nth(i).inner_text().split())
-            except Exception:
-                continue
-            if len(text) > 40:
-                count += 1
-        return count
+        return sum(
+            1
+            for snapshot in self._cell_snapshots()
+            if len(str(snapshot.get("text") or "")) > 40
+        )
 
     def get_product_variant(self, index: int = 0) -> str:
         """返回变体文本：描述单元格除去标题后的剩余文本（如 "Black Size: 2"）。"""
-        cell = self._description_cell(index)
-        if cell is None:
+        snapshot = self._description_snapshot(index)
+        if snapshot is None:
             return ""
-        full = " ".join(cell.inner_text().split())
-        title = self.get_product_title(index)
+        full = str(snapshot.get("text") or "")
+        paragraphs = snapshot.get("paragraphs") or []
+        title = str(paragraphs[0]) if paragraphs else ""
         if title and full.startswith(title):
             return full[len(title):].strip()
         return full
 
     def get_product_quantity(self, index: int = 0) -> str:
         """返回商品数量：文本以 "Quantity" 标签开头的单元格的值；不可读返回空串。"""
-        cells = self._cells()
-        for i in range(cells.count()):
-            try:
-                text = " ".join(cells.nth(i).inner_text().split())
-            except Exception:
-                continue
+        if index != 0:
+            return ""
+        for snapshot in self._cell_snapshots():
+            text = str(snapshot.get("text") or "")
             if text.startswith("Quantity"):
                 return text[len("Quantity"):].strip()
         return ""
 
     def get_product_price(self, index: int = 0) -> str:
         """返回商品价格（观察用途）：单元格文本以 $ 开头。"""
-        cells = self._cells()
-        for i in range(cells.count()):
-            try:
-                text = " ".join(cells.nth(i).inner_text().split())
-            except Exception:
-                continue
+        if index != 0:
+            return ""
+        for snapshot in self._cell_snapshots():
+            text = str(snapshot.get("text") or "")
             if text.startswith("$"):
                 return text
         return ""
