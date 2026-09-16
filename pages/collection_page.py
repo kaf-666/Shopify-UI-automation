@@ -6,11 +6,22 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+import math
+import time
+from typing import Callable, List, Optional
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from pages.base_page import BasePage
 from utils.browser import PAGE_NAV_TIMEOUT_MS
+
+
+COLLECTION_PRODUCTS_TIMEOUT_MS = 15_000
+COLLECTION_PRODUCTS_POLL_MS = 250
+COLLECTION_PRODUCTS_STABLE_SNAPSHOTS = 2
+
+
+class CollectionProductsReadinessError(TimeoutError):
+    """商品列表未在 bounded timeout 内进入稳定可操作状态。"""
 
 
 class CollectionPage(BasePage):
@@ -29,6 +40,14 @@ class CollectionPage(BasePage):
     def product_cards(self):
         """返回商品卡定位器集合。"""
         return self.locator("product_card")
+
+    def visible_product_cards(self):
+        """返回当前可见、可作为 index 目标的商品卡集合。"""
+        return self.product_cards().filter(visible=True)
+
+    def product_links(self):
+        """返回配置在商品卡内部的全部主商品链接。"""
+        return self._card_descendant(self.product_cards(), "product_link")
 
     def _card_descendant(self, card, selector_name: str):
         """Resolve a configured product-card descendant without theme classes.
@@ -60,6 +79,208 @@ class CollectionPage(BasePage):
         """返回当前页可见商品卡数量。"""
         return self.product_cards().count()
 
+    @staticmethod
+    def _visible_count(locator) -> int:
+        """Count currently visible matches without caching DOM nodes."""
+        return locator.filter(visible=True).count()
+
+    def _optional_loading_snapshot(self) -> tuple[bool, int, int]:
+        """Read an optional configured loading/skeleton locator for diagnostics."""
+        selectors = self.page_config().get("selectors") or {}
+        selector_name = next(
+            (name for name in ("loading", "skeleton") if selectors.get(name)), None
+        )
+        if selector_name is None:
+            return False, 0, 0
+        loading = self.locator(selector_name)
+        return True, loading.count(), self._visible_count(loading)
+
+    def _products_readiness_snapshot(self, index: int) -> dict:
+        """Read one live collection/product snapshot for the requested card index."""
+        grid = self.product_grid()
+        cards = self.product_cards()
+        visible_cards = self.visible_product_cards()
+        links = self.product_links()
+
+        grid_count = grid.count()
+        card_count = cards.count()
+        visible_card_count = visible_cards.count()
+        link_count = links.count()
+        target_link_count = 0
+        target_link_visible = False
+        target_href = ""
+        target_href_valid = False
+
+        if visible_card_count > index:
+            target_link = self.product_link(visible_cards.nth(index))
+            target_link_count = target_link.count()
+            if target_link_count:
+                target_link_visible = target_link.is_visible()
+                target_href = str(target_link.get_attribute("href") or "").strip()
+                if target_href:
+                    try:
+                        self._canonical_product_href(target_href)
+                        target_href_valid = True
+                    except RuntimeError:
+                        pass
+
+        loading_configured, loading_count, loading_visible_count = (
+            self._optional_loading_snapshot()
+        )
+        try:
+            ready_state = str(self.page.evaluate("document.readyState"))
+        except Exception:
+            ready_state = "UNKNOWN"
+
+        return {
+            "url": str(getattr(self.page, "url", "") or "")
+            .split("?", 1)[0]
+            .split("#", 1)[0],
+            "document_ready_state": ready_state,
+            "target_index": index,
+            "grid_count": grid_count,
+            "grid_visible": bool(grid_count and grid.is_visible()),
+            "product_card_count": card_count,
+            "product_card_visible_count": visible_card_count,
+            "product_link_count": link_count,
+            "product_link_visible_count": self._visible_count(links),
+            "target_link_count": target_link_count,
+            "target_link_visible": target_link_visible,
+            "target_href": target_href,
+            "target_href_valid": target_href_valid,
+            "loading_configured": loading_configured,
+            "loading_count": loading_count,
+            "loading_visible_count": loading_visible_count,
+        }
+
+    @staticmethod
+    def _products_snapshot_ready(snapshot: dict) -> bool:
+        index = int(snapshot["target_index"])
+        return bool(
+            snapshot["grid_count"] > 0
+            and snapshot["grid_visible"]
+            and snapshot["product_card_visible_count"] >= index + 1
+            and snapshot["target_link_count"] > 0
+            and snapshot["target_link_visible"]
+            and snapshot["target_href"]
+            and snapshot["target_href_valid"]
+        )
+
+    @staticmethod
+    def _emit_products_readiness_diagnostic(
+        snapshot: dict,
+        *,
+        elapsed_ms: int,
+        poll_attempts: int,
+        consecutive_ready_snapshots: int,
+        diagnostics_hook: Optional[Callable[[dict], None]],
+    ) -> None:
+        """Emit a safe diagnostic snapshot without affecting readiness behavior."""
+        if diagnostics_hook is None:
+            return
+        safe_snapshot = dict(snapshot)
+        safe_snapshot.update(
+            {
+                "elapsed_ms": elapsed_ms,
+                "poll_attempts": poll_attempts,
+                "consecutive_ready_snapshots": consecutive_ready_snapshots,
+            }
+        )
+        try:
+            diagnostics_hook(safe_snapshot)
+        except Exception:
+            pass
+
+    def wait_for_products_ready(
+        self,
+        index: int = 0,
+        *,
+        timeout_ms: int = COLLECTION_PRODUCTS_TIMEOUT_MS,
+        poll_interval_ms: int = COLLECTION_PRODUCTS_POLL_MS,
+        stable_snapshots: int = COLLECTION_PRODUCTS_STABLE_SNAPSHOTS,
+        diagnostics_hook: Optional[Callable[[dict], None]] = None,
+    ) -> dict:
+        """Wait for one requested product link to be stably actionable.
+
+        Every poll re-resolves Playwright Locators against the live DOM.  The
+        total number of polls and wall-clock budget are bounded; the method
+        never reloads the page or retries the surrounding business case.
+        """
+        if index < 0:
+            raise IndexError(f"Product index must be non-negative: {index}")
+        if timeout_ms < 0:
+            raise ValueError("timeout_ms must be non-negative")
+        if poll_interval_ms <= 0:
+            raise ValueError("poll_interval_ms must be positive")
+        if stable_snapshots <= 0:
+            raise ValueError("stable_snapshots must be positive")
+
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
+        max_attempts = max(1, math.ceil(timeout_ms / poll_interval_ms) + 1)
+        consecutive_ready = 0
+        snapshot: dict = {}
+        attempts = 0
+
+        for attempts in range(1, max_attempts + 1):
+            snapshot = self._products_readiness_snapshot(index)
+            if self._products_snapshot_ready(snapshot):
+                consecutive_ready += 1
+            else:
+                consecutive_ready = 0
+
+            elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+            self._emit_products_readiness_diagnostic(
+                snapshot,
+                elapsed_ms=elapsed_ms,
+                poll_attempts=attempts,
+                consecutive_ready_snapshots=consecutive_ready,
+                diagnostics_hook=diagnostics_hook,
+            )
+            if consecutive_ready >= stable_snapshots:
+                result = dict(snapshot)
+                result.update(
+                    {
+                        "elapsed_ms": elapsed_ms,
+                        "poll_attempts": attempts,
+                        "consecutive_ready_snapshots": consecutive_ready,
+                    }
+                )
+                return result
+
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            remaining_ms = max(1, int((deadline - now) * 1000))
+            self.page.wait_for_timeout(min(poll_interval_ms, remaining_ms))
+
+        elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+        raise CollectionProductsReadinessError(
+            " ".join(
+                [
+                    f"url={snapshot.get('url', '')}",
+                    f"readyState={snapshot.get('document_ready_state', 'UNKNOWN')}",
+                    f"target_index={index}",
+                    f"grid_count={snapshot.get('grid_count', 0)}",
+                    f"grid_visible={snapshot.get('grid_visible', False)}",
+                    f"product_card_count={snapshot.get('product_card_count', 0)}",
+                    "product_card_visible_count="
+                    f"{snapshot.get('product_card_visible_count', 0)}",
+                    f"product_link_count={snapshot.get('product_link_count', 0)}",
+                    "product_link_visible_count="
+                    f"{snapshot.get('product_link_visible_count', 0)}",
+                    f"target_href={snapshot.get('target_href', '')}",
+                    f"target_href_valid={snapshot.get('target_href_valid', False)}",
+                    f"loading_configured={snapshot.get('loading_configured', False)}",
+                    f"loading_count={snapshot.get('loading_count', 0)}",
+                    f"loading_visible_count={snapshot.get('loading_visible_count', 0)}",
+                    f"elapsed_ms={elapsed_ms}",
+                    f"poll_attempts={attempts}",
+                    f"consecutive_ready_snapshots={consecutive_ready}",
+                ]
+            )
+        )
+
     def filter_control(self):
         """返回筛选区域定位器（inline panel）。"""
         return self.locator("filter").first
@@ -82,7 +303,8 @@ class CollectionPage(BasePage):
 
     def open_product(self, index: int = 0) -> str:
         """打开第 index 张商品卡并返回最终 URL。"""
-        cards = self.product_cards()
+        self.wait_for_products_ready(index)
+        cards = self.visible_product_cards()
         total = cards.count()
         if index < 0 or index >= total:
             raise IndexError(f"Product index out of range: {index} (product_count={total})")

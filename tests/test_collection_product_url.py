@@ -74,6 +74,10 @@ class _FakeCards:
     def count(self) -> int:
         return 1
 
+    def filter(self, *, visible: bool):
+        assert visible is True
+        return self
+
     def nth(self, index: int):
         assert index == 0
         return self.card
@@ -94,7 +98,10 @@ class _FakePage:
         self.url = url
 
 
-def test_open_product_navigates_to_canonical_product_route() -> None:
+def test_open_product_navigates_to_canonical_product_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        CollectionPage, "wait_for_products_ready", lambda self, index=0: {"target_index": index}
+    )
     page = _FakePage("/collections/dresses/products/bar")
     config = {
         "base_url": "https://shop.example",
@@ -114,7 +121,10 @@ def test_open_product_navigates_to_canonical_product_route() -> None:
     assert result == "https://shop.example/products/bar"
 
 
-def test_open_product_keeps_existing_canonical_route() -> None:
+def test_open_product_keeps_existing_canonical_route(monkeypatch) -> None:
+    monkeypatch.setattr(
+        CollectionPage, "wait_for_products_ready", lambda self, index=0: {"target_index": index}
+    )
     page = _FakePage("/products/bar")
     config = {
         "base_url": "https://shop.example",
