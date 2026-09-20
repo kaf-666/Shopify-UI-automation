@@ -161,6 +161,12 @@ def test_hidden_size_radio_supports_normal_selection_and_excludes_custom(page) -
         "M",
     ]
     assert resolver.snapshot()["custom_size_present"] is True
+    readiness = resolver.readiness_snapshot()
+    assert readiness["size_model"] == "SYNTHETIC_SIZE_RADIO"
+    assert readiness["size_group_detected"] is True
+    assert readiness["size_option_total"] == 4
+    assert readiness["size_option_available"] == 1
+    assert readiness["normal_size_available"] == 1
     assert resolver.first_available_value() == "S"
     assert product.select_size() == "S"
     assert product.get_selected_size() == "S"

@@ -67,7 +67,7 @@ def test_missing_readiness_conditions_reports_disabled_atc() -> None:
     assert ProductPage._snapshot_ready(snapshot) is False
 
 
-def test_slow_initial_ready_passes_after_deadline_with_one_snapshot(
+def test_slow_initial_ready_fails_after_deadline_with_one_snapshot(
     monkeypatch,
 ) -> None:
     clock = _Clock()
@@ -81,8 +81,12 @@ def test_slow_initial_ready_passes_after_deadline_with_one_snapshot(
     monkeypatch.setattr("pages.product_page.time.monotonic", clock)
     product = _product(read_snapshot)
 
-    assert product.wait_purchase_ready(timeout_ms=15_000) == (2, 3, True)
+    with pytest.raises(PurchaseAreaReadinessError) as captured:
+        product.wait_purchase_ready(timeout_ms=15_000)
+
     assert calls == ["snapshot"]
+    assert "poll_count=1" in str(captured.value)
+    assert "max_poll_duration_ms=16076" in str(captured.value)
 
 
 def test_fast_initial_ready_uses_one_snapshot_and_no_wait() -> None:
@@ -96,6 +100,27 @@ def test_fast_initial_ready_uses_one_snapshot_and_no_wait() -> None:
 
     assert product.wait_purchase_ready() == (2, 3, True)
     assert calls == ["snapshot"]
+
+
+def test_readiness_diagnostics_include_poll_budget_and_component_costs() -> None:
+    timeline = []
+
+    def read_snapshot() -> dict:
+        return _snapshot()
+
+    product = _product(read_snapshot)
+    assert product.wait_purchase_ready(
+        timeout_ms=1_000, diagnostics_hook=timeline.append
+    ) == (2, 3, True)
+
+    assert len(timeline) == 1
+    diagnostic = timeline[0]
+    assert diagnostic["poll_count"] == 1
+    assert diagnostic["deadline_ms"] == 1_000
+    assert diagnostic["last_poll_duration_ms"] >= 0
+    assert diagnostic["max_poll_duration_ms"] >= diagnostic["last_poll_duration_ms"]
+    assert diagnostic["elapsed_ms"] >= diagnostic["last_poll_duration_ms"]
+    assert isinstance(diagnostic["readiness_cost_ms"], dict)
 
 
 def test_initial_not_ready_then_ready_samples_waits_and_resamples(
@@ -129,7 +154,7 @@ def test_initial_not_ready_then_ready_samples_waits_and_resamples(
     assert timeline[1]["size_count"] == 3
 
 
-def test_resample_that_crosses_deadline_still_passes_when_ready(
+def test_resample_that_crosses_deadline_fails_even_when_ready(
     monkeypatch,
 ) -> None:
     clock = _Clock()
@@ -152,9 +177,12 @@ def test_resample_that_crosses_deadline_still_passes_when_ready(
     monkeypatch.setattr("pages.product_page.time.monotonic", clock)
     product = _product(read_snapshot, wait_for_missing)
 
-    assert product.wait_purchase_ready(timeout_ms=15) == (2, 3, True)
+    with pytest.raises(PurchaseAreaReadinessError) as captured:
+        product.wait_purchase_ready(timeout_ms=15)
+
     assert clock.now > 0.015
     assert calls == ["snapshot", "wait", "snapshot"]
+    assert "failing_conditions=NONE" in str(captured.value)
 
 
 def test_deadline_with_not_ready_snapshot_fails_without_extra_snapshot(
@@ -213,16 +241,16 @@ def test_readiness_error_exposes_initial_final_gates() -> None:
         product.wait_purchase_ready(timeout_ms=0)
 
     detail = str(captured.value)
-    assert "purchase_area_initial=True" in detail
-    assert "purchase_area_final=True" in detail
+    assert "purchase_area_initial=False" in detail
+    assert "purchase_area_final=False" in detail
     assert "title_visible_initial=False" in detail
     assert "title_visible_final=False" in detail
-    assert "atc_visible_initial=True" in detail
-    assert "atc_visible_final=True" in detail
-    assert "atc_enabled_initial=True" in detail
-    assert "atc_enabled_final=True" in detail
-    assert "failing_conditions=title" in detail
-    assert calls == ["snapshot"]
+    assert "atc_visible_initial=False" in detail
+    assert "atc_visible_final=False" in detail
+    assert "atc_enabled_initial=False" in detail
+    assert "atc_enabled_final=False" in detail
+    assert "failing_conditions=purchase_area,title,color,size,atc_visible,atc_enabled" in detail
+    assert calls == []
 
 
 def test_readiness_snapshot_uses_bounded_locator_probes() -> None:
@@ -259,12 +287,86 @@ def test_readiness_snapshot_uses_bounded_locator_probes() -> None:
     snapshot = product._readiness_snapshot()
 
     assert snapshot["purchase_area_attached"] is False
+    assert snapshot["purchase_area_count"] == 0
     assert snapshot["title_visible"] is False
+    assert snapshot["atc_count"] == 0
+    assert snapshot["atc_probe_skipped"] is True
     assert snapshot["atc_visible"] is False
     assert snapshot["atc_enabled"] is False
     assert title.visible_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
-    assert atc.visible_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
-    assert atc.enabled_timeouts == [READINESS_SNAPSHOT_PROBE_TIMEOUT_MS]
+    assert atc.visible_timeouts == []
+    assert atc.enabled_timeouts == []
+
+
+def test_root_absent_short_circuits_expensive_readiness_checks() -> None:
+    class _Locator:
+        def count(self) -> int:
+            return 0
+
+        def is_visible(self, *, timeout=None) -> bool:
+            return False
+
+    product = object.__new__(ProductPage)
+    product.purchase_area = lambda: _Locator()
+    product.title = lambda: _Locator()
+    product.add_to_cart_button = lambda: _Locator()
+
+    class _Resolver:
+        def candidate_group_count(self, deadline=None) -> int:
+            return 1
+
+        def readiness_snapshot(self, deadline=None):
+            pytest.fail("size readiness must not run without purchase root")
+
+    product._size_resolver = lambda: _Resolver()
+    product.has_actionable_color = lambda deadline=None: pytest.fail(
+        "color readiness must not run without purchase root"
+    )
+
+    snapshot = product._readiness_snapshot()
+
+    assert snapshot["purchase_area_attached"] is False
+    assert snapshot["purchase_area_count"] == 0
+    assert snapshot["candidate_group_count"] == 1
+    assert snapshot["atc_probe_skipped"] is True
+    assert snapshot["color_count"] == 0
+    assert snapshot["size_count"] == 0
+
+
+def test_readiness_color_check_stops_at_first_actionable_option() -> None:
+    class _Options:
+        def count(self) -> int:
+            return 70
+
+        def nth(self, index: int) -> int:
+            return index
+
+    product = object.__new__(ProductPage)
+    product.color_options = lambda: _Options()
+    product._color_option_control_config = lambda: {}
+    seen = []
+    product._color_option_control_if_available = (
+        lambda radio, config, timeout_ms: seen.append(radio) or object()
+    )
+
+    assert product.has_actionable_color() is True
+    assert seen == [0]
+
+
+def test_zero_timeout_does_not_start_a_readiness_poll() -> None:
+    calls = []
+
+    def read_snapshot() -> dict:
+        calls.append("snapshot")
+        return _snapshot()
+
+    product = _product(read_snapshot)
+
+    with pytest.raises(PurchaseAreaReadinessError) as captured:
+        product.wait_purchase_ready(timeout_ms=0)
+
+    assert calls == []
+    assert "poll_count=0" in str(captured.value)
 
 
 def test_diagnostic_failure_detail_reports_phase_first_gate_and_timeline(

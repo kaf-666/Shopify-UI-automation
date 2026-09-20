@@ -22,6 +22,7 @@ SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS = 1_000
 SIZE_SELECTION_POLL_INTERVAL_MS = 50
 SIZE_SELECTION_SETTLE_MS = 100
 SIZE_SELECTION_MAX_ATTEMPTS = 2
+SIZE_READINESS_PROBE_TIMEOUT_MS = 50
 
 
 class SizeGroupNotFoundError(LookupError):
@@ -88,70 +89,103 @@ class SizeOptionResolver:
 
     # --------------------------------------------------------------- 检测
     @staticmethod
-    def _attribute_matches(group, expected: dict) -> bool:
+    def _attribute_matches(
+        group, expected: dict, timeout_ms: Optional[int] = None
+    ) -> bool:
         for name, expected_value in expected.items():
-            actual = group.get_attribute(str(name))
+            actual = group.get_attribute(str(name), timeout=timeout_ms)
             if SizeOptionResolver._normalized(actual) != SizeOptionResolver._normalized(
                 str(expected_value)
             ):
                 return False
         return True
 
-    def _group_name(self, group) -> str:
-        aria_label = group.get_attribute("aria-label")
+    def _group_name(self, group, timeout_ms: Optional[int] = None) -> str:
+        aria_label = group.get_attribute("aria-label", timeout=timeout_ms)
         if aria_label:
             return aria_label.strip()
 
-        labelled_by = group.get_attribute("aria-labelledby")
+        labelled_by = group.get_attribute("aria-labelledby", timeout=timeout_ms)
         if labelled_by:
             labels = []
             for element_id in labelled_by.split():
                 label = self.page.locator(f'#{element_id}').first
                 if label.count():
-                    labels.append(label.inner_text().strip())
+                    labels.append(label.inner_text(timeout=timeout_ms).strip())
             if labels:
                 return " ".join(labels)
 
         legend = group.locator(":scope > legend").first
         if legend.count():
-            return legend.inner_text().strip()
-        return str(group.get_attribute("name") or "").strip()
+            return legend.inner_text(timeout=timeout_ms).strip()
+        return str(group.get_attribute("name", timeout=timeout_ms) or "").strip()
 
-    def _associated_with_purchase(self, group, option_selector: str) -> bool:
+    @staticmethod
+    def _probe_timeout_ms(deadline: Optional[float]) -> Optional[int]:
+        if deadline is None:
+            return None
+        remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
+        return min(SIZE_READINESS_PROBE_TIMEOUT_MS, remaining_ms) or 1
+
+    @staticmethod
+    def _deadline_exhausted(deadline: Optional[float]) -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    def _associated_with_purchase(
+        self,
+        group,
+        option_selector: str,
+        deadline: Optional[float] = None,
+    ) -> bool:
+        if self._deadline_exhausted(deadline):
+            return False
         purchase = self.purchase_area_factory()
         if purchase.count() == 0:
             return False
-        purchase_id = str(purchase.get_attribute("id") or "")
+        probe_timeout = self._probe_timeout_ms(deadline)
+        purchase_id = str(
+            purchase.get_attribute("id", timeout=probe_timeout) or ""
+        )
 
         ancestor_form = group.locator("xpath=ancestor::form[1]").first
         if ancestor_form.count():
-            if not purchase_id or ancestor_form.get_attribute("id") == purchase_id:
+            if not purchase_id or ancestor_form.get_attribute(
+                "id", timeout=probe_timeout
+            ) == purchase_id:
                 return True
 
         if not purchase_id:
             return False
         options = group.locator(option_selector)
         for index in range(options.count()):
+            if self._deadline_exhausted(deadline):
+                return False
             option = options.nth(index)
-            if option.get_attribute("form") == purchase_id:
+            if option.get_attribute("form", timeout=probe_timeout) == purchase_id:
                 return True
             option_form = option.locator("xpath=ancestor::form[1]").first
-            if option_form.count() and option_form.get_attribute("id") == purchase_id:
+            if option_form.count() and option_form.get_attribute(
+                "id", timeout=probe_timeout
+            ) == purchase_id:
                 return True
         return False
 
-    def candidate_group_count(self) -> int:
+    def candidate_group_count(self, deadline: Optional[float] = None) -> int:
         """返回配置 selector 命中的候选组数量（仅用于 failure diagnostics）。"""
         total = 0
         for config in self._model_configs():
+            if self._deadline_exhausted(deadline):
+                break
             selector = str(config.get("group_selector") or "")
             if selector:
                 total += self.page.locator(selector).count()
         return total
 
-    def detect(self) -> Optional[SizeGroup]:
+    def detect(self, deadline: Optional[float] = None) -> Optional[SizeGroup]:
         """实时检测与主购买表单关联的 Size Group。"""
         for config in self._model_configs():
+            if self._deadline_exhausted(deadline):
+                return None
             model = str(config.get("id") or "")
             group_selector = str(config.get("group_selector") or "")
             option_selector = str(config.get("option_selector") or "")
@@ -160,14 +194,23 @@ class SizeOptionResolver:
 
             groups = self.page.locator(group_selector)
             for index in range(groups.count()):
+                if self._deadline_exhausted(deadline):
+                    return None
                 group = groups.nth(index)
                 expected_attributes = config.get("required_attributes") or {}
-                if not self._attribute_matches(group, expected_attributes):
+                probe_timeout = self._probe_timeout_ms(deadline)
+                if not self._attribute_matches(
+                    group, expected_attributes, timeout_ms=probe_timeout
+                ):
                     continue
                 expected_name = self._normalized(config.get("expected_name"))
-                if expected_name and self._normalized(self._group_name(group)) != expected_name:
+                if expected_name and self._normalized(
+                    self._group_name(group, timeout_ms=probe_timeout)
+                ) != expected_name:
                     continue
-                if not self._associated_with_purchase(group, option_selector):
+                if not self._associated_with_purchase(
+                    group, option_selector, deadline=deadline
+                ):
                     continue
                 return SizeGroup(
                     model=model,
@@ -211,7 +254,9 @@ class SizeOptionResolver:
         return ""
 
     @staticmethod
-    def _actionable_control(control) -> bool:
+    def _actionable_control(
+        control, timeout_ms: Optional[int] = None
+    ) -> bool:
         """Return whether a real user can operate the option control."""
         if control is None:
             return False
@@ -219,16 +264,20 @@ class SizeOptionResolver:
             # The radio's disabled state is checked separately.  For labels
             # and native controls, visibility is the useful actionability
             # signal and avoids repeated cross-process count/enabled calls.
-            return bool(control.is_visible())
+            if timeout_ms is None:
+                return bool(control.is_visible())
+            return bool(control.is_visible(timeout=timeout_ms))
         except Exception:
             return False
 
-    def _associated_label(self, radio):
+    def _associated_label(self, radio, timeout_ms: Optional[int] = None):
         """Resolve an explicit or wrapping label for a radio option."""
         wrapping = radio.locator("xpath=ancestor::label[1]").first
         if wrapping.count():
             return wrapping
-        radio_id = str(radio.get_attribute("id") or "").strip()
+        radio_id = str(
+            radio.get_attribute("id", timeout=timeout_ms) or ""
+        ).strip()
         if radio_id:
             escaped_id = radio_id.replace("\\", "\\\\").replace('"', '\\"')
             explicit = self.page.locator(f'label[for="{escaped_id}"]').first
@@ -236,57 +285,101 @@ class SizeOptionResolver:
                 return explicit
         return None
 
-    def _option_control(self, radio, config: dict):
+    def _option_control(
+        self,
+        radio,
+        config: dict,
+        timeout_ms: Optional[int] = None,
+    ):
         """Return the visible control used to operate a Size radio."""
         config = config if isinstance(config, dict) else {}
         strategy = str(config.get("control_strategy") or "").strip().lower()
 
         if strategy in {"radio", "native"}:
-            return radio if self._actionable_control(radio) else None
+            return (
+                radio
+                if self._actionable_control(radio, timeout_ms=timeout_ms)
+                else None
+            )
 
         if strategy in {"associated_label", "label", "label_for"}:
-            label = self._associated_label(radio)
-            if self._actionable_control(label):
+            label = self._associated_label(radio, timeout_ms=timeout_ms)
+            if self._actionable_control(label, timeout_ms=timeout_ms):
                 return label
-            return radio if self._actionable_control(radio) else None
+            return (
+                radio
+                if self._actionable_control(radio, timeout_ms=timeout_ms)
+                else None
+            )
 
         # Visible native radio inputs remain the default path.  Hidden radios
         # fall back to their explicit/wrapping label without requiring a
         # theme-specific wrapper class.
-        if self._actionable_control(radio):
+        if self._actionable_control(radio, timeout_ms=timeout_ms):
             return radio
-        label = self._associated_label(radio)
-        return label if self._actionable_control(label) else None
+        label = self._associated_label(radio, timeout_ms=timeout_ms)
+        return (
+            label
+            if self._actionable_control(label, timeout_ms=timeout_ms)
+            else None
+        )
 
     @staticmethod
-    def _has_disabled_token(locator, tokens: tuple[str, ...]) -> bool:
+    def _has_disabled_token(
+        locator,
+        tokens: tuple[str, ...],
+        timeout_ms: Optional[int] = None,
+    ) -> bool:
         if not tokens:
             return False
-        classes = set(str(locator.get_attribute("class") or "").lower().split())
+        classes = set(
+            str(locator.get_attribute("class", timeout=timeout_ms) or "")
+            .lower()
+            .split()
+        )
         return any(token in classes for token in tokens)
 
     def _is_available(
-        self, radio, group: SizeGroup, value: str, control=None
+        self,
+        radio,
+        group: SizeGroup,
+        value: str,
+        control=None,
+        timeout_ms: Optional[int] = None,
     ) -> bool:
-        if not value or radio.is_disabled():
+        if not value or radio.is_disabled(timeout=timeout_ms):
             return False
-        if self._normalized(radio.get_attribute("aria-disabled")) == "true":
+        if (
+            self._normalized(
+                radio.get_attribute("aria-disabled", timeout=timeout_ms)
+            )
+            == "true"
+        ):
             return False
-        if self._has_disabled_token(radio, group.disabled_class_tokens):
+        if self._has_disabled_token(
+            radio, group.disabled_class_tokens, timeout_ms=timeout_ms
+        ):
             return False
         parent = radio.locator("xpath=parent::*[1]").first
         if parent.count() and self._has_disabled_token(
-            parent, group.disabled_class_tokens
+            parent, group.disabled_class_tokens, timeout_ms=timeout_ms
         ):
             return False
         control = control if control is not None else self._option_control(
-            radio, group.config
+            radio, group.config, timeout_ms=timeout_ms
         )
-        if not self._actionable_control(control):
+        if not self._actionable_control(control, timeout_ms=timeout_ms):
             return False
-        if self._normalized(control.get_attribute("aria-disabled")) == "true":
+        if (
+            self._normalized(
+                control.get_attribute("aria-disabled", timeout=timeout_ms)
+            )
+            == "true"
+        ):
             return False
-        return not self._has_disabled_token(control, group.disabled_class_tokens)
+        return not self._has_disabled_token(
+            control, group.disabled_class_tokens, timeout_ms=timeout_ms
+        )
 
     def _options_for(self, group: SizeGroup) -> list[SizeOption]:
         options = []
@@ -326,6 +419,87 @@ class SizeOptionResolver:
 
     def normal_available_options(self) -> list[SizeOption]:
         return [option for option in self.available_options() if not option.custom_size]
+
+    def readiness_snapshot(self, deadline: Optional[float] = None) -> dict:
+        """Return a bounded readiness view without full option enumeration.
+
+        Readiness only needs to know whether one actionable option exists.  The
+        full ``options``/``available_options`` APIs remain unchanged for real
+        variant selection and diagnostics after the purchase area is ready.
+        ``form=`` association is still resolved by ``detect``; the group is
+        never narrowed to a purchase-form descendant.
+        """
+        candidate_count = self.candidate_group_count(deadline=deadline)
+        group = self.detect(deadline=deadline)
+        if group is None:
+            return {
+                "size_model": None,
+                "size_group_detected": False,
+                "size_option_total": 0,
+                "size_option_available": 0,
+                "normal_size_available": 0,
+                "custom_size_present": False,
+                "custom_measurement_model": None,
+                "selected_size": None,
+                "candidate_group_count": candidate_count,
+                "measurement_field_count": 0,
+            }
+
+        radios = group.locator.locator(group.option_selector)
+        option_total = radios.count()
+        available_count = 0
+        normal_available = 0
+        custom_present = False
+        selected_size = None
+        custom_marker = self._normalized(group.custom_size_value)
+
+        for index in range(option_total):
+            if self._deadline_exhausted(deadline):
+                break
+            probe_timeout = self._probe_timeout_ms(deadline)
+            radio = radios.nth(index)
+            value = str(
+                radio.get_attribute("value", timeout=probe_timeout) or ""
+            ).strip()
+            if not value:
+                continue
+            is_custom = self._normalized(value) == custom_marker
+            custom_present = custom_present or is_custom
+            try:
+                if radio.is_checked(timeout=probe_timeout):
+                    selected_size = value
+            except Exception:
+                pass
+            control = self._option_control(
+                radio, group.config, timeout_ms=probe_timeout
+            )
+            if not self._is_available(
+                radio,
+                group,
+                value,
+                control=control,
+                timeout_ms=probe_timeout,
+            ):
+                continue
+            available_count = 1
+            normal_available = 0 if is_custom else 1
+            break
+
+        custom_model = str(
+            self._custom_measurement_config().get("id") or SIZE_MODEL_03
+        )
+        return {
+            "size_model": group.model,
+            "size_group_detected": True,
+            "size_option_total": option_total,
+            "size_option_available": available_count,
+            "normal_size_available": normal_available,
+            "custom_size_present": custom_present,
+            "custom_measurement_model": custom_model if custom_present else None,
+            "selected_size": selected_size,
+            "candidate_group_count": candidate_count,
+            "measurement_field_count": 0,
+        }
 
     def first_available_value(self) -> str:
         normal = self.normal_available_options()
@@ -689,14 +863,18 @@ class SizeOptionResolver:
         """Wait for an available option, including hidden-radio controls."""
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
-            group = self.detect()
+            # Reuse the bounded live readiness probe.  The old path called
+            # full ``available_options`` on every poll, which could repeat
+            # expensive semantic enumeration during a theme hydration gap.
+            state = self.readiness_snapshot(deadline=deadline)
+            if state.get("size_option_available", 0) > 0:
+                return
+            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+            group = self.detect(deadline=deadline)
             if group is not None:
-                if self.available_options():
-                    return
                 wait_selector = str(
                     group.config.get("wait_option_selector") or group.option_selector
                 )
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
                 try:
                     group.locator.locator(wait_selector).first.wait_for(
                         state="attached", timeout=min(remaining_ms, 250)
@@ -711,12 +889,10 @@ class SizeOptionResolver:
                 ]
                 if not selectors:
                     raise SizeGroupNotFoundError("No Size Group detectors configured")
-                remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
                 try:
                     self.page.locator(", ".join(selectors)).first.wait_for(
                         state="attached", timeout=min(remaining_ms, 250)
                     )
                 except PlaywrightTimeoutError:
                     pass
-            self.page.wait_for_timeout(50)
         raise PlaywrightTimeoutError("No actionable Size option became available")

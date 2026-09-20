@@ -25,6 +25,7 @@ FREE_SIZE_MARKER = DEFAULT_FREE_SIZE_MARKER
 # A short per-node probe keeps readiness bounded while allowing a busy
 # storefront to resolve a freshly hydrated Locator under CI load.
 READINESS_SNAPSHOT_PROBE_TIMEOUT_MS = 250
+READINESS_POLL_QUANTUM_MS = 250
 
 
 class PurchaseAreaReadinessError(TimeoutError):
@@ -113,7 +114,9 @@ class ProductPage(BasePage):
         ).strip()
 
     @staticmethod
-    def _actionable_control(control) -> bool:
+    def _actionable_control(
+        control, timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+    ) -> bool:
         """Return whether a real user can operate the associated control."""
         if control is None:
             return False
@@ -122,9 +125,7 @@ class ProductPage(BasePage):
             # here.  Callers already obtained the control from a live radio;
             # one visibility query is sufficient for labels and native
             # controls, while radio disabled state is checked separately.
-            return bool(
-                control.is_visible(timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS)
-            )
+            return bool(control.is_visible(timeout=timeout_ms))
         except Exception:
             return False
 
@@ -133,14 +134,19 @@ class ProductPage(BasePage):
         return " ".join(str(value or "").split()).strip().lower()
 
     @classmethod
-    def _has_disabled_token(cls, locator, tokens: tuple[str, ...]) -> bool:
+    def _has_disabled_token(
+        cls,
+        locator,
+        tokens: tuple[str, ...],
+        timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ) -> bool:
         if locator is None or not tokens:
             return False
         try:
             classes = set(
                 cls._normalized(
                     locator.get_attribute(
-                        "class", timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+                        "class", timeout=timeout_ms
                     )
                 ).split()
             )
@@ -151,12 +157,16 @@ class ProductPage(BasePage):
             return False
         return any(token in classes for token in tokens)
 
-    def _associated_label(self, radio):
+    def _associated_label(
+        self,
+        radio,
+        timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ):
         """Resolve an explicit or wrapping label for a radio option."""
         wrapping = radio.locator("xpath=ancestor::label[1]").first
         if wrapping.count():
             return wrapping
-        radio_id = str(radio.get_attribute("id") or "").strip()
+        radio_id = str(radio.get_attribute("id", timeout=timeout_ms) or "").strip()
         if radio_id:
             escaped_id = radio_id.replace("\\", "\\\\").replace('"', '\\"')
             explicit = self.page.locator(f'label[for="{escaped_id}"]').first
@@ -171,7 +181,12 @@ class ProductPage(BasePage):
             "' variant-input ')][1]"
         ).first
 
-    def _option_control(self, radio, config: Optional[dict] = None):
+    def _option_control(
+        self,
+        radio,
+        config: Optional[dict] = None,
+        timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ):
         """Return the real user-facing control for a radio option.
 
         Custom Shopify option widgets often hide the semantic radio and bind
@@ -186,29 +201,45 @@ class ProductPage(BasePage):
         ).strip().lower()
 
         if strategy in {"radio", "native"}:
-            return radio if self._actionable_control(radio) else None
+            return (
+                radio
+                if self._actionable_control(radio, timeout_ms=timeout_ms)
+                else None
+            )
 
         if strategy in {"variant_input", "variant-container"}:
             control = self._variant_input_control(radio)
-            return control if self._actionable_control(control) else None
+            return (
+                control
+                if self._actionable_control(control, timeout_ms=timeout_ms)
+                else None
+            )
 
         if strategy in {"associated_label", "label", "label_for"}:
-            label = self._associated_label(radio)
-            if self._actionable_control(label):
+            label = self._associated_label(radio, timeout_ms=timeout_ms)
+            if self._actionable_control(label, timeout_ms=timeout_ms):
                 return label
             # A configured label strategy must not make a visible native
             # radio unusable when a theme omits the label association.
-            return radio if self._actionable_control(radio) else None
+            return (
+                radio
+                if self._actionable_control(radio, timeout_ms=timeout_ms)
+                else None
+            )
 
         # Default behavior preserves the existing visible-radio path and its
         # variant-input fallback, then supports hidden radios generically.
-        if self._actionable_control(radio):
+        if self._actionable_control(radio, timeout_ms=timeout_ms):
             variant = self._variant_input_control(radio)
-            if self._actionable_control(variant):
+            if self._actionable_control(variant, timeout_ms=timeout_ms):
                 return variant
             return radio
-        label = self._associated_label(radio)
-        return label if self._actionable_control(label) else None
+        label = self._associated_label(radio, timeout_ms=timeout_ms)
+        return (
+            label
+            if self._actionable_control(label, timeout_ms=timeout_ms)
+            else None
+        )
 
     def _color_option_control_config(self) -> dict:
         config = self.page_config().get("color_option_control") or {}
@@ -222,6 +253,68 @@ class ProductPage(BasePage):
             self._normalized(token) for token in values if self._normalized(token)
         )
 
+    def _color_option_control_if_available(
+        self,
+        radio,
+        control_config: Optional[dict] = None,
+        timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ):
+        """Return one actionable color control, or ``None``."""
+        try:
+            if radio.is_disabled(timeout=timeout_ms):
+                return None
+            if (
+                self._normalized(
+                    radio.get_attribute("aria-disabled", timeout=timeout_ms)
+                )
+                == "true"
+            ):
+                return None
+        except Exception:
+            return None
+        disabled_tokens = self._color_disabled_class_tokens()
+        if self._has_disabled_token(
+            radio, disabled_tokens, timeout_ms=timeout_ms
+        ):
+            return None
+        parent = radio.locator("xpath=parent::*[1]").first
+        if parent.count() and self._has_disabled_token(
+            parent, disabled_tokens, timeout_ms=timeout_ms
+        ):
+            return None
+        control = self._option_control(
+            radio, control_config, timeout_ms=timeout_ms
+        )
+        if not self._actionable_control(control, timeout_ms=timeout_ms):
+            return None
+        try:
+            if (
+                self._normalized(
+                    control.get_attribute("aria-disabled", timeout=timeout_ms)
+                )
+                == "true"
+            ):
+                return None
+        except Exception:
+            return None
+        if self._has_disabled_token(control, disabled_tokens, timeout_ms=timeout_ms):
+            return None
+        return control
+
+    def _color_option_available(
+        self,
+        radio,
+        control_config: Optional[dict] = None,
+        timeout_ms: Optional[int] = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS,
+    ) -> bool:
+        """Check one color option without enumerating its siblings."""
+        return (
+            self._color_option_control_if_available(
+                radio, control_config, timeout_ms=timeout_ms
+            )
+            is not None
+        )
+
     def available_options(self, options, control_config: Optional[dict] = None):
         """Return ``[(value, radio)]`` for semantically available options.
 
@@ -230,26 +323,15 @@ class ProductPage(BasePage):
         """
         result = []
         total = options.count()
-        disabled_tokens = self._color_disabled_class_tokens()
         for i in range(total):
             radio = options.nth(i)
-            try:
-                if radio.is_disabled():
-                    continue
-            except Exception:
+            control = self._color_option_control_if_available(
+                radio, control_config, timeout_ms=None
+            )
+            if control is None:
                 continue
             value = self._radio_value(radio)
-            if not value or self._normalized(radio.get_attribute("aria-disabled")) == "true":
-                continue
-            if self._has_disabled_token(radio, disabled_tokens):
-                continue
-            parent = radio.locator("xpath=parent::*[1]").first
-            if parent.count() and self._has_disabled_token(parent, disabled_tokens):
-                continue
-            control = self._option_control(radio, control_config)
-            if not control or self._normalized(control.get_attribute("aria-disabled")) == "true":
-                continue
-            if self._has_disabled_token(control, disabled_tokens):
+            if not value or not control:
                 continue
             result.append((value, radio))
         return result
@@ -261,6 +343,35 @@ class ProductPage(BasePage):
                 self.color_options(), self._color_option_control_config()
             )
         )
+
+    def has_actionable_color(self, deadline: Optional[float] = None) -> bool:
+        """Return whether at least one color can be operated right now.
+
+        Readiness deliberately short-circuits on the first actionable option.
+        Full color enumeration remains available through ``available_options``
+        for actual variant selection and post-readiness business behavior.
+        """
+        options = self.color_options()
+        try:
+            total = options.count()
+        except Exception:
+            return False
+        for index in range(total):
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
+            probe_timeout = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+            if deadline is not None:
+                probe_timeout = min(
+                    probe_timeout,
+                    max(1, int((deadline - time.monotonic()) * 1000)),
+                )
+            if self._color_option_available(
+                options.nth(index),
+                self._color_option_control_config(),
+                timeout_ms=probe_timeout,
+            ):
+                return True
+        return False
 
     def available_size_count(self) -> int:
         """返回可用尺码数；兼容计入 Free Custom Size 的历史语义。"""
@@ -276,25 +387,137 @@ class ProductPage(BasePage):
         except Exception:
             return default
 
+    @staticmethod
+    def _empty_readiness_snapshot() -> dict:
+        return {
+            "purchase_area_count": 0,
+            "purchase_area_attached": False,
+            "title_visible": False,
+            "color_count": 0,
+            "color_ready": False,
+            "size_count": 0,
+            "size_model": None,
+            "size_group_detected": False,
+            "size_option_total": 0,
+            "normal_size_available": 0,
+            "custom_size_present": False,
+            "selected_size": None,
+            "candidate_group_count": 0,
+            "atc_count": 0,
+            "atc_probe_skipped": True,
+            "atc_visible": False,
+            "atc_enabled": False,
+            "readiness_cost_ms": {},
+        }
+
+    def _readiness_remaining_ms(self) -> Optional[int]:
+        deadline = getattr(self, "_readiness_deadline", None)
+        if deadline is None:
+            return None
+        return max(0, int((deadline - time.monotonic()) * 1000))
+
+    def _readiness_probe_timeout_ms(self) -> int:
+        remaining_ms = self._readiness_remaining_ms()
+        if remaining_ms is None:
+            return READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+        return max(1, min(READINESS_SNAPSHOT_PROBE_TIMEOUT_MS, remaining_ms))
+
     def _readiness_snapshot(self) -> dict:
-        """每次用 Locator 重新解析当前 DOM，避免持有 hydration 前旧节点。"""
+        """Read a cheap, bounded, live-DOM readiness snapshot.
+
+        The purchase root is the structural gate.  Until it is attached we
+        intentionally do not run full size/color semantic enumeration, which
+        prevents a mixed snapshot assembled across a theme rerender.  Business
+        option enumeration remains available through the normal resolver APIs.
+        """
         root = self.purchase_area()
         title = self.title()
         atc = self.add_to_cart_button()
-        size = self._safe_state(self._size_resolver().snapshot, {})
-        return {
-            "purchase_area_attached": bool(self._safe_state(root.count, 0)),
-            # Snapshot probes are polling observations, not waits. A full
-            # Playwright default timeout here can exceed the caller's bounded
-            # readiness budget while a theme temporarily replaces the DOM.
-            "title_visible": bool(
-                self._safe_state(
-                    lambda: title.is_visible(
-                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-                    )
+        costs = {}
+
+        def timed(name, check, default):
+            started = time.monotonic()
+            value = self._safe_state(check, default)
+            costs[name] = max(0, int((time.monotonic() - started) * 1000))
+            return value
+
+        probe_timeout = self._readiness_probe_timeout_ms()
+        purchase_count = int(timed("root_check_ms", root.count, 0))
+        purchase_attached = purchase_count > 0
+        title_visible = bool(
+            timed(
+                "title_check_ms",
+                lambda: title.is_visible(timeout=probe_timeout),
+                False,
+            )
+        )
+
+        if not purchase_attached:
+            # Keep this branch structural and cheap.  In particular, do not
+            # resolve color options or size associations while the purchase
+            # form is absent; those reads can observe a later DOM generation.
+            candidate_group_count = int(
+                timed(
+                    "candidate_group_count_ms",
+                    lambda: self._size_resolver().candidate_group_count(
+                        deadline=(
+                            getattr(self, "_readiness_deadline", None)
+                        )
+                    ),
+                    0,
                 )
-            ),
-            "color_count": self._safe_state(self.available_color_count, 0),
+            )
+            return {
+                **self._empty_readiness_snapshot(),
+                "purchase_area_count": purchase_count,
+                "title_visible": title_visible,
+                "candidate_group_count": candidate_group_count,
+                "readiness_cost_ms": costs,
+            }
+
+        deadline = getattr(self, "_readiness_deadline", None)
+        size = timed(
+            "size_check_ms",
+            lambda: self._size_resolver().readiness_snapshot(deadline=deadline),
+            {},
+        )
+        color_ready = bool(
+            timed(
+                "color_check_ms",
+                lambda: self.has_actionable_color(deadline=deadline),
+                False,
+            )
+        )
+        atc_count = int(timed("atc_count_ms", atc.count, 0))
+        atc_visible = False
+        atc_enabled = False
+        if atc_count > 0:
+            atc_visible = bool(
+                timed(
+                    "atc_visible_check_ms",
+                    lambda: atc.is_visible(
+                        timeout=self._readiness_probe_timeout_ms()
+                    ),
+                    False,
+                )
+            )
+            atc_enabled = bool(
+                timed(
+                    "atc_enabled_check_ms",
+                    lambda: atc.is_enabled(
+                        timeout=self._readiness_probe_timeout_ms()
+                    ),
+                    False,
+                )
+            )
+        return {
+            "purchase_area_count": purchase_count,
+            "purchase_area_attached": True,
+            "title_visible": title_visible,
+            # Readiness is an existence contract; business selection retains
+            # the complete available_options enumeration and exact counts.
+            "color_count": 1 if color_ready else 0,
+            "color_ready": color_ready,
             "size_count": int(size.get("size_option_available", 0)),
             "size_model": size.get("size_model"),
             "size_group_detected": bool(size.get("size_group_detected", False)),
@@ -303,20 +526,11 @@ class ProductPage(BasePage):
             "custom_size_present": bool(size.get("custom_size_present", False)),
             "selected_size": size.get("selected_size"),
             "candidate_group_count": int(size.get("candidate_group_count", 0)),
-            "atc_visible": bool(
-                self._safe_state(
-                    lambda: atc.is_visible(
-                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-                    )
-                )
-            ),
-            "atc_enabled": bool(
-                self._safe_state(
-                    lambda: atc.is_enabled(
-                        timeout=READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-                    )
-                )
-            ),
+            "atc_count": atc_count,
+            "atc_probe_skipped": False,
+            "atc_visible": atc_visible,
+            "atc_enabled": atc_enabled,
+            "readiness_cost_ms": costs,
         }
 
     @staticmethod
@@ -347,16 +561,26 @@ class ProductPage(BasePage):
             return
         safe_snapshot = {
             "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+            "poll_count": int(snapshot.get("poll_count", 0)),
+            "deadline_ms": int(snapshot.get("deadline_ms", 0)),
+            "last_poll_duration_ms": int(snapshot.get("last_poll_duration_ms", 0)),
+            "max_poll_duration_ms": int(snapshot.get("max_poll_duration_ms", 0)),
+            "purchase_area_count": int(snapshot.get("purchase_area_count", 0)),
             "purchase_area_attached": bool(snapshot["purchase_area_attached"]),
             "title_visible": bool(snapshot["title_visible"]),
             "color_count": int(snapshot["color_count"]),
+            "color_ready": bool(snapshot.get("color_ready", snapshot["color_count"] > 0)),
             "size_count": int(snapshot["size_count"]),
             "size_group_detected": bool(snapshot["size_group_detected"]),
             "size_option_total": int(snapshot["size_option_total"]),
             "normal_size_available": int(snapshot["normal_size_available"]),
+            "candidate_group_count": int(snapshot.get("candidate_group_count", 0)),
             "selected_size": snapshot["selected_size"],
+            "atc_count": int(snapshot.get("atc_count", 0)),
+            "atc_probe_skipped": bool(snapshot.get("atc_probe_skipped", False)),
             "atc_visible": bool(snapshot["atc_visible"]),
             "atc_enabled": bool(snapshot["atc_enabled"]),
+            "readiness_cost_ms": dict(snapshot.get("readiness_cost_ms") or {}),
         }
         try:
             diagnostics_hook(safe_snapshot)
@@ -376,22 +600,33 @@ class ProductPage(BasePage):
         elif not snapshot["atc_visible"]:
             self.add_to_cart_button().wait_for(state="visible", timeout=timeout_ms)
         elif not snapshot["atc_enabled"]:
-            expect(self.add_to_cart_button()).to_be_enabled(timeout=timeout_ms)
+            try:
+                expect(self.add_to_cart_button()).to_be_enabled(timeout=timeout_ms)
+            except AssertionError as exc:
+                # Playwright's expect API reports a bounded enabled-state
+                # timeout as AssertionError rather than TimeoutError.  Map it
+                # to the same poll-expired path so the hard deadline remains
+                # authoritative.
+                raise PlaywrightTimeoutError("Add To Cart did not enable") from exc
 
     def _wait_for_color_available(self, timeout_ms: int) -> None:
         """Wait for a semantic color option, including hidden-radio widgets."""
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
-            if self.available_color_count() > 0:
+            if self.has_actionable_color(deadline=deadline):
                 return
             remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
             try:
                 self.color_options().first.wait_for(
-                    state="attached", timeout=min(remaining_ms, 250)
+                    state="attached", timeout=min(
+                        remaining_ms, READINESS_POLL_QUANTUM_MS
+                    )
                 )
             except PlaywrightTimeoutError:
                 pass
-            self.page.wait_for_timeout(50)
+            # The bounded locator wait above is the polling quantum.  Do not
+            # append a fixed sleep: doing so could consume the same remaining
+            # budget twice and let one condition wait cross the hard deadline.
         raise PlaywrightTimeoutError("No actionable color option became available")
 
     def wait_purchase_ready(
@@ -399,46 +634,90 @@ class ProductPage(BasePage):
         timeout_ms: int = 15_000,
         diagnostics_hook: Optional[Callable[[dict], None]] = None,
     ) -> tuple[int, int, bool]:
-        """等待购买区业务条件在一个总 waiting/polling budget 内同时成立。
+        """Wait for purchase readiness inside one hard wall-clock deadline.
 
-        轮询基于 Locator 当前状态；Theme/SPB 替换表单 DOM 后，下一轮会
-        自动解析新节点。``timeout_ms`` 限制 readiness 等待/轮询，不会
-        中断正在执行的同步 DOM inspection。即使 snapshot 完成时略过
-        deadline，只要该完整 snapshot 证明全部条件成立，仍返回成功。
-        无固定 sleep、reload 或无条件 retry。
+        Every poll uses live locators and a bounded readiness snapshot.  The
+        poll quantum is deliberately independent of diagnostics so enabling
+        structured logging cannot change production timeout semantics.
         """
         started = time.monotonic()
+        timeout_ms = max(0, int(timeout_ms))
         deadline = started + timeout_ms / 1000
-        snapshot = self._readiness_snapshot()
-        initial = snapshot
-        self._emit_readiness_diagnostic(snapshot, started, diagnostics_hook)
+        poll_count = 0
+        last_poll_duration_ms = 0
+        max_poll_duration_ms = 0
+        initial = self._empty_readiness_snapshot()
+        final = initial
+        had_deadline = hasattr(self, "_readiness_deadline")
+        previous_deadline = getattr(self, "_readiness_deadline", None)
+        self._readiness_deadline = deadline
+        try:
+            while True:
+                remaining_ms = int(max(0, (deadline - time.monotonic()) * 1000))
+                if remaining_ms <= 0:
+                    break
 
-        while True:
-            if self._snapshot_ready(snapshot):
-                return snapshot["color_count"], snapshot["size_count"], True
-            now = time.monotonic()
-            if now >= deadline:
-                break
-
-            remaining_ms = max(1, int((deadline - now) * 1000))
-            try:
-                wait_ms = (
-                    min(remaining_ms, 100)
-                    if diagnostics_hook is not None
-                    else remaining_ms
+                poll_started = time.monotonic()
+                snapshot = self._readiness_snapshot()
+                poll_count += 1
+                last_poll_duration_ms = int(
+                    max(0, (time.monotonic() - poll_started) * 1000)
                 )
-                self._wait_for_missing_readiness_condition(snapshot, wait_ms)
-            except PlaywrightTimeoutError:
-                pass
+                max_poll_duration_ms = max(
+                    max_poll_duration_ms, last_poll_duration_ms
+                )
+                snapshot = dict(snapshot)
+                snapshot.update(
+                    {
+                        "poll_count": poll_count,
+                        "elapsed_ms": int(
+                            max(0, (time.monotonic() - started) * 1000)
+                        ),
+                        "deadline_ms": timeout_ms,
+                        "last_poll_duration_ms": last_poll_duration_ms,
+                        "max_poll_duration_ms": max_poll_duration_ms,
+                    }
+                )
+                if poll_count == 1:
+                    initial = snapshot
+                final = snapshot
+                self._emit_readiness_diagnostic(
+                    snapshot, started, diagnostics_hook
+                )
 
-            snapshot = self._readiness_snapshot()
-            self._emit_readiness_diagnostic(snapshot, started, diagnostics_hook)
+                # A poll that finishes after the deadline is not a legal PASS,
+                # even if its final DOM read happens to look ready.
+                if time.monotonic() >= deadline:
+                    break
+                if self._snapshot_ready(snapshot):
+                    return snapshot["color_count"], snapshot["size_count"], True
 
-        final = snapshot
+                remaining_ms = int(
+                    max(0, (deadline - time.monotonic()) * 1000)
+                )
+                if remaining_ms <= 0:
+                    break
+                try:
+                    self._wait_for_missing_readiness_condition(
+                        snapshot,
+                        min(READINESS_POLL_QUANTUM_MS, remaining_ms),
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+        finally:
+            if had_deadline:
+                self._readiness_deadline = previous_deadline
+            else:
+                try:
+                    del self._readiness_deadline
+                except AttributeError:
+                    pass
+
         failing_conditions = self._missing_readiness_conditions(final)
         raise PurchaseAreaReadinessError(
             "purchase_area_attached="
             f"{final['purchase_area_attached']} "
+            f"purchase_area_count={final.get('purchase_area_count', 0)} "
             f"purchase_area_initial={initial['purchase_area_attached']} "
             f"purchase_area_final={final['purchase_area_attached']} "
             f"title_visible_initial={initial['title_visible']} "
@@ -456,12 +735,19 @@ class ProductPage(BasePage):
             f"candidate_group_count={final['candidate_group_count']} "
             f"atc_visible_initial={initial['atc_visible']} "
             f"atc_visible_final={final['atc_visible']} "
+            f"atc_count_initial={initial.get('atc_count', 0)} "
+            f"atc_count_final={final.get('atc_count', 0)} "
             f"atc_enabled_initial={initial['atc_enabled']} "
             f"atc_enabled_final={final['atc_enabled']} "
             f"atc_visible={final['atc_visible']} "
             f"atc_enabled={final['atc_enabled']} "
             f"failing_conditions={','.join(failing_conditions) or 'NONE'} "
-            f"readiness_timeout_ms={timeout_ms}"
+            f"readiness_timeout_ms={timeout_ms} "
+            f"poll_count={poll_count} "
+            f"elapsed_ms={int(max(0, (time.monotonic() - started) * 1000))} "
+            f"deadline_ms={timeout_ms} "
+            f"last_poll_duration_ms={last_poll_duration_ms} "
+            f"max_poll_duration_ms={max_poll_duration_ms}"
         )
 
     def _find_option(self, options, value: str, missing_msg: str):
