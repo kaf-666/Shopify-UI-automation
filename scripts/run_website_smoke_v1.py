@@ -80,6 +80,7 @@ def _runner_mutation_summary(runner) -> dict:
         "mode": "TRANSACTIONAL_SAFE",
         "status": "PASS",
         "expected_mutation": 0,
+        "known_blocked_side_effect": 0,
         "unexpected_mutation": 0,
         "high_risk_mutation": 0,
         "blocked_mutation": 0,
@@ -166,6 +167,7 @@ def print_viewport(viewport: str, results: List, runner: Optional[WebsiteSmokeV1
         print(
             f"{'':<20} Mutation: {mutation.get('status')} "
             f"EXPECTED={mutation.get('expected_mutation', 0)} "
+            f"KNOWN_BLOCKED_SIDE_EFFECT={mutation.get('known_blocked_side_effect', 0)} "
             f"UNEXPECTED={mutation.get('unexpected_mutation', 0)} "
             f"HIGH_RISK={mutation.get('high_risk_mutation', 0)}"
         )
@@ -176,6 +178,31 @@ def print_mutation_fingerprints(mutation_summary: dict) -> None:
     """Print safe endpoint fingerprints only for a failed mutation gate."""
     for line in format_mutation_fingerprint_report(mutation_summary):
         print(line)
+
+
+def print_known_blocked_side_effects(mutation_summary: dict) -> None:
+    """Print fixed safe summaries for explicitly recognized blocked effects."""
+    rows = mutation_summary.get("by_path") if isinstance(mutation_summary, dict) else None
+    if not isinstance(rows, list):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if row.get("classification") != TransactionalMutationPolicy.KNOWN_BLOCKED_SIDE_EFFECT:
+            continue
+        print(
+            "KNOWN_BLOCKED_SIDE_EFFECT "
+            f"method={row.get('method', 'UNKNOWN')} "
+            f"path={row.get('sanitized_path', row.get('path', '/'))} "
+            f"reason={row.get('reason', 'REDACTED')} "
+            f"recognized={str(row.get('recognized') is True).lower()} "
+            f"blocked={str(row.get('blocked') is True).lower()} "
+            f"sent={str(row.get('allowed_to_send') is True).lower()} "
+            f"gating_failure={str(row.get('gating_failure') is True).lower()} "
+            f"desktop_count={row.get('desktop_count', 'UNKNOWN')} "
+            f"mobile_count={row.get('mobile_count', 'UNKNOWN')} "
+            f"total_count={row.get('count', 'UNKNOWN')}"
+        )
 
 
 def count_statuses(results: List) -> Dict[str, int]:
@@ -392,6 +419,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         classification, exit_code = _fatal_classification(exc)
         partial_mutation_summary = merge_transactional_mutation_summaries(mutation_summaries)
         print_mutation_fingerprints(partial_mutation_summary)
+        print_known_blocked_side_effects(partial_mutation_summary)
         _write_run_result(
             artifact_dir,
             run_id,
@@ -458,11 +486,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"MODE:             {mutation_summary['mode']}")
     print(f"STATUS:           {mutation_summary['status']}")
     print(f"EXPECTED_MUTATION:{mutation_summary['expected_mutation']}")
+    print(f"KNOWN_BLOCKED_SIDE_EFFECT: {mutation_summary.get('known_blocked_side_effect', 0)}")
     print(f"UNEXPECTED_MUTATION: {mutation_summary['unexpected_mutation']}")
     print(f"HIGH_RISK_MUTATION:  {mutation_summary['high_risk_mutation']}")
     print(f"BLOCKED_MUTATION:    {mutation_summary['blocked_mutation']}")
     print()
     print_mutation_fingerprints(mutation_summary)
+    print_known_blocked_side_effects(mutation_summary)
     if mutation_summary.get("unexpected_mutation", 0) or mutation_summary.get("high_risk_mutation", 0):
         print()
     print("Results:")

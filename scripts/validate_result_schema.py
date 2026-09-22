@@ -167,6 +167,7 @@ def _validate_mutation_summary(value: object) -> bool:
                 valid_row = (
                     row.get("classification") in {
                         "EXPECTED_MUTATION",
+                        "KNOWN_BLOCKED_SIDE_EFFECT",
                         "UNEXPECTED_MUTATION",
                         "HIGH_RISK_MUTATION",
                     }
@@ -197,6 +198,7 @@ def _validate_mutation_summary(value: object) -> bool:
                     valid_row = row.get("reason") in {
                         "EXPECTED_CART_MUTATION",
                         "EXPECTED_TRANSACTIONAL_MUTATION",
+                        "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
                         "FIRST_PARTY_LOCALIZATION_CONTEXT",
                         "HIGH_RISK_PRECEDENCE",
                         "PATH_NOT_ALLOWED",
@@ -213,7 +215,23 @@ def _validate_mutation_summary(value: object) -> bool:
                                 and count_value >= 0
                             )
                         )
+                for boolean_key in (
+                    "blocked",
+                    "recognized",
+                    "allowed_to_send",
+                    "gating_failure",
+                ):
+                    if valid_row and boolean_key in row:
+                        valid_row = isinstance(row.get(boolean_key), bool)
             ok_all = check(valid_row, f"mutation_summary by_path[{index}] contract") and ok_all
+    if "known_blocked_side_effect" in value:
+        raw = value.get("known_blocked_side_effect")
+        valid = isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
+        ok_all = check(
+            valid,
+            "mutation_summary known_blocked_side_effect",
+            "non-negative integer",
+        ) and ok_all
     return ok_all
 
 

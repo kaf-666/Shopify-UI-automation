@@ -14,12 +14,21 @@ from urllib.parse import unquote, urlsplit
 UNKNOWN = "UNKNOWN"
 HOST_CLASSES = frozenset({"FIRST_PARTY", "THIRD_PARTY", UNKNOWN})
 CLASSIFICATIONS = frozenset(
-    {"EXPECTED_MUTATION", "UNEXPECTED_MUTATION", "HIGH_RISK_MUTATION"}
+    {
+        "EXPECTED_MUTATION",
+        "KNOWN_BLOCKED_SIDE_EFFECT",
+        "UNEXPECTED_MUTATION",
+        "HIGH_RISK_MUTATION",
+    }
+)
+GATING_FAILURE_CLASSIFICATIONS = frozenset(
+    {"UNEXPECTED_MUTATION", "HIGH_RISK_MUTATION"}
 )
 REASONS = frozenset(
     {
         "EXPECTED_CART_MUTATION",
         "EXPECTED_TRANSACTIONAL_MUTATION",
+        "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
         "FIRST_PARTY_LOCALIZATION_CONTEXT",
         "HIGH_RISK_PRECEDENCE",
         "PATH_NOT_ALLOWED",
@@ -237,7 +246,7 @@ def format_mutation_fingerprint_report(summary: object) -> list[str]:
             if not isinstance(row, dict):
                 continue
             classification = row.get("classification")
-            if classification not in CLASSIFICATIONS - {"EXPECTED_MUTATION"}:
+            if classification not in GATING_FAILURE_CLASSIFICATIONS:
                 continue
             method = str(row.get("method") or "UNKNOWN").upper()
             if not _METHOD_RE.fullmatch(method):

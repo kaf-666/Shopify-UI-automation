@@ -9,6 +9,8 @@ import pytest
 from utils.mutation_fingerprint import format_mutation_fingerprint_report
 from utils.readonly_mutation_guard import (
     LOCALIZATION_CONTEXT_REASON,
+    WATI_ADD_TO_CART_EVENT_REASON,
+    WATI_ADD_TO_CART_EVENT_PATH,
     ReadonlyMutationGuard,
     TransactionalMutationPolicy,
     merge_transactional_mutation_summaries,
@@ -443,6 +445,178 @@ def test_mutation_observability_keeps_policy_semantics_and_sanitizes_unknown_end
     assert unexpected["blocked_count"] == 2
 
 
+def test_exact_wati_endpoint_is_recognized_blocked_and_non_gating() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com", "www.mondressy.com"),
+        canonical_origin="https://www.mondressy.com",
+    )
+    policy.attach(context)
+    policy.set_scope("desktop", "search", "WSMOKE-SEARCH-04", "CASE")
+    route = _FakeRoute(
+        "https://www.mondressy.com/apps/wati/addtocartevent",
+        "POST",
+    )
+    route.request.post_data = "synthetic-body-secret"
+    route.request.headers = {
+        "cookie": "synthetic-cookie-secret",
+        "Authorization": "synthetic-authorization-secret",
+        "Signature": "synthetic-signature-secret",
+    }
+
+    context.handler(route)
+
+    event = policy.events()[0]
+    summary = policy.summary()
+    row = summary["by_path"][0]
+    assert route.calls == ["abort"]
+    assert event["classification"] == policy.KNOWN_BLOCKED_SIDE_EFFECT
+    assert event["reason"] == WATI_ADD_TO_CART_EVENT_REASON
+    assert event["blocked"] is True
+    assert event["recognized"] is True
+    assert event["allowed_to_send"] is False
+    assert event["gating_failure"] is False
+    assert summary["status"] == "PASS"
+    assert summary["expected_mutation"] == 0
+    assert summary["known_blocked_side_effect"] == 1
+    assert summary["unexpected_mutation"] == 0
+    assert summary["high_risk_mutation"] == 0
+    assert summary["blocked_mutation"] == 1
+    assert row["sanitized_path"] == WATI_ADD_TO_CART_EVENT_PATH
+    assert row["query_present"] is False
+    assert row["blocked_count"] == 1
+    assert row["blocked"] is True
+    assert row["recognized"] is True
+    assert row["allowed_to_send"] is False
+    assert row["gating_failure"] is False
+    assert format_mutation_fingerprint_report(summary) == []
+    safe_output = str(event) + str(summary)
+    for sensitive in (
+        "synthetic-body-secret",
+        "synthetic-cookie-secret",
+        "synthetic-authorization-secret",
+        "synthetic-signature-secret",
+    ):
+        assert sensitive not in safe_output
+
+
+def test_wati_get_does_not_match_mutation_policy() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    route = _FakeRoute("https://mondressy.com" + WATI_ADD_TO_CART_EVENT_PATH, "GET")
+
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events() == []
+    assert policy.summary()["known_blocked_side_effect"] == 0
+
+
+def test_wati_query_string_misses_exact_query_absent_rule() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://mondressy.com" + WATI_ADD_TO_CART_EVENT_PATH + "?opaque=value",
+        "POST",
+    )
+
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.summary()["known_blocked_side_effect"] == 0
+    assert policy.summary()["unexpected_mutation"] == 1
+    assert policy.events()[0]["classification"] == policy.UNEXPECTED
+    assert policy.events()[0]["query_present"] is True
+    assert "opaque=value" not in str(policy.events())
+    assert "opaque=value" not in str(policy.summary())
+
+
+@pytest.mark.parametrize("path", ["/apps/wati/other", WATI_ADD_TO_CART_EVENT_PATH + "/extra"])
+def test_wati_sibling_and_nested_paths_remain_unexpected(path: str) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+
+    route = _FakeRoute("https://mondressy.com" + path, "POST")
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.summary()["known_blocked_side_effect"] == 0
+    assert policy.summary()["unexpected_mutation"] == 1
+    assert policy.events()[0]["classification"] == policy.UNEXPECTED
+
+
+def test_third_party_wati_path_does_not_match_rule() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://wati.example" + WATI_ADD_TO_CART_EVENT_PATH,
+        "POST",
+    )
+
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events() == []
+    assert policy.summary()["known_blocked_side_effect"] == 0
+
+
+def test_wati_first_party_but_cross_origin_does_not_match_rule() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("www.mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://www.mondressy.com" + WATI_ADD_TO_CART_EVENT_PATH,
+        "POST",
+    )
+
+    context.handler(route)
+
+    event = policy.events()[0]
+    assert route.calls == ["abort"]
+    assert event["same_origin"] is False
+    assert event["classification"] == policy.UNEXPECTED
+    assert policy.summary()["known_blocked_side_effect"] == 0
+
+
+def test_high_risk_classification_precedes_exact_wati_rule() -> None:
+    class SyntheticHighRiskWatiPolicy(TransactionalMutationPolicy):
+        @classmethod
+        def _is_high_risk(cls, path: str, host: str) -> bool:
+            return path == WATI_ADD_TO_CART_EVENT_PATH or super()._is_high_risk(path, host)
+
+    context = _FakeContext()
+    policy = SyntheticHighRiskWatiPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://mondressy.com" + WATI_ADD_TO_CART_EVENT_PATH,
+        "POST",
+    )
+
+    context.handler(route)
+
+    assert route.calls == ["abort"]
+    assert policy.events()[0]["classification"] == policy.HIGH_RISK
+    assert policy.events()[0]["reason"] == "HIGH_RISK_PRECEDENCE"
+    assert policy.summary()["known_blocked_side_effect"] == 0
+    assert policy.summary()["high_risk_mutation"] == 1
+
+
 def test_high_risk_precedence_and_fingerprint_reason_are_preserved() -> None:
     context = _FakeContext()
     policy = TransactionalMutationPolicy(("paypal.com",))
@@ -486,6 +660,39 @@ def test_merge_aggregates_desktop_and_mobile_counts_by_safe_fingerprint() -> Non
     assert row["mobile_count"] == 1
     assert row["blocked_count"] == 2
     assert row["path"] == "/apps/example/action/{id}"
+
+
+def test_merge_counts_wati_side_effects_without_promoting_them_to_a_gate_failure() -> None:
+    summaries = []
+    for viewport in ("desktop", "mobile"):
+        context = _FakeContext()
+        policy = TransactionalMutationPolicy(
+            ("mondressy.com",), canonical_origin="https://mondressy.com"
+        )
+        policy.attach(context)
+        policy.set_scope(viewport, "search", "WSMOKE-SEARCH-04", "CASE")
+        context.handler(
+            _FakeRoute(
+                "https://mondressy.com" + WATI_ADD_TO_CART_EVENT_PATH,
+                "POST",
+            )
+        )
+        summaries.append(policy.summary())
+
+    merged = merge_transactional_mutation_summaries(summaries)
+    row = merged["by_path"][0]
+    assert merged["status"] == "PASS"
+    assert merged["known_blocked_side_effect"] == 2
+    assert merged["unexpected_mutation"] == 0
+    assert merged["high_risk_mutation"] == 0
+    assert merged["blocked_mutation"] == 2
+    assert row["classification"] == TransactionalMutationPolicy.KNOWN_BLOCKED_SIDE_EFFECT
+    assert row["desktop_count"] == 1
+    assert row["mobile_count"] == 1
+    assert row["blocked_count"] == 2
+    assert row["blocked"] is True
+    assert row["allowed_to_send"] is False
+    assert row["gating_failure"] is False
 
 
 def test_transactional_mutation_summaries_merge_without_request_data() -> None:

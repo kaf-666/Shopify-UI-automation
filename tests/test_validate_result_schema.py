@@ -258,6 +258,41 @@ def test_mutation_fingerprint_fields_are_optional_but_validated_when_present() -
     assert not schema._validate_mutation_summary(summary)
 
 
+def test_known_blocked_side_effect_is_schema_valid_and_count_is_backward_compatible() -> None:
+    summary = copy.deepcopy(_full_result()["mutation_summary"])
+    summary.update(
+        {
+            "known_blocked_side_effect": 1,
+            "blocked_mutation": 1,
+            "by_path": [
+                {
+                    "classification": "KNOWN_BLOCKED_SIDE_EFFECT",
+                    "method": "POST",
+                    "path": "/apps/wati/addtocartevent",
+                    "sanitized_path": "/apps/wati/addtocartevent",
+                    "host_class": "FIRST_PARTY",
+                    "same_origin": True,
+                    "path_hash": "0123456789ab",
+                    "query_present": False,
+                    "reason": "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
+                    "count": 1,
+                    "desktop_count": 1,
+                    "mobile_count": 0,
+                    "blocked_count": 1,
+                    "blocked": True,
+                    "recognized": True,
+                    "allowed_to_send": False,
+                    "gating_failure": False,
+                }
+            ],
+        }
+    )
+    assert schema._validate_mutation_summary(summary)
+
+    del summary["known_blocked_side_effect"]
+    assert schema._validate_mutation_summary(summary)
+
+
 def test_readonly_cli_suite_accepts_explicit_fixture(tmp_path: Path) -> None:
     data = copy.deepcopy(_readonly_result())
     result_path = _write_result(tmp_path, data)

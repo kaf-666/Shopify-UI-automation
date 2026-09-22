@@ -92,6 +92,8 @@ NON_BUSINESS_MUTATION_PATH_PREFIXES = (
 )
 LOCALIZATION_CONTEXT_PATH = "/localization"
 LOCALIZATION_CONTEXT_REASON = "FIRST_PARTY_LOCALIZATION_CONTEXT"
+WATI_ADD_TO_CART_EVENT_PATH = "/apps/wati/addtocartevent"
+WATI_ADD_TO_CART_EVENT_REASON = "FIRST_PARTY_WATI_ADD_TO_CART_EVENT"
 
 
 class ReadonlyMutationGuard:
@@ -223,6 +225,7 @@ class TransactionalMutationPolicy:
     """
 
     EXPECTED = "EXPECTED_MUTATION"
+    KNOWN_BLOCKED_SIDE_EFFECT = "KNOWN_BLOCKED_SIDE_EFFECT"
     UNEXPECTED = "UNEXPECTED_MUTATION"
     HIGH_RISK = "HIGH_RISK_MUTATION"
 
@@ -297,6 +300,28 @@ class TransactionalMutationPolicy:
             return False
         return path == LOCALIZATION_CONTEXT_PATH and not parsed.query
 
+    def _is_known_blocked_wati_event(
+        self, url: str, method: str, host: str, path: str
+    ) -> bool:
+        """Recognize only the exact same-origin WATI add-to-cart app proxy."""
+        if (
+            str(method or "").upper() != "POST"
+            or host not in self.first_party_hosts
+            or path != WATI_ADD_TO_CART_EVENT_PATH
+        ):
+            return False
+        fingerprint = safe_endpoint_fingerprint(
+            url,
+            method,
+            self.first_party_hosts,
+            canonical_origin=self.canonical_origin,
+        )
+        return (
+            fingerprint.get("host_class") == "FIRST_PARTY"
+            and fingerprint.get("same_origin") is True
+            and fingerprint.get("query_present") is False
+        )
+
     def _classification_reason(
         self, url: str, method: str, host: str, path: str, category: str
     ) -> Optional[str]:
@@ -309,6 +334,8 @@ class TransactionalMutationPolicy:
         existing = self._classification_reason(url, method, host, path, category)
         if existing:
             return existing
+        if category == self.KNOWN_BLOCKED_SIDE_EFFECT:
+            return WATI_ADD_TO_CART_EVENT_REASON
         if category == self.HIGH_RISK:
             return "HIGH_RISK_PRECEDENCE"
         if category == self.EXPECTED:
@@ -344,6 +371,8 @@ class TransactionalMutationPolicy:
             return None
         if self._is_high_risk(path, host):
             return self.HIGH_RISK
+        if self._is_known_blocked_wati_event(url, normalized_method, host, path):
+            return self.KNOWN_BLOCKED_SIDE_EFFECT
         if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
             return self.EXPECTED
         if self._is_localization_context(url, normalized_method, host, path):
@@ -402,6 +431,9 @@ class TransactionalMutationPolicy:
             "classification_reason": reason,
             **self._scope,
             "blocked": category != self.EXPECTED,
+            "recognized": category in {self.EXPECTED, self.KNOWN_BLOCKED_SIDE_EFFECT},
+            "allowed_to_send": category == self.EXPECTED,
+            "gating_failure": category in {self.UNEXPECTED, self.HIGH_RISK},
         }
         self._events.append(event)
         if category == self.EXPECTED:
@@ -463,6 +495,10 @@ class TransactionalMutationPolicy:
                     "desktop_count": 0,
                     "mobile_count": 0,
                     "blocked_count": 0,
+                    "blocked": bool(event.get("blocked")),
+                    "recognized": bool(event.get("recognized")),
+                    "allowed_to_send": bool(event.get("allowed_to_send")),
+                    "gating_failure": bool(event.get("gating_failure")),
                     "_viewport_unknown": False,
                 },
             )
@@ -489,6 +525,7 @@ class TransactionalMutationPolicy:
             "mode": "TRANSACTIONAL_SAFE",
             "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
             "expected_mutation": counts[self.EXPECTED],
+            "known_blocked_side_effect": counts[self.KNOWN_BLOCKED_SIDE_EFFECT],
             "unexpected_mutation": unexpected,
             "high_risk_mutation": high_risk,
             "blocked_mutation": sum(1 for event in self._events if event["blocked"]),
@@ -501,9 +538,10 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
 
     items = [summary for summary in summaries if isinstance(summary, dict)]
     by_fingerprint = {}
-    expected = unexpected = high_risk = blocked = 0
+    expected = known_blocked = unexpected = high_risk = blocked = 0
     for summary in items:
         expected += int(summary.get("expected_mutation", 0) or 0)
+        known_blocked += int(summary.get("known_blocked_side_effect", 0) or 0)
         unexpected += int(summary.get("unexpected_mutation", 0) or 0)
         high_risk += int(summary.get("high_risk_mutation", 0) or 0)
         blocked += int(summary.get("blocked_mutation", 0) or 0)
@@ -535,6 +573,7 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
             classification = str(row.get("classification") or "")
             if classification not in {
                 TransactionalMutationPolicy.EXPECTED,
+                TransactionalMutationPolicy.KNOWN_BLOCKED_SIDE_EFFECT,
                 TransactionalMutationPolicy.UNEXPECTED,
                 TransactionalMutationPolicy.HIGH_RISK,
             }:
@@ -573,6 +612,18 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
                     "desktop_count": 0,
                     "mobile_count": 0,
                     "blocked_count": 0,
+                    "blocked": key[0] != TransactionalMutationPolicy.EXPECTED,
+                    "recognized": key[0]
+                    in {
+                        TransactionalMutationPolicy.EXPECTED,
+                        TransactionalMutationPolicy.KNOWN_BLOCKED_SIDE_EFFECT,
+                    },
+                    "allowed_to_send": key[0] == TransactionalMutationPolicy.EXPECTED,
+                    "gating_failure": key[0]
+                    in {
+                        TransactionalMutationPolicy.UNEXPECTED,
+                        TransactionalMutationPolicy.HIGH_RISK,
+                    },
                     "_viewport_unknown": False,
                 },
             )
@@ -600,6 +651,7 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
         "mode": "TRANSACTIONAL_SAFE",
         "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
         "expected_mutation": expected,
+        "known_blocked_side_effect": known_blocked,
         "unexpected_mutation": unexpected,
         "high_risk_mutation": high_risk,
         "blocked_mutation": blocked,
