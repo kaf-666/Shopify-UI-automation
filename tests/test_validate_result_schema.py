@@ -236,6 +236,28 @@ def test_full_fixture_still_passes_website_smoke_v1_contract(tmp_path: Path) -> 
     assert schema.validate_json(result_path.parent, "website_smoke_v1")
 
 
+def test_mutation_fingerprint_fields_are_optional_but_validated_when_present() -> None:
+    summary = _full_result()["mutation_summary"]
+    row = summary["by_path"][0]
+    row.update(
+        {
+            "host_class": "FIRST_PARTY",
+            "same_origin": True,
+            "sanitized_path": "/cart/add.js",
+            "path_hash": "0123456789ab",
+            "query_present": False,
+            "reason": "EXPECTED_CART_MUTATION",
+            "desktop_count": 2,
+            "mobile_count": 2,
+            "blocked_count": 0,
+        }
+    )
+    assert schema._validate_mutation_summary(summary)
+
+    row["host_class"] = "private-shop.example"
+    assert not schema._validate_mutation_summary(summary)
+
+
 def test_readonly_cli_suite_accepts_explicit_fixture(tmp_path: Path) -> None:
     data = copy.deepcopy(_readonly_result())
     result_path = _write_result(tmp_path, data)

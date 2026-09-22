@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from utils.mutation_fingerprint import format_mutation_fingerprint_report
 from utils.readonly_mutation_guard import (
     LOCALIZATION_CONTEXT_REASON,
     ReadonlyMutationGuard,
@@ -162,22 +163,23 @@ def test_transactional_policy_allows_first_party_localization_context(host: str)
     assert policy.events()[0]["classification"] == policy.EXPECTED
     assert policy.events()[0]["classification_reason"] == LOCALIZATION_CONTEXT_REASON
     assert policy.events()[0]["blocked"] is False
-    assert policy.summary() == {
-        "mode": "TRANSACTIONAL_SAFE",
-        "status": "PASS",
-        "expected_mutation": 1,
-        "unexpected_mutation": 0,
-        "high_risk_mutation": 0,
-        "blocked_mutation": 0,
-        "by_path": [
-            {
-                "classification": "EXPECTED_MUTATION",
-                "method": "POST",
-                "path": "/localization",
-                "count": 1,
-            }
-        ],
-    }
+    summary = policy.summary()
+    assert summary["mode"] == "TRANSACTIONAL_SAFE"
+    assert summary["status"] == "PASS"
+    assert summary["expected_mutation"] == 1
+    assert summary["unexpected_mutation"] == 0
+    assert summary["high_risk_mutation"] == 0
+    assert summary["blocked_mutation"] == 0
+    row = summary["by_path"][0]
+    assert row["classification"] == "EXPECTED_MUTATION"
+    assert row["method"] == "POST"
+    assert row["path"] == "/localization"
+    assert row["host_class"] == "FIRST_PARTY"
+    assert row["same_origin"] == "UNKNOWN"
+    assert row["query_present"] is False
+    assert row["reason"] == LOCALIZATION_CONTEXT_REASON
+    assert row["count"] == 1
+    assert row["blocked_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -348,6 +350,142 @@ def test_transactional_policy_blocks_graphql_state_change() -> None:
     assert policy.summary()["unexpected_mutation"] == 1
     assert policy.summary()["high_risk_mutation"] == 0
     assert policy.summary()["status"] == "FAIL"
+
+
+def test_mutation_observability_keeps_policy_semantics_and_sanitizes_unknown_endpoint() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com", "www.mondressy.com"),
+        canonical_origin="https://mondressy.com",
+    )
+    policy.attach(context)
+
+    for viewport in ("desktop", "mobile"):
+        policy.set_scope(viewport, "browse", "WSMOKE-SEARCH-04", "CASE")
+        for path, expected, has_query in (
+            ("/cart/add.js", "EXPECTED_MUTATION", True),
+            ("/cart/change.js", "EXPECTED_MUTATION", False),
+            ("/localization", "EXPECTED_MUTATION", False),
+            ("/apps/example/action/123456789012", "UNEXPECTED_MUTATION", True),
+            (
+                "/apps/example/profile/customer@example.test/"
+                "123e4567-e89b-12d3-a456-426614174000/123456789012",
+                "UNEXPECTED_MUTATION",
+                True,
+            ),
+            ("/customer/998877665544", "HIGH_RISK_MUTATION", True),
+            ("/checkouts/session-token/payment", "HIGH_RISK_MUTATION", True),
+        ):
+            query = "?token=synthetic-query-secret&customer=private@example.test" if has_query else ""
+            route = _FakeRoute(
+                "https://mondressy.com"
+                + path
+                + query,
+                "POST",
+            )
+            route.request.headers = {
+                "cookie": "synthetic-cookie-secret",
+                "Authorization": "synthetic-authorization-secret",
+                "Signature": "synthetic-signature-secret",
+            }
+            route.request.post_data = "synthetic-body-secret"
+            context.handler(route)
+            event = policy.events()[-1]
+            assert event["classification"] == expected
+            assert route.calls == (["fallback"] if expected == "EXPECTED_MUTATION" else ["abort"])
+
+    events_text = str(policy.events())
+    summary_text = str(policy.summary())
+    for sensitive in (
+        "synthetic-query-secret",
+        "synthetic-cookie-secret",
+        "synthetic-authorization-secret",
+        "synthetic-signature-secret",
+        "synthetic-body-secret",
+        "private@example.test",
+        "123456789012",
+        "customer@example.test",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "998877665544",
+        "session-token",
+        "https://mondressy.com",
+    ):
+        assert sensitive not in events_text
+        assert sensitive not in summary_text
+
+    console_report = "\n".join(format_mutation_fingerprint_report(policy.summary()))
+    for sensitive in (
+        "synthetic-query-secret",
+        "synthetic-cookie-secret",
+        "synthetic-authorization-secret",
+        "synthetic-signature-secret",
+        "synthetic-body-secret",
+        "customer@example.test",
+        "123e4567-e89b-12d3-a456-426614174000",
+        "123456789012",
+        "998877665544",
+        "https://mondressy.com",
+    ):
+        assert sensitive not in console_report
+
+    unexpected = next(
+        row for row in policy.summary()["by_path"]
+        if row["classification"] == "UNEXPECTED_MUTATION"
+    )
+    assert unexpected["sanitized_path"] == "/apps/example/action/{id}"
+    assert unexpected["host_class"] == "FIRST_PARTY"
+    assert unexpected["same_origin"] is True
+    assert unexpected["query_present"] is True
+    assert unexpected["reason"] == "PATH_NOT_ALLOWED"
+    assert unexpected["count"] == 2
+    assert unexpected["desktop_count"] == 1
+    assert unexpected["mobile_count"] == 1
+    assert unexpected["blocked_count"] == 2
+
+
+def test_high_risk_precedence_and_fingerprint_reason_are_preserved() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("paypal.com",))
+    policy.attach(context)
+    route = _FakeRoute("https://paypal.com/localization?token=private", "POST")
+    context.handler(route)
+
+    event = policy.events()[0]
+    assert route.calls == ["abort"]
+    assert event["classification"] == "HIGH_RISK_MUTATION"
+    assert event["reason"] == "HIGH_RISK_PRECEDENCE"
+    assert event["host_class"] == "FIRST_PARTY"
+    assert event["same_origin"] == "UNKNOWN"
+    assert event["query_present"] is True
+
+
+def test_merge_aggregates_desktop_and_mobile_counts_by_safe_fingerprint() -> None:
+    summaries = []
+    for viewport in ("desktop", "mobile"):
+        context = _FakeContext()
+        policy = TransactionalMutationPolicy(
+            ("mondressy.com",),
+            canonical_origin="https://mondressy.com",
+        )
+        policy.attach(context)
+        policy.set_scope(viewport, "browse", "WSMOKE-SEARCH-04", "CASE")
+        context.handler(
+            _FakeRoute(
+                "https://mondressy.com/apps/example/action/123456789012?token=private",
+                "POST",
+            )
+        )
+        summaries.append(policy.summary())
+
+    merged = merge_transactional_mutation_summaries(summaries)
+    row = merged["by_path"][0]
+    assert merged["unexpected_mutation"] == 2
+    assert merged["blocked_mutation"] == 2
+    assert row["count"] == 2
+    assert row["desktop_count"] == 1
+    assert row["mobile_count"] == 1
+    assert row["blocked_count"] == 2
+    assert row["path"] == "/apps/example/action/{id}"
 
 
 def test_transactional_mutation_summaries_merge_without_request_data() -> None:

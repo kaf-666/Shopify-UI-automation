@@ -8,8 +8,17 @@ registered earlier by the Signed Request policy remains in the chain.
 from __future__ import annotations
 
 from collections import Counter
+import re
 from typing import Iterable, List, Optional
 from urllib.parse import urlsplit
+
+from utils.mutation_fingerprint import (
+    HOST_CLASSES,
+    REASONS,
+    UNKNOWN,
+    safe_endpoint_fingerprint,
+    sanitize_pathname,
+)
 
 
 CART_MUTATION_PATHS = frozenset(
@@ -217,10 +226,15 @@ class TransactionalMutationPolicy:
     UNEXPECTED = "UNEXPECTED_MUTATION"
     HIGH_RISK = "HIGH_RISK_MUTATION"
 
-    def __init__(self, first_party_hosts: Iterable[str]) -> None:
+    def __init__(
+        self,
+        first_party_hosts: Iterable[str],
+        canonical_origin: Optional[str] = None,
+    ) -> None:
         self.first_party_hosts = {
             str(host).strip().lower() for host in first_party_hosts if str(host).strip()
         }
+        self.canonical_origin = canonical_origin
         self._scope = {"viewport": None, "journey": None, "case_id": None, "scope_name": None}
         self._events: List[dict] = []
         self._context = None
@@ -290,6 +304,19 @@ class TransactionalMutationPolicy:
             return LOCALIZATION_CONTEXT_REASON
         return None
 
+    def _safe_reason(self, category: str, url: str, method: str, host: str, path: str) -> str:
+        """Describe an existing classification with a fixed safe enum only."""
+        existing = self._classification_reason(url, method, host, path, category)
+        if existing:
+            return existing
+        if category == self.HIGH_RISK:
+            return "HIGH_RISK_PRECEDENCE"
+        if category == self.EXPECTED:
+            if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
+                return "EXPECTED_CART_MUTATION" if path.startswith("/cart") else "EXPECTED_TRANSACTIONAL_MUTATION"
+            return "EXPECTED_TRANSACTIONAL_MUTATION"
+        return "PATH_NOT_ALLOWED"
+
     def _classify(self, url: str, method: str, request=None) -> Optional[str]:
         normalized_method = str(method or "").upper()
         if normalized_method not in MUTATION_METHODS:
@@ -339,8 +366,10 @@ class TransactionalMutationPolicy:
 
     def _handle_route(self, route) -> None:
         request = route.request
+        url = getattr(request, "url", "")
+        method = str(getattr(request, "method", "") or "").upper()
         category = self._classify(
-            getattr(request, "url", ""), getattr(request, "method", ""), request
+            url, method, request
         )
         fallback = getattr(route, "fallback", None)
         if category is None:
@@ -350,22 +379,30 @@ class TransactionalMutationPolicy:
                 route.continue_()
             return
 
+        normalized_path = ReadonlyMutationGuard.normalize_path(url)
+        host = self._host(url)
+        fingerprint = safe_endpoint_fingerprint(
+            url,
+            method,
+            self.first_party_hosts,
+            canonical_origin=self.canonical_origin,
+        )
+        # Preserve the existing normalized path representation in results;
+        # only the newly added hash uses the original query-stripped pathname.
+        fingerprint["sanitized_path"] = sanitize_pathname(normalized_path)
+        reason = self._safe_reason(category, url, method, host, normalized_path)
         event = {
             "classification": category,
-            "method": str(getattr(request, "method", "") or "").upper(),
-            "path": ReadonlyMutationGuard.normalize_path(getattr(request, "url", "")),
+            **fingerprint,
+            # Keep the historical schema's path field, but persist only the
+            # sanitized pathname. The raw URL/path is used above for policy
+            # decisions and is never copied into the event.
+            "path": fingerprint["sanitized_path"],
+            "reason": reason,
+            "classification_reason": reason,
             **self._scope,
             "blocked": category != self.EXPECTED,
         }
-        reason = self._classification_reason(
-            getattr(request, "url", ""),
-            getattr(request, "method", ""),
-            self._host(getattr(request, "url", "")),
-            event["path"],
-            category,
-        )
-        if reason is not None:
-            event["classification_reason"] = reason
         self._events.append(event)
         if category == self.EXPECTED:
             if callable(fallback):
@@ -398,19 +435,54 @@ class TransactionalMutationPolicy:
 
     def summary(self) -> dict:
         counts = Counter(event["classification"] for event in self._events)
-        by_path = Counter(
-            (event["classification"], event["method"], event["path"])
-            for event in self._events
-        )
-        paths = [
-            {
-                "classification": classification,
-                "method": method,
-                "path": path,
-                "count": count,
-            }
-            for (classification, method, path), count in sorted(by_path.items())
-        ]
+        grouped = {}
+        for event in self._events:
+            key = (
+                event.get("classification"),
+                event.get("method"),
+                event.get("host_class"),
+                event.get("same_origin"),
+                event.get("sanitized_path"),
+                event.get("path_hash"),
+                event.get("query_present"),
+                event.get("reason"),
+            )
+            row = grouped.setdefault(
+                key,
+                {
+                    "classification": event.get("classification"),
+                    "method": event.get("method"),
+                    "host_class": event.get("host_class", UNKNOWN),
+                    "same_origin": event.get("same_origin", UNKNOWN),
+                    "path": event.get("sanitized_path", "/"),
+                    "sanitized_path": event.get("sanitized_path", "/"),
+                    "path_hash": event.get("path_hash", UNKNOWN),
+                    "query_present": event.get("query_present", UNKNOWN),
+                    "reason": event.get("reason", "REDACTED"),
+                    "count": 0,
+                    "desktop_count": 0,
+                    "mobile_count": 0,
+                    "blocked_count": 0,
+                    "_viewport_unknown": False,
+                },
+            )
+            row["count"] += 1
+            viewport = event.get("viewport")
+            if viewport == "desktop":
+                row["desktop_count"] += 1
+            elif viewport == "mobile":
+                row["mobile_count"] += 1
+            else:
+                row["_viewport_unknown"] = True
+            row["blocked_count"] += int(bool(event.get("blocked")))
+
+        paths = []
+        for key in sorted(grouped, key=lambda value: tuple(str(item) for item in value)):
+            row = grouped[key]
+            if row.pop("_viewport_unknown"):
+                row["desktop_count"] = UNKNOWN
+                row["mobile_count"] = UNKNOWN
+            paths.append(row)
         unexpected = counts[self.UNEXPECTED]
         high_risk = counts[self.HIGH_RISK]
         return {
@@ -428,7 +500,7 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
     """Aggregate per-viewport policy summaries without exposing request data."""
 
     items = [summary for summary in summaries if isinstance(summary, dict)]
-    by_path: Counter = Counter()
+    by_fingerprint = {}
     expected = unexpected = high_risk = blocked = 0
     for summary in items:
         expected += int(summary.get("expected_mutation", 0) or 0)
@@ -438,12 +510,92 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
         for row in summary.get("by_path", []) or []:
             if not isinstance(row, dict):
                 continue
-            key = (
-                str(row.get("classification") or ""),
-                str(row.get("method") or ""),
-                str(row.get("path") or ""),
+            legacy_path = row.get("sanitized_path", row.get("path", "/"))
+            safe_fallback = safe_endpoint_fingerprint(
+                legacy_path,
+                row.get("method", ""),
+                (),
             )
-            by_path[key] += int(row.get("count", 0) or 0)
+            if "query_present" not in row:
+                # Historical by_path rows contain only a query-stripped path;
+                # they cannot prove whether a query was present.
+                safe_fallback["query_present"] = UNKNOWN
+            host_class = row.get("host_class")
+            if host_class not in HOST_CLASSES:
+                host_class = safe_fallback["host_class"]
+            same_origin = row.get("same_origin", safe_fallback["same_origin"])
+            if not isinstance(same_origin, bool) and same_origin != UNKNOWN:
+                same_origin = UNKNOWN
+            query_present = row.get("query_present", safe_fallback["query_present"])
+            if not isinstance(query_present, bool) and query_present != UNKNOWN:
+                query_present = UNKNOWN
+            method = str(row.get("method") or "").upper()
+            if method not in MUTATION_METHODS:
+                method = safe_fallback["method"]
+            classification = str(row.get("classification") or "")
+            if classification not in {
+                TransactionalMutationPolicy.EXPECTED,
+                TransactionalMutationPolicy.UNEXPECTED,
+                TransactionalMutationPolicy.HIGH_RISK,
+            }:
+                classification = UNKNOWN
+            path = sanitize_pathname(legacy_path)
+            path_hash = str(row.get("path_hash") or "")
+            if not re.fullmatch(r"[0-9a-f]{12}", path_hash):
+                path_hash = safe_fallback["path_hash"]
+            reason = row.get("reason") or row.get("classification_reason")
+            if reason not in REASONS:
+                reason = "REDACTED"
+            key = (
+                classification,
+                method,
+                host_class,
+                same_origin,
+                path,
+                path_hash,
+                query_present,
+                reason,
+            )
+            count = int(row.get("count", 0) or 0)
+            grouped = by_fingerprint.setdefault(
+                key,
+                {
+                    "classification": key[0],
+                    "method": key[1],
+                    "host_class": key[2],
+                    "same_origin": key[3],
+                    "path": key[4],
+                    "sanitized_path": key[4],
+                    "path_hash": key[5],
+                    "query_present": key[6],
+                    "reason": key[7],
+                    "count": 0,
+                    "desktop_count": 0,
+                    "mobile_count": 0,
+                    "blocked_count": 0,
+                    "_viewport_unknown": False,
+                },
+            )
+            grouped["count"] += count
+            for viewport in ("desktop", "mobile"):
+                value = row.get(f"{viewport}_count", UNKNOWN)
+                if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                    grouped[f"{viewport}_count"] += value
+                else:
+                    grouped["_viewport_unknown"] = True
+            blocked_count = row.get("blocked_count")
+            if isinstance(blocked_count, int) and not isinstance(blocked_count, bool) and blocked_count >= 0:
+                grouped["blocked_count"] += blocked_count
+            else:
+                grouped["blocked_count"] += count if key[0] != TransactionalMutationPolicy.EXPECTED else 0
+
+    paths = []
+    for key in sorted(by_fingerprint, key=lambda value: tuple(str(item) for item in value)):
+        row = by_fingerprint[key]
+        if row.pop("_viewport_unknown"):
+            row["desktop_count"] = UNKNOWN
+            row["mobile_count"] = UNKNOWN
+        paths.append(row)
     return {
         "mode": "TRANSACTIONAL_SAFE",
         "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
@@ -451,13 +603,5 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
         "unexpected_mutation": unexpected,
         "high_risk_mutation": high_risk,
         "blocked_mutation": blocked,
-        "by_path": [
-            {
-                "classification": classification,
-                "method": method,
-                "path": path,
-                "count": count,
-            }
-            for (classification, method, path), count in sorted(by_path.items())
-        ],
+        "by_path": paths,
     }

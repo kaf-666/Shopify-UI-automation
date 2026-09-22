@@ -176,6 +176,43 @@ def _validate_mutation_summary(value: object) -> bool:
                     and not isinstance(row.get("count"), bool)
                     and row.get("count") >= 0
                 )
+                if valid_row and "host_class" in row:
+                    valid_row = row.get("host_class") in {"FIRST_PARTY", "THIRD_PARTY", "UNKNOWN"}
+                if valid_row and "same_origin" in row:
+                    valid_row = isinstance(row.get("same_origin"), bool) or row.get("same_origin") == "UNKNOWN"
+                if valid_row and "sanitized_path" in row:
+                    valid_row = (
+                        isinstance(row.get("sanitized_path"), str)
+                        and row.get("sanitized_path", "").startswith("/")
+                        and row.get("path") == row.get("sanitized_path")
+                    )
+                if valid_row and "path_hash" in row:
+                    valid_row = (
+                        isinstance(row.get("path_hash"), str)
+                        and (row.get("path_hash") == "UNKNOWN" or bool(re.fullmatch(r"[0-9a-f]{12}", row.get("path_hash", ""))))
+                    )
+                if valid_row and "query_present" in row:
+                    valid_row = isinstance(row.get("query_present"), bool) or row.get("query_present") == "UNKNOWN"
+                if valid_row and "reason" in row:
+                    valid_row = row.get("reason") in {
+                        "EXPECTED_CART_MUTATION",
+                        "EXPECTED_TRANSACTIONAL_MUTATION",
+                        "FIRST_PARTY_LOCALIZATION_CONTEXT",
+                        "HIGH_RISK_PRECEDENCE",
+                        "PATH_NOT_ALLOWED",
+                        "REDACTED",
+                    }
+                for viewport_key in ("desktop_count", "mobile_count", "blocked_count"):
+                    if valid_row and viewport_key in row:
+                        count_value = row.get(viewport_key)
+                        valid_row = (
+                            count_value == "UNKNOWN"
+                            or (
+                                isinstance(count_value, int)
+                                and not isinstance(count_value, bool)
+                                and count_value >= 0
+                            )
+                        )
             ok_all = check(valid_row, f"mutation_summary by_path[{index}] contract") and ok_all
     return ok_all
 

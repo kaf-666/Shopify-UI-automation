@@ -56,6 +56,7 @@ from utils.readonly_mutation_guard import (
     TransactionalMutationPolicy,
     merge_transactional_mutation_summaries,
 )
+from utils.mutation_fingerprint import format_mutation_fingerprint_report
 from utils.site_config_validator import WEBSITE_SMOKE_V1, validate_site_config
 from utils.suite_runner import guarded_main
 from utils.traffic_inventory import TrafficInventory
@@ -169,6 +170,12 @@ def print_viewport(viewport: str, results: List, runner: Optional[WebsiteSmokeV1
             f"HIGH_RISK={mutation.get('high_risk_mutation', 0)}"
         )
     print()
+
+
+def print_mutation_fingerprints(mutation_summary: dict) -> None:
+    """Print safe endpoint fingerprints only for a failed mutation gate."""
+    for line in format_mutation_fingerprint_report(mutation_summary):
+        print(line)
 
 
 def count_statuses(results: List) -> Dict[str, int]:
@@ -328,7 +335,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             vp_started_ts = iso_now()
             vp_started = time.perf_counter()
             mutation_policy = TransactionalMutationPolicy(
-                _traffic_first_party_hosts(site_cfg, base_url)
+                _traffic_first_party_hosts(site_cfg, base_url),
+                canonical_origin=base_url,
             )
             results, runner, runtime_meta = run_viewport(
                 vp,
@@ -382,6 +390,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print_viewport(vp, results, runner)
     except Exception as exc:  # framework fatal: retain any completed viewport data
         classification, exit_code = _fatal_classification(exc)
+        partial_mutation_summary = merge_transactional_mutation_summaries(mutation_summaries)
+        print_mutation_fingerprints(partial_mutation_summary)
         _write_run_result(
             artifact_dir,
             run_id,
@@ -391,7 +401,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             started,
             vp_results,
             runtime={"viewports": runtime_by_viewport},
-            mutation_summary=merge_transactional_mutation_summaries(mutation_summaries),
+            mutation_summary=partial_mutation_summary,
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
@@ -424,6 +434,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         runtime={"viewports": runtime_by_viewport},
         mutation_summary=mutation_summary,
     ):
+        print_mutation_fingerprints(mutation_summary)
         _write_traffic_inventory(traffic_inventory, artifact_dir)
         _write_traffic_reduction(traffic_reduction, artifact_dir)
         return 1
@@ -451,6 +462,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"HIGH_RISK_MUTATION:  {mutation_summary['high_risk_mutation']}")
     print(f"BLOCKED_MUTATION:    {mutation_summary['blocked_mutation']}")
     print()
+    print_mutation_fingerprints(mutation_summary)
+    if mutation_summary.get("unexpected_mutation", 0) or mutation_summary.get("high_risk_mutation", 0):
+        print()
     print("Results:")
     print(f"{artifact_display_path(artifact_dir)}/results.json")
 
