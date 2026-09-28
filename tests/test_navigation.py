@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pages.navigation import NavigationPage, NavigationStrategyError
+from pages.navigation import NavigationCollectionError, NavigationPage, NavigationStrategyError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 from utils.browser import load_site_config
@@ -122,6 +122,13 @@ class _FakePage:
     def __init__(self, url: str = "https://mondressy.com/") -> None:
         self.url = url
         self.waits: list[int] = []
+        self.context = self
+
+    def on(self, _event, _handler) -> None:
+        pass
+
+    def remove_listener(self, _event, _handler) -> None:
+        pass
 
     def wait_for_timeout(self, timeout_ms: int) -> None:
         self.waits.append(timeout_ms)
@@ -266,7 +273,7 @@ def test_mobile_permanently_missing_target_fails_with_bounded_diagnostics(monkey
 
 def test_mobile_wrong_destination_still_fails_path_validation(monkeypatch) -> None:
     nav = object.__new__(NavigationPage)
-    nav.page = _FakePage("https://mondressy.com/collections/wrong-destination")
+    nav.page = _FakePage()
     nav.viewport = "mobile"
     nav.site_config = _strategy_config()
     target = _FakeLocator()
@@ -275,10 +282,67 @@ def test_mobile_wrong_destination_still_fails_path_validation(monkeypatch) -> No
     nav.open_menu = lambda: None
     nav.target_link = lambda: target
 
-    with pytest.raises(TimeoutError, match="navigation to /collections/wedding-guest-dresses"):
+    def click_wrong_target() -> None:
+        target.click_calls += 1
+        nav.page.url = "https://mondressy.com/collections/wrong-destination"
+
+    target.click = click_wrong_target
+
+    with pytest.raises(TimeoutError, match="navigation reached wrong page"):
         nav.open_collection()
 
     assert target.click_calls == 1
+
+
+@pytest.mark.parametrize("new_page", [False, True])
+def test_clicked_collection_adopts_actual_page(new_page: bool) -> None:
+    config = _synthetic_config()
+    config["capabilities"]["navigation"]["desktop"] = "direct_link"
+    config["pages"]["navigation"]["selectors"]["desktop_menu"] = {"by": "css", "value": "body"}
+    config["pages"]["navigation"]["selectors"]["target_collection"] = {
+        "by": "css", "value": "#target"
+    }
+    target_attribute = ' target="_blank"' if new_page else ""
+    html = f'<a id="target" href="/collections/target"{target_attribute}>Collection</a>'
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+    try:
+        context = browser.new_context()
+        context.route("https://synthetic.test/**", lambda route: route.fulfill(body=html))
+        source = context.new_page()
+        source.goto("https://synthetic.test/")
+        nav = NavigationPage(source, config, "desktop")
+        assert nav.open_collection() == "https://synthetic.test/collections/target"
+        assert (nav.page is not source) is new_page
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_clicked_collection_wrong_new_page_retains_evidence_page() -> None:
+    config = _synthetic_config()
+    config["capabilities"]["navigation"]["desktop"] = "direct_link"
+    config["pages"]["navigation"]["selectors"]["desktop_menu"] = {"by": "css", "value": "body"}
+    config["pages"]["navigation"]["selectors"]["target_collection"] = {
+        "by": "css", "value": "#target"
+    }
+    html = '<a id="target" href="/collections/wrong" target="_blank">Collection</a>'
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+    try:
+        context = browser.new_context()
+        context.route("https://synthetic.test/**", lambda route: route.fulfill(body=html))
+        source = context.new_page()
+        source.goto("https://synthetic.test/")
+        nav = NavigationPage(source, config, "desktop")
+        with pytest.raises(NavigationCollectionError) as error:
+            nav.open_collection()
+        assert error.value.actual_page is nav.page
+        assert nav.page is not source
+        assert nav.page.url.endswith("/collections/wrong")
+    finally:
+        browser.close()
+        playwright.stop()
 
 
 def test_desktop_navigation_keeps_hover_flow(monkeypatch) -> None:

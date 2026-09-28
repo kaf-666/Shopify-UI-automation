@@ -65,8 +65,17 @@ pages:
 
   search:
     url: /search
+    smoke_query: dress
+    submit_strategy: enter
+    entry_strategy: direct_trigger
 
     selectors:
+      open_state:
+        by: css
+        value: ".site-header__search-container.is-active"
+      predictive_loading:
+        by: css
+        value: ".predictive__screen:visible"
       container:
         by: css
         value: ".site-header__search-container"
@@ -302,6 +311,9 @@ pages:
     url: /cart
 
     selectors:
+      drawer_open:
+        by: css
+        value: "#CartDrawer.drawer--is-open"
       drawer:
         by: css
         value: "#CartDrawer"

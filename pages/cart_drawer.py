@@ -1,15 +1,12 @@
-"""购物车抽屉页面对象。
+"""配置驱动的购物车抽屉页面对象。
 
-封装 Mondressy 购物车抽屉（#CartDrawer，Brooklyn 主题）的定位、
-状态读取和基础 UI 操作，包括抽屉状态、商品信息、数量读取、
-商品移除与空购物车状态判断。
+封装抽屉状态、商品信息、数量读取、商品移除与空购物车状态判断。
 
 业务断言由上层 Flow / Case Runner 负责，本模块仅提供页面操作能力。
 """
 
 from __future__ import annotations
 
-import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -32,16 +29,11 @@ class CartDrawer(BasePage):
         return self.locator("drawer").first
 
     def is_open(self) -> bool:
-        d = self.drawer()
-        if d.count() == 0:
-            return False
-        # 关闭状态的抽屉通过 translateX(100%) 移出视口，is_visible() 会误报；
-        # 主题通过 drawer--is-open class 标记真实打开状态，以此为准。
-        return "drawer--is-open" in (d.get_attribute("class") or "")
+        return self.locator("drawer_open").count() > 0
 
     def wait_open(self, timeout: int = DRAWER_OPEN_TIMEOUT_MS) -> None:
-        """等待抽屉真正打开（以 drawer--is-open class 为准）。"""
-        expect(self.drawer()).to_have_class(re.compile(r"(?:^|\s)drawer--is-open(?:\s|$)"), timeout=timeout)
+        """等待配置的抽屉打开状态。"""
+        expect(self.locator("drawer_open").first).to_be_visible(timeout=timeout)
 
     # ----------------------------------------------------------------- 商品项
     def cart_items(self):

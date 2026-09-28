@@ -30,7 +30,6 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
-POSITIVE_QUERY = "dress"
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 
 READONLY_CASE_IDS = (
@@ -70,6 +69,7 @@ class WebsiteSmokeReadonlyV1Runner:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.page = runtime.page
         self.site_config = site_config
+        self.positive_query = str(((site_config.get("pages") or {}).get("search") or {}).get("smoke_query") or "")
         self.state: dict = {}
         self.results: Dict[str, CaseResult] = {}
         self._extra_pages: List = []
@@ -498,7 +498,7 @@ class WebsiteSmokeReadonlyV1Runner:
         """Search Returns Products：提交正向查询并确认结果。"""
         search = self.state["search"]
         try:
-            recovered = search.submit_query(POSITIVE_QUERY)
+            recovered = search.submit_query(self.positive_query)
             search.wait_predictive_ready()
         except Exception as exc:
             if self._cf_detected():
@@ -511,13 +511,13 @@ class WebsiteSmokeReadonlyV1Runner:
         query = search.current_query()
         if count <= 0:
             raise FlowError("SEARCH_RESULTS_NOT_FOUND", f"result_count={count}")
-        if query != POSITIVE_QUERY:
+        if query != self.positive_query:
             raise FlowError(
                 "SEARCH_QUERY_STATE_MISMATCH",
-                f"url_q={query!r} expected={POSITIVE_QUERY!r}",
+                f"url_q={query!r} expected={self.positive_query!r}",
             )
         self.state["search_result_count"] = count
-        return f"query={POSITIVE_QUERY} result_count={count} recovery={recovered}"
+        return f"query={self.positive_query} result_count={count} recovery={recovered}"
 
     def _c_search03(self) -> str:
         """Search Result Opens PDP：接受同页或新标签页的合法 PDP。"""
@@ -586,6 +586,7 @@ class WebsiteSmokeReadonlyV1Runner:
         nav = self.state["nav"]
         try:
             url = nav.open_collection()
+            self._adopt_business_page(nav.page)
             target_path = nav.target_path()
             if urlparse(url).path != target_path:
                 raise FlowError(
@@ -600,6 +601,8 @@ class WebsiteSmokeReadonlyV1Runner:
         except FlowError:
             raise
         except Exception as exc:
+            if getattr(exc, "actual_page", None) is not None:
+                self._adopt_business_page(exc.actual_page)
             if self._cf_detected():
                 raise FlowError(
                     "PAGE_LOAD_FAILURE",

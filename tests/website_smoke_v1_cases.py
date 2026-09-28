@@ -56,7 +56,6 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
-POSITIVE_QUERY = "dress"
 
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 
@@ -78,6 +77,7 @@ class WebsiteSmokeV1Runner:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.page = runtime.page
         self.site_config = site_config
+        self.positive_query = str(((site_config.get("pages") or {}).get("search") or {}).get("smoke_query") or "")
         self.flow = ShoppingFlow(
             runtime.page, site_config, viewport, access_policy=runtime.access_policy
         )
@@ -553,10 +553,10 @@ class WebsiteSmokeV1Runner:
         return "search_mode=HYBRID_SEARCH container_open=True input_usable=True"
 
     def _c_search02(self) -> str:
-        """Search Returns Products：提交 dress，结果数量 > 0 且 URL query 正确。"""
+        """Search Returns Products：提交站点查询词并验证结果与 URL query。"""
         search = self.state["search"]
         try:
-            recovered = search.submit_query(POSITIVE_QUERY)
+            recovered = search.submit_query(self.positive_query)
         except Exception as exc:
             if self._cf_detected():
                 self._mark_cf()
@@ -567,18 +567,18 @@ class WebsiteSmokeV1Runner:
             raise FlowError("SEARCH_SUBMIT_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         self.search_recovery_used = self.search_recovery_used or recovered
         search.wait_predictive_ready()
-        predictive = search.predictive_product_cards().count()
+        predictive = search.predictive_product_count()
         count = search.result_count()
         url_query = search.current_query()
         if count <= 0:
             raise FlowError("SEARCH_RESULTS_NOT_FOUND", f"result_count={count}")
-        if url_query != POSITIVE_QUERY:
+        if url_query != self.positive_query:
             raise FlowError(
                 "SEARCH_QUERY_STATE_MISMATCH",
-                f"url_q={url_query!r} expected={POSITIVE_QUERY!r}",
+                f"url_q={url_query!r} expected={self.positive_query!r}",
             )
         return (
-            f"query={POSITIVE_QUERY} result_count={count} "
+            f"query={self.positive_query} result_count={count} "
             f"predictive_products={predictive} recovery={recovered}"
         )
 
@@ -675,7 +675,10 @@ class WebsiteSmokeV1Runner:
         mode = nav.current_mode()
         try:
             url = nav.open_collection()
+            self._adopt_business_page(nav.page)
         except Exception as exc:
+            if getattr(exc, "actual_page", None) is not None:
+                self._adopt_business_page(exc.actual_page)
             if self._cf_detected():
                 self._mark_cf()
                 raise FlowError(
