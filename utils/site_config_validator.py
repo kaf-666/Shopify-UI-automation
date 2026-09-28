@@ -363,7 +363,10 @@ def _validate_full_requirements(config: Mapping[str, Any], groups: Mapping[str, 
         ("drawer", "drawer_open", "cart_item", "quantity_input", "quantity_plus", "quantity_minus", "subtotal", "checkout_button"),
     )
     checkout = _page(config, "checkout")
-    _require_selectors(checkout, "checkout", ("root", "contact", "delivery", "shipping_form", "email", "express"))
+    # CheckoutPage and WebsiteSmokeV1Runner consume these four configured
+    # selectors. shipping_form and express are optional observations and are
+    # not prerequisites for the frozen Full case contract.
+    _require_selectors(checkout, "checkout", ("root", "contact", "delivery", "email"))
 
 
 def validate_site_config_mapping(
