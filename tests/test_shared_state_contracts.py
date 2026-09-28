@@ -12,6 +12,56 @@ from utils.browser import load_site_config
 from utils.site_config_validator import SiteConfigValidationError, validate_site_config_mapping
 
 
+@pytest.mark.parametrize(
+    ("text", "key", "expected"),
+    [
+        ("Color: Black", "color", "Black"),
+        ("Size: US4", "size", "US4"),
+        ("Color: Black Size: US4", "color", "Black"),
+        ("Color: Black Size: US4", "size", "US4"),
+        ("Color: Black\nSize: US4", "color", "Black"),
+        ("Color: Black\nSize: US4", "size", "US4"),
+        ("Color: Black Size: US4 Rush Order: No", "color", "Black"),
+        ("Color: Black Size: US4 Rush Order: No", "size", "US4"),
+        (" Color \t : \n Black \t Size \n: \t US4 ", "color", "Black"),
+        ("cOlOr: Black sIzE: US4", "size", "US4"),
+        ("Size: US4", "color", ""),
+        ("Color: Black", "size", ""),
+        ("Custom Size: M Size: US4", "size", "US4"),
+        ("Color Family: Crimson Color: Black", "color", "Black"),
+        ("Size:\n  US4", "size", "US4"),
+    ],
+)
+def test_cart_variant_property_parser(text: str, key: str, expected: str) -> None:
+    assert CartDrawer._extract_labeled_property(text, key) == expected
+
+
+def test_cart_variant_getters_search_across_property_containers() -> None:
+    config = deepcopy(load_site_config("mondressy"))
+    playwright = sync_playwright().start()
+    browser = playwright.chromium.launch(headless=True)
+    try:
+        page = browser.new_page()
+        page.set_content(
+            "<div id='CartDrawer'><div class='cart__item'>"
+            "<div class='cart__item--properties'>Custom Size: M</div>"
+            "<div class='cart__item--properties'>Color Family: Crimson</div>"
+            "<div class='cart__item--properties'>Color: Black</div>"
+            "<div class='cart__item--properties'>Size: US4</div>"
+            "</div></div>"
+        )
+        drawer = CartDrawer(page, config, "desktop")
+        assert drawer.get_item_color() == "Black"
+        assert drawer.get_item_size() == "US4"
+    finally:
+        browser.close()
+        playwright.stop()
+
+
+def test_legacy_cart_label_parser_remains_compatible() -> None:
+    assert CartDrawer._parse_label_value("Size:\n  US4") == "US4"
+
+
 def test_enter_search_does_not_require_submit_button() -> None:
     config = deepcopy(load_site_config("mondressy"))
     config["pages"]["search"]["selectors"].pop("submit")

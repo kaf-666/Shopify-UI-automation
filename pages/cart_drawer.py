@@ -153,6 +153,77 @@ class CartDrawer(BasePage):
             return ""
         return " ".join(m.group(2).split())
 
+    @staticmethod
+    def _following_property_label(text: str):
+        """Return the start of a property label suffix before the next colon.
+
+        Shopify themes commonly render several ``Label: Value`` pairs in one
+        text node. Known variant labels are matched exactly; a title-cased
+        multi-word suffix also lets unrelated properties (for example,
+        ``Rush Order``) terminate the preceding value.
+        """
+        import re
+
+        value = text.rstrip()
+        for label in ("Colour", "Color", "Size"):
+            match = re.search(
+                rf"(?<!\S)(?P<label>{re.escape(label)})\s*$",
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.start("label")
+
+        match = re.search(
+            r"(?<!\S)(?P<label>[A-Z][a-z][A-Za-z0-9'’&/.-]*(?:\s+[A-Z][a-z][A-Za-z0-9'’&/.-]*)*)\s*$",
+            value,
+        )
+        return match.start("label") if match else None
+
+    @classmethod
+    def _extract_labeled_property(cls, text: str, key: str) -> str:
+        """Extract one exact property from combined or separate label/value text.
+
+        The first property must occupy the full text before its colon. Later
+        properties are recognized as exact known-label suffixes immediately
+        before their colon, so ``Custom Size`` and ``Color Family`` do not
+        satisfy a request for ``Size`` or ``Color``.
+        """
+        import re
+
+        aliases = {
+            "color": {"color", "colour"},
+            "colour": {"color", "colour"},
+            "size": {"size"},
+        }
+        wanted = aliases.get(" ".join(str(key).split()).casefold(), {
+            " ".join(str(key).split()).casefold()
+        })
+        parts = str(text or "").split(":")
+
+        def matches(label: str) -> bool:
+            return " ".join(label.split()).casefold() in wanted
+
+        for index in range(len(parts) - 1):
+            segment = parts[index]
+            if index == 0:
+                # At the beginning, compare the complete label, not a suffix
+                # embedded in a longer name such as ``Custom Size``.
+                if not matches(segment):
+                    continue
+            else:
+                label_start = cls._following_property_label(segment)
+                if label_start is None or not matches(segment[label_start:]):
+                    continue
+
+            value = parts[index + 1]
+            if index + 2 < len(parts):
+                following_label_start = cls._following_property_label(value)
+                if following_label_start is not None:
+                    value = value[:following_label_start]
+            return " ".join(re.sub(r"\s+", " ", value).split())
+        return ""
+
     def _variant_part(self, item, key: str) -> str:
         """从商品行的变体元数据容器读取变体行文本。"""
         try:
@@ -164,8 +235,9 @@ class CartDrawer(BasePage):
             containers = item.locator(".cart__item--variants, .cart__item--properties")
         for i in range(containers.count()):
             text = containers.nth(i).inner_text()
-            if key.lower() in text.lower():
-                return self._parse_label_value(text)
+            value = self._extract_labeled_property(text, key)
+            if value:
+                return value
         return ""
 
     def remove_item(self, index: int = 0) -> None:
