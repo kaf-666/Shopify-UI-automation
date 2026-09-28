@@ -5,7 +5,7 @@ base_url: "@url:`https://www.shirees.com`"
 capabilities:
   suites:
     website_smoke_readonly_v1: true
-    website_smoke_v1: false
+    website_smoke_v1: true
   navigation:
     desktop: mega_menu_hover
     mobile: drawer_accordion
@@ -194,3 +194,48 @@ pages:
       drawer_open:
         by: css
         value: '#slideout-ajax-cart:popover-open'
+      cart_item:
+        by: css
+        value: '.ajax-cart__cart-item:visible'
+      item_title:
+        by: css
+        value: '.ajax-cart__title > a'
+      variant_properties:
+        by: css
+        value: '.ajax-cart__cart-variants'
+      remove:
+        by: css
+        value: 'li.ajax-cart__item-remove.js-cart-remove'
+      quantity_input:
+        by: css
+        value: '.ajax-cart__qty-input'
+      quantity_plus:
+        by: css
+        value: '.ajax-cart__qty-control--up'
+      quantity_minus:
+        by: css
+        value: '.ajax-cart__qty-control--down'
+      subtotal:
+        by: css
+        value: '#slideout-ajax-cart .ajax-cart__final-details .subtotal'
+      checkout_button:
+        by: css
+        value: '#checkout'
+
+  checkout:
+    selectors:
+      root:
+        by: css
+        value: '#checkout-main'
+      contact:
+        by: css
+        value: '#contact'
+      delivery:
+        by: css
+        value: '#deliveryAddress'
+      email:
+        by: css
+        value: '#email'
+      express:
+        by: css
+        value: '#express-checkout-heading'
