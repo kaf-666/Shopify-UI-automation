@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from flows.shopping_flow import FlowError, ShoppingFlow, titles_match
+from flows.shopping_flow import FlowError, ShoppingFlow, product_match_basis
 from pages.cart_drawer import CartDrawer
 from pages.checkout_page import CheckoutPage
 from utils.result import CaseResult, iso_now
@@ -256,7 +256,12 @@ class CheckoutCaseRunner:
         pdp_title = self.flow.state["pdp_title"]
         if not checkout_title:
             raise FlowError("CHECKOUT_PRODUCT_MISMATCH", "checkout product title unreadable")
-        if not titles_match(pdp_title, checkout_title):
+        product_basis = product_match_basis(
+            pdp_title,
+            checkout_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+        )
+        if product_basis is None:
             raise FlowError(
                 "CHECKOUT_PRODUCT_MISMATCH",
                 f"pdp={pdp_title[:50]!r} checkout={checkout_title[:50]!r}",

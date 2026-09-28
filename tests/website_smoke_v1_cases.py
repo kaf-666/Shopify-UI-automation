@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from flows.shopping_flow import FlowError, ShoppingFlow, normalize, titles_match
+from flows.shopping_flow import FlowError, ShoppingFlow, normalize, product_match_basis
 from pages.cart_drawer import CartDrawer
 from pages.checkout_page import CheckoutPage
 from pages.collection_page import CollectionPage
@@ -355,10 +355,21 @@ class WebsiteSmokeV1Runner:
         """
         rendered = self.flow.state["pdp_title"]
         cart_title = self.flow.state["cart_title"]
-        product_ok = titles_match(rendered, cart_title) or titles_match(stored_title, cart_title)
-        note = ""
-        if not titles_match(rendered, cart_title) and titles_match(stored_title, cart_title):
-            note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+        product_basis = product_match_basis(
+            rendered,
+            cart_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+            cart_identity=self.flow.state.get("cart_identity"),
+            pdp_title_stored=stored_title,
+        )
+        product_ok = product_basis is not None
+        note = (
+            " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+            if product_basis == "STORED_TITLE"
+            else " product_identity=PRODUCT_PATH"
+            if product_basis == "PRODUCT_PATH"
+            else ""
+        )
         color_ok = normalize(self.flow.state["color"]) == normalize(self.flow.state["cart_color"])
         size_ok = normalize(self.flow.state["size"]) == normalize(self.flow.state["cart_size"])
         qty_ok = int(self.flow.state["cart_qty"] or 0) == 1
@@ -842,15 +853,21 @@ class WebsiteSmokeV1Runner:
         title_note = ""
         if not checkout_title:
             raise FlowError("CHECKOUT_PRODUCT_MISMATCH", "checkout product title unreadable")
-        if titles_match(pdp_title, checkout_title):
-            pass
-        elif titles_match(stored, checkout_title):
-            title_note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
-        else:
+        product_basis = product_match_basis(
+            pdp_title,
+            checkout_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+            pdp_title_stored=stored,
+        )
+        if product_basis is None:
             raise FlowError(
                 "CHECKOUT_PRODUCT_MISMATCH",
                 f"pdp={pdp_title[:50]!r} checkout={checkout_title[:50]!r}",
             )
+        if product_basis == "STORED_TITLE":
+            title_note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+        elif product_basis == "PATH_CONFIRMED_TITLE_SUFFIX":
+            title_note = " product_identity=PATH_CONFIRMED_TITLE_SUFFIX"
         qty = checkout.get_product_quantity(0)
         qty_detail = qty
         if qty and qty != self.flow.state["cart_qty"]:
