@@ -19,7 +19,15 @@ capabilities:
     custom_size: false
 
 access:
-  mode: none
+  mode: signed_request
+  source: env
+  env:
+    Signature: SHIREES_US_SHOPIFY_SIGNATURE
+    Signature-Input: SHIREES_US_SHOPIFY_SIGNATURE_INPUT
+    Signature-Agent: SHIREES_US_SHOPIFY_SIGNATURE_AGENT
+  allowed_hosts:
+    - shirees.com
+    - www.shirees.com
 
 pages:
   home:
