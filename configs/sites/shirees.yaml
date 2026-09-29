@@ -46,7 +46,7 @@ pages:
     entry_strategy:
       desktop: direct_trigger
       mobile: navigation_drawer
-    blocking_overlay_wait_ms: 13000
+    blocking_overlay_wait_ms: 15000
     selectors:
       container:
         desktop:
@@ -78,7 +78,7 @@ pages:
           value: '#slideout-mobile-navigation button[aria-label="Close navigation"]'
       blocking_overlay_dismiss:
         by: css
-        value: '[data-testid="modal"] button:has-text("No, thanks")'
+        value: '[data-testid="modal"]:has(#trustoo-popup-optIn-title) button.ecomsend__Modal__CloseText:has-text("No, thanks")'
       results_grid:
         by: css
         value: '#skusearchgrid'
