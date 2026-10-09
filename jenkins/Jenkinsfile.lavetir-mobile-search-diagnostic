@@ -1,0 +1,141 @@
+/*
+ * Manual-only definition for the Lavetir Mobile Search URL diagnostic.
+ * Configure a separate Jenkins Pipeline-from-SCM job for this file on the
+ * diagnostic/lavetir-mobile-search-url branch, with all external triggers off.
+ * This file is a definition only; it does not create or trigger a Jenkins job.
+ */
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+    }
+
+    stages {
+        stage('Manual Trigger Gate') {
+            steps {
+                script {
+                    def causeText = "${currentBuild.getBuildCauses()}"
+                    if (!causeText.contains('UserIdCause')) {
+                        error('This diagnostic requires a manual user-triggered build')
+                    }
+                    echo 'Manual user trigger confirmed'
+                }
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                script {
+                    checkout scm
+                }
+            }
+        }
+
+        stage('Install Locked Dependencies') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        env.SYSTEM_PYTHON = sh(
+                            returnStdout: true,
+                            script: '''
+                                if command -v python3 >/dev/null 2>&1; then
+                                    command -v python3
+                                elif command -v python >/dev/null 2>&1; then
+                                    command -v python
+                                else
+                                    echo "No Python interpreter found on this Jenkins Agent" >&2
+                                    exit 127
+                                fi
+                            '''
+                        ).trim()
+                        sh "${env.SYSTEM_PYTHON} -m venv .venv"
+                        sh '.venv/bin/python -m pip install --no-input -r requirements.lock.txt'
+                        sh '.venv/bin/python -m playwright install webkit'
+                    } else {
+                        bat 'where python'
+                        bat 'python --version'
+                        bat 'python -m venv .venv'
+                        bat '.venv\\Scripts\\python.exe -m pip install --no-input -r requirements.lock.txt'
+                        bat '.venv\\Scripts\\python.exe -m playwright install webkit'
+                    }
+                }
+            }
+        }
+
+        stage('Run Readonly URL Diagnostic') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE'),
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT'),
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT')
+                    ]) {
+                        int diagnosticExitCode
+                        if (isUnix()) {
+                            diagnosticExitCode = sh(
+                                returnStatus: true,
+                                script: '.venv/bin/python scripts/diagnose_lavetir_search_home_url.py'
+                            )
+                        } else {
+                            diagnosticExitCode = bat(
+                                returnStatus: true,
+                                script: '.venv\\Scripts\\python.exe scripts\\diagnose_lavetir_search_home_url.py'
+                            )
+                        }
+                        env.DIAGNOSTIC_EXIT_CODE = "${diagnosticExitCode}"
+                    }
+                }
+            }
+        }
+
+        stage('Secret Leakage Check') {
+            steps {
+                script {
+                    withCredentials([
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE'),
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT'),
+                        string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT')
+                    ]) {
+                        int gateExitCode
+                        if (isUnix()) {
+                            gateExitCode = sh(
+                                returnStatus: true,
+                                script: '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                            )
+                        } else {
+                            gateExitCode = bat(
+                                returnStatus: true,
+                                script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                            )
+                        }
+                        env.SECRET_LEAKAGE_EXIT_CODE = "${gateExitCode}"
+                    }
+                }
+            }
+        }
+
+        stage('Result') {
+            steps {
+                script {
+                    if (env.SECRET_LEAKAGE_EXIT_CODE != '0') {
+                        error('Secret Leakage Check failed')
+                    }
+                    if (env.DIAGNOSTIC_EXIT_CODE != '0') {
+                        error('Readonly URL diagnostic failed; inspect its sanitized artifact')
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'artifacts/diagnostics/lavetir-mobile-search-url/**', allowEmptyArchive: true, fingerprint: false
+        }
+    }
+}
