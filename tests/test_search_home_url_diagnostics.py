@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
+from scripts import validate_result_schema
 import pages.search_page as search_page_module
 from flows.shopping_flow import FlowError
 from pages.search_page import SearchPage
@@ -21,7 +22,13 @@ from utils.search_url_diagnostics import (
     find_search_home_url_diagnostic,
     write_search_home_url_diagnostic,
 )
-from utils.result import write_results_json
+from utils.result import (
+    CaseResult,
+    RunResult,
+    ViewportResult,
+    iso_now,
+    write_results_json,
+)
 
 
 class _FakeTrigger:
@@ -48,13 +55,20 @@ class _FakeHome:
 
 
 class _FakeRecoveryHome(_FakeHome):
-    def __init__(self, _page, site_config: dict, _viewport: str) -> None:
+    def __init__(self, page, site_config: dict, _viewport: str) -> None:
         super().__init__(site_config.get("base_url", "https://www.lavetir.com"))
+        self.page = page
+
+    def open(self) -> None:
+        return None
 
 
 class _FakePage:
     def __init__(self, url: str) -> None:
         self.url = url
+        self.evaluate_results = []
+        self.after_wait_urls = []
+        self.wait_count = 0
         self.context = SimpleNamespace(
             browser=SimpleNamespace(browser_type=SimpleNamespace(name="webkit"))
         )
@@ -64,13 +78,20 @@ class _FakePage:
 
     def evaluate(self, expression: str):
         assert expression == "document.readyState"
+        if self.evaluate_results:
+            result = self.evaluate_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
         return "complete"
 
     def content(self) -> str:
         return "<html><body>store</body></html>"
 
     def wait_for_timeout(self, _timeout_ms: int) -> None:
-        return None
+        self.wait_count += 1
+        if self.after_wait_urls:
+            self.url = self.after_wait_urls.pop(0)
 
 
 class _NoopExpect:
@@ -105,6 +126,65 @@ def _diagnostic(
         case_id=case_id,
         home=_FakeHome(configured_url),
     )
+
+
+def _write_complete_runner_results(
+    artifact_dir: Path,
+    runner_type,
+    failed_case: CaseResult,
+) -> tuple[Path, str]:
+    suite = (
+        "website_smoke_v1"
+        if runner_type is WebsiteSmokeV1Runner
+        else "website_smoke_readonly_v1"
+    )
+    case_ids = validate_result_schema.SUITE_CASE_IDS[suite]
+    timestamp = iso_now()
+    cases = [
+        failed_case
+        if case_id == failed_case.case_id
+        else CaseResult(case_id, case_id, "PASS", timestamp, timestamp, 1, detail="ok")
+        for case_id in case_ids
+    ]
+    counts = {
+        "pass": sum(case.status == "PASS" for case in cases),
+        "fail": sum(case.status == "FAIL" for case in cases),
+        "blocked": sum(case.status == "BLOCKED" for case in cases),
+        "total": len(cases),
+    }
+    viewport = ViewportResult(
+        viewport="mobile",
+        browser={"engine": "webkit", "device": "iPhone 14"},
+        status="FAIL" if counts["fail"] or counts["blocked"] else "PASS",
+        started_at=timestamp,
+        finished_at=timestamp,
+        duration_ms=1,
+        summary=counts,
+        pre_clean={
+            "status": "PASS",
+            "detail": "readonly_not_required" if suite == "website_smoke_readonly_v1" else "ok",
+        },
+        cleanup={
+            "status": "PASS",
+            "detail": "readonly_not_required" if suite == "website_smoke_readonly_v1" else "ok",
+        },
+        cases=cases,
+    )
+    result = RunResult(
+        run_id="search-diagnostic-contract-test",
+        site="lavetir",
+        base_url="https://www.lavetir.com",
+        started_at=timestamp,
+        finished_at=timestamp,
+        duration_ms=1,
+        overall_status="FAIL" if counts["fail"] or counts["blocked"] else "PASS",
+        runtime={"viewports": {"mobile": {"engine": "webkit", "device": "iPhone 14"}}},
+        summary=counts,
+        viewports=[viewport],
+    )
+    results_path = artifact_dir / "results.json"
+    write_results_json(result.to_dict(), results_path)
+    return results_path, suite
 
 
 def test_normal_home_path_produces_no_failure_diagnostic(monkeypatch) -> None:
@@ -214,6 +294,7 @@ def test_serialized_diagnostic_drops_free_text_titles_and_nonroot_paths(
     serialized = (tmp_path / "mobile" / "RSMOKE-SEARCH-01-search-home-url.json").read_text(
         encoding="utf-8"
     )
+    saved = json.loads(serialized)
 
     assert result["title_present"] is True
     if urlsplit(url).path in {"", "/"}:
@@ -225,6 +306,13 @@ def test_serialized_diagnostic_drops_free_text_titles_and_nonroot_paths(
     assert result["page_title_category"] in {
         "HOME", "SEARCH", "COLLECTION", "PRODUCT", "CHALLENGE", "ERROR", "UNKNOWN"
     }
+    assert saved["actual_pathname"] == result["actual_pathname"]
+    assert saved["path_is_root"] is result["path_is_root"]
+    if result["path_is_root"]:
+        assert saved["path_category"] == "HOME"
+    else:
+        assert saved["path_category"] != "HOME"
+    assert saved["page_title_category"] != "HOME" or saved["path_is_root"]
     for value in sensitive_values:
         assert value not in serialized
     assert title not in serialized
@@ -465,7 +553,7 @@ def test_full_and_readonly_keep_independent_evidence_capture_errors_in_results_j
         "mobile",
         artifact_dir=tmp_path,
     )
-    screenshot_path = f"mobile/{case_id}.png"
+    screenshot_path = f"mobile/{case_id}-failure.png"
 
     def capture_screenshot(*_args):
         if not screenshot_ok:
@@ -499,15 +587,20 @@ def test_full_and_readonly_keep_independent_evidence_capture_errors_in_results_j
         sidecar = tmp_path / "mobile" / f"{case_id}-search-home-url.json"
         assert json.loads(sidecar.read_text(encoding="utf-8"))["case_id"] == case_id
 
-    results_path = tmp_path / "results.json"
-    write_results_json({"cases": [result.to_dict()]}, results_path)
+    results_path, suite = _write_complete_runner_results(tmp_path, runner_type, result)
     serialized = results_path.read_text(encoding="utf-8")
-    saved_case = json.loads(serialized)["cases"][0]
+    saved_run = json.loads(serialized)
+    saved_case = next(
+        case
+        for case in saved_run["viewports"][0]["cases"]
+        if case["case_id"] == case_id
+    )
     assert saved_case["status"] == "FAIL"
     assert saved_case["failure_classification"] == category
     assert saved_case["evidence_capture_error"] == expected_errors
     assert "sidecar-private-secret" not in serialized
     assert "sidecar-private-secret" not in capsys.readouterr().out
+    assert validate_result_schema.validate_json(tmp_path, suite)
 
 
 def _home_assertion_error(actual_url: str, case_id: str) -> RuntimeError:
@@ -516,8 +609,10 @@ def _home_assertion_error(actual_url: str, case_id: str) -> RuntimeError:
     return error
 
 
-def _make_recovery_search(monkeypatch, clock_values: list[float]):
-    page = _FakePage("https://www.lavetir.com/")
+def _make_recovery_search(
+    monkeypatch, clock_values: list[float], page: _FakePage | None = None
+):
+    page = page or _FakePage("https://www.lavetir.com/")
     search = SearchPage(page, {"base_url": "https://www.lavetir.com"}, "mobile")
     monkeypatch.setattr(search_page_module, "HomePage", _FakeRecoveryHome)
     values = iter(clock_values)
@@ -548,6 +643,17 @@ def test_reopen_session_attaches_latest_url_diagnostic_to_original_timeout(monke
     evidence = find_search_home_url_diagnostic(captured.value)
     assert evidence is not None
     assert evidence["actual_origin"] == "https://redirect.example.test"
+    context = evidence["recovery_context"]
+    assert context["url_mismatch_observed"] is True
+    assert context["observation_timestamp"] == evidence["timestamp"]
+    assert context["observation_stage"] == "ENSURE_SEARCH_SESSION_OPEN_URL_ASSERTION"
+    assert context["observation_attempt"] == 2
+    assert context["final_error_category"] == "TIMEOUT_ERROR"
+    assert context["root_cause_confirmed"] is False
+    assert (
+        context["last_relevant_url_diagnostic"]["actual_origin"]
+        == "https://redirect.example.test"
+    )
     serialized = json.dumps(evidence)
     assert "first-private-value" not in serialized
     assert "latest-private-value" not in serialized
@@ -577,7 +683,7 @@ def test_reopen_session_success_after_transient_url_assertion_has_no_failure_evi
     assert not hasattr(search, DIAGNOSTIC_ATTRIBUTE)
 
 
-def test_reopen_session_does_not_reuse_old_url_diagnostic_after_unrelated_error(
+def test_reopen_session_preserves_url_observation_after_unrelated_error(
     monkeypatch,
 ) -> None:
     case_id = "RSMOKE-SEARCH-02"
@@ -597,8 +703,184 @@ def test_reopen_session_does_not_reuse_old_url_diagnostic_after_unrelated_error(
         search._reopen_session(case_id=case_id, browser="webkit")
 
     assert str(captured.value) == "session reopen failed: page not stable"
-    assert find_search_home_url_diagnostic(captured.value) is None
+    evidence = find_search_home_url_diagnostic(captured.value)
+    assert evidence is not None
+    assert evidence["path_is_root"] is True
+    context = evidence["recovery_context"]
+    assert context["url_mismatch_observed"] is True
+    assert context["final_error_category"] == "TIMEOUT_ERROR"
+    assert context["root_cause_confirmed"] is False
     assert "unrelated-private-secret" not in str(captured.value)
+    assert search.page.wait_count == 2
+
+
+def test_reopen_session_without_url_assertion_does_not_create_url_diagnostic(
+    monkeypatch,
+) -> None:
+    search = _make_recovery_search(monkeypatch, [0.0, 0.0, 11.0])
+
+    def fail_with_unrelated_error(*_args, **_kwargs):
+        raise ValueError("private navigation token")
+
+    search.ensure_search_session_open = fail_with_unrelated_error
+    with pytest.raises(TimeoutError) as captured:
+        search._reopen_session(case_id="RSMOKE-SEARCH-02", browser="webkit")
+
+    assert str(captured.value) == "session reopen failed: page not stable"
+    assert find_search_home_url_diagnostic(captured.value) is None
+    assert not hasattr(captured.value, DIAGNOSTIC_ATTRIBUTE)
+    assert "private navigation token" not in str(captured.value)
+
+
+def test_second_recovery_lifecycle_does_not_inherit_prior_url_diagnostic(
+    monkeypatch,
+) -> None:
+    case_id = "RSMOKE-SEARCH-02"
+    attempts = iter(
+        (
+            _home_assertion_error("https://lavetir.com/?token=first-secret", case_id),
+            ValueError("private second-attempt secret"),
+            ValueError("private next-lifecycle secret"),
+        )
+    )
+    search = _make_recovery_search(
+        monkeypatch, [0.0, 0.0, 0.0, 11.0, 0.0, 0.0, 11.0]
+    )
+
+    def fail_reopen(*_args, **_kwargs):
+        raise next(attempts)
+
+    search.ensure_search_session_open = fail_reopen
+    with pytest.raises(TimeoutError) as first:
+        search._reopen_session(case_id=case_id, browser="webkit")
+    assert find_search_home_url_diagnostic(first.value) is not None
+
+    with pytest.raises(TimeoutError) as second:
+        search._reopen_session(case_id=case_id, browser="webkit")
+    assert str(second.value) == "session reopen failed: page not stable"
+    assert find_search_home_url_diagnostic(second.value) is None
+    assert "first-secret" not in str(second.value)
+    assert "private second-attempt secret" not in str(second.value)
+
+
+@pytest.mark.parametrize(
+    ("runner_type", "case_id", "category", "module_name"),
+    [
+        (
+            WebsiteSmokeV1Runner,
+            "WSMOKE-SEARCH-02",
+            "SEARCH_SUBMIT_FAILURE",
+            "tests.website_smoke_v1_cases",
+        ),
+        (
+            WebsiteSmokeReadonlyV1Runner,
+            "RSMOKE-SEARCH-02",
+            "SEARCH_SUBMIT_FAILURE",
+            "tests.website_smoke_readonly_v1_cases",
+        ),
+    ],
+)
+def test_recovery_diagnostic_reaches_full_results_and_schema_validator(
+    runner_type,
+    case_id: str,
+    category: str,
+    module_name: str,
+    monkeypatch,
+    tmp_path,
+    capsys,
+) -> None:
+    page = _FakePage(
+        "https://lavetir.com/member/jane-doe?token=query-secret#fragment-secret"
+    )
+    page.title = lambda: "Jane Doe | My Account"
+    page.evaluate_results = [
+        "complete",
+        "complete",
+        ValueError("private navigation token"),
+    ]
+    search = _make_recovery_search(
+        monkeypatch, [0.0, 0.0, 0.0, 11.0], page=page
+    )
+
+    with pytest.raises(TimeoutError) as captured:
+        search._reopen_session(case_id=case_id, browser="webkit")
+
+    assert str(captured.value) == "session reopen failed: page not stable"
+    recovered = find_search_home_url_diagnostic(captured.value)
+    assert recovered is not None
+    assert recovered["path_category"] == "ACCOUNT"
+    assert recovered["recovery_context"]["root_cause_confirmed"] is False
+    assert recovered["recovery_context"]["final_error_category"] == "TIMEOUT_ERROR"
+    assert page.wait_count == 2
+
+    runtime = SimpleNamespace(
+        page=page,
+        access_policy=None,
+        engine="webkit",
+        metadata=lambda: {"engine": "webkit", "device": "iPhone 14"},
+    )
+    runner = runner_type(
+        runtime,
+        {"base_url": "https://www.lavetir.com"},
+        "mobile",
+        artifact_dir=tmp_path,
+    )
+    screenshot_path = f"mobile/{case_id}-failure.png"
+
+    def capture_screenshot(*_args):
+        screenshot = tmp_path / screenshot_path
+        screenshot.parent.mkdir(parents=True, exist_ok=True)
+        screenshot.write_bytes(b"synthetic screenshot")
+        return screenshot_path
+
+    monkeypatch.setattr(f"{module_name}.capture_case_failure", capture_screenshot)
+
+    def fail_case():
+        raise FlowError(category, str(captured.value)) from captured.value
+
+    runner._run_case(case_id, "Search Results", [], fail_case)
+    case_result = runner.results[case_id]
+    assert case_result.status == "FAIL"
+    assert case_result.failure_classification == category
+    assert [item["type"] for item in case_result.evidence] == [
+        "screenshot",
+        "search_home_url_diagnostic",
+    ]
+    assert case_result.evidence_capture_error is None
+
+    results_path, suite = _write_complete_runner_results(
+        tmp_path, runner_type, case_result
+    )
+    sidecar_path = tmp_path / "mobile" / f"{case_id}-search-home-url.json"
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    saved_case = next(
+        case
+        for case in json.loads(results_path.read_text(encoding="utf-8"))["viewports"][0]["cases"]
+        if case["case_id"] == case_id
+    )
+    assert validate_result_schema.validate_json(tmp_path, suite)
+    assert saved_case["failure_classification"] == category
+    assert sidecar["actual_pathname"] == "/[REDACTED]"
+    assert sidecar["path_category"] == "ACCOUNT"
+    assert sidecar["page_title_category"] != "HOME"
+    context = sidecar["recovery_context"]
+    assert context["url_mismatch_observed"] is True
+    assert context["observation_timestamp"] == sidecar["timestamp"]
+    assert context["observation_stage"] == "ENSURE_SEARCH_SESSION_OPEN_URL_ASSERTION"
+    assert context["final_error_category"] == "TIMEOUT_ERROR"
+    assert context["root_cause_confirmed"] is False
+    serialized = results_path.read_text(encoding="utf-8") + sidecar_path.read_text(
+        encoding="utf-8"
+    )
+    for sensitive in (
+        "jane-doe",
+        "query-secret",
+        "fragment-secret",
+        "Jane Doe",
+        "private navigation token",
+    ):
+        assert sensitive not in serialized
+    assert "private navigation token" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(

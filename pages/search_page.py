@@ -281,7 +281,10 @@ class SearchPage(BasePage):
         base = home.base_url().rstrip("/")
         deadline = time.monotonic() + 10
         last_url_diagnostic = None
+        last_url_observation_attempt = None
+        attempt_number = 0
         while time.monotonic() < deadline:
+            attempt_number += 1
             try:
                 self.page.evaluate("document.readyState")
                 if self.page.url.rstrip("/") != base:
@@ -295,21 +298,32 @@ class SearchPage(BasePage):
                 ):
                     payload = getattr(exc, DIAGNOSTIC_ATTRIBUTE, None)
                     try:
-                        last_url_diagnostic = (
+                        candidate = (
                             safe_search_home_url_diagnostic(payload)
                             if isinstance(payload, dict)
                             else None
                         )
+                        if candidate is not None:
+                            last_url_diagnostic = candidate
+                            last_url_observation_attempt = attempt_number
                     except Exception:
-                        last_url_diagnostic = None
-                else:
-                    # Do not carry a prior URL snapshot across unrelated errors.
-                    last_url_diagnostic = None
+                        # Keep an earlier safe observation; never serialize this
+                        # exception or let diagnostic handling replace recovery.
+                        pass
                 self.page.wait_for_timeout(500)
         error = TimeoutError("session reopen failed: page not stable")
         if last_url_diagnostic is not None:
             try:
-                setattr(error, DIAGNOSTIC_ATTRIBUTE, last_url_diagnostic)
+                diagnostic = dict(last_url_diagnostic)
+                diagnostic["recovery_context"] = {
+                    "url_mismatch_observed": True,
+                    "observation_timestamp": last_url_diagnostic.get("timestamp"),
+                    "observation_stage": "ENSURE_SEARCH_SESSION_OPEN_URL_ASSERTION",
+                    "observation_attempt": last_url_observation_attempt,
+                    "final_error_category": "TIMEOUT_ERROR",
+                    "root_cause_confirmed": False,
+                }
+                setattr(error, DIAGNOSTIC_ATTRIBUTE, diagnostic)
             except Exception:
                 pass
         raise error

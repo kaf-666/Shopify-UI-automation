@@ -22,7 +22,7 @@ import re
 import shutil
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -73,6 +73,20 @@ CASE_REQUIRED = [
 ]
 VALID_CASE_STATUSES = {"PASS", "FAIL", "BLOCKED"}
 VALID_BASE_STATUSES = {"PASS", "FAIL", "BLOCKED"}
+VALID_EVIDENCE_TYPES = {
+    "screenshot",
+    "search_home_url_diagnostic",
+    "quantity_timeline",
+}
+_CAPTURE_WRITE_ERROR_RE = re.compile(
+    r"(?:URL_DIAGNOSTIC_SIDECAR_WRITE_FAILED|QUANTITY_DIAGNOSTIC_WRITE_FAILED):"
+    r"[A-Za-z][A-Za-z0-9_]{0,63}"
+)
+_SAFE_CAPTURE_ERROR_LITERALS = {
+    "SCREENSHOT_CAPTURE_FAILED",
+    # Historical runners wrote this fixed, non-sensitive message.
+    "screenshot capture failed",
+}
 
 
 def check(ok: bool, label: str, detail: str = "") -> bool:
@@ -255,28 +269,131 @@ def _validate_readonly_lifecycle(
     return ok_all
 
 
-def _validate_evidence(run_dir: Path, case: dict) -> bool:
+def _schema_version_at_least(value: object, required: tuple[int, int]) -> bool:
+    match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?", str(value or "1.0"))
+    return bool(match and (int(match.group(1)), int(match.group(2))) >= required)
+
+
+def _safe_capture_error(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    codes = value.split("; ")
+    return bool(codes) and all(
+        code in _SAFE_CAPTURE_ERROR_LITERALS
+        or _CAPTURE_WRITE_ERROR_RE.fullmatch(code) is not None
+        for code in codes
+    )
+
+
+def _expected_evidence_path(
+    evidence_type: object, viewport: object, case_id: object
+) -> str | None:
+    if viewport not in {"desktop", "mobile"} or not isinstance(case_id, str):
+        return None
+    suffix = {
+        "screenshot": "-failure.png",
+        "search_home_url_diagnostic": "-search-home-url.json",
+        "quantity_timeline": "-quantity-timeline.json",
+    }.get(evidence_type)
+    if suffix is None:
+        return None
+    if evidence_type == "search_home_url_diagnostic" and not case_id.startswith(
+        ("WSMOKE-SEARCH-", "RSMOKE-SEARCH-")
+    ):
+        return None
+    if evidence_type == "quantity_timeline" and case_id != "WSMOKE-CART-03":
+        return None
+    return f"{viewport}/{case_id}{suffix}"
+
+
+def _validate_evidence(
+    run_dir: Path,
+    case: dict,
+    *,
+    viewport: object = None,
+    strict_capture_error_codes: bool = False,
+) -> bool:
     ok_all = True
-    evidence = case.get("evidence") or []
-    for ev in evidence:
-        path = str(ev.get("path") or "")
-        path_obj = Path(path)
-        ok_all = check(bool(path), f"{case.get('case_id')} evidence path present") and ok_all
-        ok_all = check(not path_obj.is_absolute(), f"{case.get('case_id')} evidence relative", path) and ok_all
-        ok_all = check(".." not in path.replace("\\", "/").split("/"), f"{case.get('case_id')} evidence no traversal") and ok_all
-        ok_all = check(not re.match(r"^[A-Za-z]:[\\/]", path), f"{case.get('case_id')} evidence no drive letter") and ok_all
-        ok_all = check((run_dir / path).exists(), f"{case.get('case_id')} evidence file exists", path) and ok_all
+    evidence_value = case.get("evidence")
+    evidence_is_list = isinstance(evidence_value, list)
+    ok_all = check(evidence_is_list, f"{case.get('case_id')} evidence list") and ok_all
+    evidence = evidence_value if evidence_is_list else []
+    for index, ev in enumerate(evidence):
+        prefix = f"{case.get('case_id')} evidence[{index}]"
+        record_is_valid = isinstance(ev, dict) and set(ev) == {"type", "path"}
+        ok_all = check(record_is_valid, f"{prefix} record shape") and ok_all
+        if not record_is_valid:
+            continue
+
+        evidence_type = ev.get("type")
+        valid_type = isinstance(evidence_type, str) and evidence_type in VALID_EVIDENCE_TYPES
+        ok_all = check(valid_type, f"{prefix} type") and ok_all
+        path = ev.get("path")
+        valid_path_value = isinstance(path, str) and bool(path.strip())
+        ok_all = check(valid_path_value, f"{prefix} path present") and ok_all
+        if not valid_path_value:
+            continue
+
+        try:
+            path_obj = Path(path)
+            windows_path = PureWindowsPath(path)
+        except (TypeError, ValueError):
+            ok_all = check(False, f"{prefix} path syntax") and ok_all
+            continue
+
+        normalized_path = path.replace("\\", "/")
+        is_absolute = (
+            path_obj.is_absolute()
+            or windows_path.is_absolute()
+            or bool(windows_path.drive)
+        )
+        ok_all = check(not is_absolute, f"{prefix} relative") and ok_all
+        has_traversal = ".." in normalized_path.split("/")
+        ok_all = check(not has_traversal, f"{prefix} no traversal") and ok_all
+        expected_path = (
+            _expected_evidence_path(evidence_type, viewport, case.get("case_id"))
+            if valid_type
+            else None
+        )
+        ok_all = check(
+            expected_path is not None and normalized_path == expected_path,
+            f"{prefix} path matches type and case",
+        ) and ok_all
+
+        candidate = run_dir / path_obj
+        try:
+            resolved_run_dir = run_dir.resolve(strict=True)
+            resolved_candidate = candidate.resolve(strict=True)
+            within_run = resolved_candidate.is_relative_to(resolved_run_dir)
+            is_file = resolved_candidate.is_file()
+        except (OSError, RuntimeError, ValueError):
+            within_run = False
+            is_file = False
+        ok_all = check(within_run, f"{prefix} remains inside run") and ok_all
+        ok_all = check(is_file, f"{prefix} file exists") and ok_all
 
     capture_error = case.get("evidence_capture_error")
+    capture_error_type_valid = capture_error is None or isinstance(capture_error, str)
+    ok_all = check(
+        capture_error_type_valid,
+        f"{case.get('case_id')} capture error type",
+    ) and ok_all
+    has_capture_error = bool(capture_error)
+    if strict_capture_error_codes and capture_error is not None:
+        ok_all = check(
+            not capture_error or _safe_capture_error(capture_error),
+            f"{case.get('case_id')} capture error uses safe code",
+        ) and ok_all
     if case.get("status") == "FAIL":
         ok_all = check(
-            bool(evidence) or bool(capture_error),
+            bool(evidence) or has_capture_error,
             f"{case.get('case_id')} FAIL has evidence or capture error",
         ) and ok_all
-    if capture_error:
-        ok_all = check(not evidence, f"{case.get('case_id')} capture error isolates evidence") and ok_all
     if case.get("status") == "PASS":
-        ok_all = check(not evidence and not capture_error, f"{case.get('case_id')} PASS evidence empty") and ok_all
+        ok_all = check(
+            not evidence and not has_capture_error,
+            f"{case.get('case_id')} PASS evidence empty",
+        ) and ok_all
     return ok_all
 
 
@@ -335,11 +452,20 @@ def validate_json(run_dir: Path, suite: str) -> bool:
             for field in CASE_REQUIRED:
                 # evidence_capture_error is optional for old artifacts, but required
                 # for newly written results (schema_version >= 1.1).
-                required = field != "evidence_capture_error" or str(data.get("schema_version", "1.0")) >= "1.1"
+                required = field != "evidence_capture_error" or _schema_version_at_least(
+                    data.get("schema_version", "1.0"), (1, 1)
+                )
                 if required:
                     ok_all = check(field in case, f"{case.get('case_id')} field: {field}") and ok_all
             ok_all = check(case.get("status") in VALID_CASE_STATUSES, f"{case.get('case_id')} status value") and ok_all
-            ok_all = _validate_evidence(run_dir, case) and ok_all
+            ok_all = _validate_evidence(
+                run_dir,
+                case,
+                viewport=vp_name,
+                strict_capture_error_codes=_schema_version_at_least(
+                    data.get("schema_version", "1.0"), (1, 1)
+                ),
+            ) and ok_all
         ok_all = _summary_matches_cases(vp.get("summary", {}), cases, str(vp_name)) and ok_all
         for base_name in ("pre_clean", "cleanup"):
             value = vp.get(base_name) or {}

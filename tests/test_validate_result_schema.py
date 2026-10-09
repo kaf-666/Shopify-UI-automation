@@ -117,7 +117,7 @@ def _full_result() -> dict:
 
 def _write_result(tmp_path: Path, data: dict) -> Path:
     run_dir = tmp_path / "readonly-fixture"
-    run_dir.mkdir()
+    run_dir.mkdir(parents=True)
     result_path = run_dir / "results.json"
     result_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return result_path
@@ -210,9 +210,138 @@ def test_readonly_business_fail_is_structurally_valid(tmp_path: Path) -> None:
     mutation_case = data["viewports"][0]["cases"][-1]
     mutation_case["status"] = "FAIL"
     mutation_case["failure_classification"] = "READONLY_MUTATION_VIOLATION"
-    mutation_case["evidence_capture_error"] = "synthetic capture unavailable"
+    mutation_case["evidence_capture_error"] = "screenshot capture failed"
     _refresh_summaries(data)
     result_path = _write_result(tmp_path, data)
+    assert schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
+
+
+@pytest.mark.parametrize(
+    ("path_kind", "expected_valid"),
+    [
+        ("missing", False),
+        ("absolute", False),
+        ("traversal", False),
+        ("wrong_type_path", False),
+        ("valid", True),
+    ],
+)
+def test_readonly_evidence_paths_remain_confined_and_structural(
+    tmp_path: Path, path_kind: str, expected_valid: bool
+) -> None:
+    data = _readonly_result()
+    case = data["viewports"][0]["cases"][-1]
+    case["status"] = "FAIL"
+    case["failure_classification"] = "SEARCH_SUBMIT_FAILURE"
+    case["evidence_capture_error"] = None
+    expected = "desktop/RSMOKE-PDP-02-failure.png"
+    if path_kind == "absolute":
+        outside = tmp_path / "outside.png"
+        outside.write_bytes(b"synthetic")
+        evidence_path = str(outside)
+        evidence_type = "screenshot"
+    elif path_kind == "traversal":
+        evidence_path = "desktop/../RSMOKE-PDP-02-failure.png"
+        evidence_type = "screenshot"
+    elif path_kind == "wrong_type_path":
+        evidence_path = "desktop/RSMOKE-PDP-02-search-home-url.json"
+        evidence_type = "screenshot"
+    else:
+        evidence_path = expected
+        evidence_type = "screenshot"
+    case["evidence"] = [{"type": evidence_type, "path": evidence_path}]
+    _refresh_summaries(data)
+    result_path = _write_result(tmp_path, data)
+
+    if path_kind == "valid":
+        artifact = result_path.parent / expected
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"synthetic")
+    elif path_kind == "traversal":
+        (result_path.parent / "RSMOKE-PDP-02-failure.png").write_bytes(b"synthetic")
+    elif path_kind == "wrong_type_path":
+        artifact = result_path.parent / evidence_path
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"synthetic")
+
+    assert schema.validate_json(result_path.parent, "website_smoke_readonly_v1") is expected_valid
+
+
+def test_pass_case_with_evidence_is_rejected(tmp_path: Path) -> None:
+    data = _readonly_result()
+    case = data["viewports"][0]["cases"][0]
+    case["evidence"] = [
+        {"type": "screenshot", "path": "desktop/RSMOKE-DIRECT-01-failure.png"}
+    ]
+    result_path = _write_result(tmp_path, data)
+    evidence_path = result_path.parent / case["evidence"][0]["path"]
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_bytes(b"synthetic")
+
+    assert not schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
+
+
+def test_pass_case_with_non_string_capture_error_is_rejected(tmp_path: Path) -> None:
+    data = _readonly_result()
+    data["viewports"][0]["cases"][0]["evidence_capture_error"] = 0
+    result_path = _write_result(tmp_path, data)
+
+    assert not schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
+
+
+def test_fail_case_without_evidence_or_capture_error_is_rejected(tmp_path: Path) -> None:
+    data = _readonly_result()
+    case = data["viewports"][0]["cases"][-1]
+    case["status"] = "FAIL"
+    case["failure_classification"] = "SEARCH_SUBMIT_FAILURE"
+    _refresh_summaries(data)
+    result_path = _write_result(tmp_path, data)
+
+    assert not schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
+
+
+def test_current_schema_rejects_unstructured_capture_error_text(tmp_path: Path) -> None:
+    data = _readonly_result()
+    case = data["viewports"][0]["cases"][-1]
+    case["status"] = "FAIL"
+    case["failure_classification"] = "SEARCH_SUBMIT_FAILURE"
+    case["evidence_capture_error"] = "OSError: private token value"
+    _refresh_summaries(data)
+    result_path = _write_result(tmp_path, data)
+
+    assert not schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
+
+
+def test_historical_schema_capture_error_formats_remain_compatible(tmp_path: Path) -> None:
+    historical = _readonly_result()
+    historical["schema_version"] = "1.0"
+    old_case = historical["viewports"][0]["cases"][-1]
+    old_case["status"] = "FAIL"
+    old_case["failure_classification"] = "SEARCH_SUBMIT_FAILURE"
+    old_case["evidence_capture_error"] = "historical capture unavailable"
+    _refresh_summaries(historical)
+    old_result_path = _write_result(tmp_path, historical)
+    assert schema.validate_json(old_result_path.parent, "website_smoke_readonly_v1")
+
+    current_legacy = _readonly_result()
+    legacy_case = current_legacy["viewports"][0]["cases"][-1]
+    legacy_case["status"] = "FAIL"
+    legacy_case["failure_classification"] = "SEARCH_SUBMIT_FAILURE"
+    legacy_case["evidence_capture_error"] = "screenshot capture failed"
+    _refresh_summaries(current_legacy)
+    legacy_result_path = _write_result(tmp_path / "current", current_legacy)
+    assert schema.validate_json(legacy_result_path.parent, "website_smoke_readonly_v1")
+
+
+def test_blocked_case_evidence_semantics_remain_unchanged(tmp_path: Path) -> None:
+    data = _readonly_result()
+    case = data["viewports"][0]["cases"][-1]
+    case["status"] = "BLOCKED"
+    case["failure_classification"] = "BLOCKED_BY_DEPENDENCY"
+    case["blocked_by"] = ["RSMOKE-PDP-01"]
+    _refresh_summaries(data)
+    result_path = _write_result(tmp_path, data)
+
     assert schema.validate_json(result_path.parent, "website_smoke_readonly_v1")
 
 

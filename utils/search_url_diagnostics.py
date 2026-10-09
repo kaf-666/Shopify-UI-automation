@@ -272,12 +272,17 @@ def _safe_path_metadata(payload: dict, field: str, prefix: str = "") -> dict:
     }
     category = payload.get(keys["path_category"])
     count = payload.get(keys["path_segment_count"])
+    safe_category = (
+        category
+        if isinstance(category, str) and category in _PATH_CATEGORIES
+        else "UNKNOWN"
+    )
+    if safe_category == "HOME":
+        safe_category = "UNKNOWN"
     return {
         "pathname": "/[REDACTED]",
         "path_is_root": False,
-        "path_category": category
-        if isinstance(category, str) and category in _PATH_CATEGORIES
-        else "UNKNOWN",
+        "path_category": safe_category,
         "path_segment_count": min(count, 1000)
         if type(count) is int and count >= 0
         else None,
@@ -450,6 +455,8 @@ def safe_search_home_url_diagnostic(payload: object) -> dict:
             path_is_root=actual_path["path_is_root"],
         )
         title_present = title_present or inferred_present
+    if not actual_path["path_is_root"] and page_title_category == "HOME":
+        page_title_category = "UNKNOWN"
     timestamp = str(payload.get("timestamp") or "")
     try:
         timestamp = datetime.fromisoformat(timestamp).isoformat(timespec="milliseconds")
@@ -486,6 +493,26 @@ def safe_search_home_url_diagnostic(payload: object) -> dict:
         if payload.get("diagnostic_collection_status") in {"COLLECTED", "FAILED"}
         else "UNKNOWN",
     }
+    recovery_context = payload.get("recovery_context")
+    if (
+        isinstance(recovery_context, dict)
+        and recovery_context.get("url_mismatch_observed") is True
+        and recovery_context.get("observation_stage")
+        == "ENSURE_SEARCH_SESSION_OPEN_URL_ASSERTION"
+        and recovery_context.get("final_error_category") == "TIMEOUT_ERROR"
+        and recovery_context.get("root_cause_confirmed") is False
+        and type(recovery_context.get("observation_attempt")) is int
+        and 1 <= recovery_context["observation_attempt"] <= 1000
+    ):
+        output["recovery_context"] = {
+            "url_mismatch_observed": True,
+            "observation_timestamp": output["timestamp"],
+            "observation_stage": "ENSURE_SEARCH_SESSION_OPEN_URL_ASSERTION",
+            "observation_attempt": recovery_context["observation_attempt"],
+            "last_relevant_url_diagnostic": dict(output),
+            "final_error_category": "TIMEOUT_ERROR",
+            "root_cause_confirmed": False,
+        }
     error_type = payload.get("diagnostic_collection_error_type")
     if isinstance(error_type, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", error_type):
         output["diagnostic_collection_error_type"] = error_type
