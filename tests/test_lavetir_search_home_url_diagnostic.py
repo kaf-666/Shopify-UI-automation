@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -186,10 +187,16 @@ def test_url_evidence_classifies_candidates_without_confirming_root_cause():
 
 def test_diagnostic_exception_writes_safe_report_without_exception_message(tmp_path, monkeypatch):
     sentinel = "signature-secret-sentinel"
+    cookie_sentinel = "cookie-secret-sentinel"
+    token_sentinel = "access-token-sentinel"
     monkeypatch.setenv("LAVETIR_US_SHOPIFY_SIGNATURE", sentinel)
+    monkeypatch.setenv("BUILD_NUMBER", "81")
 
     def fail_before_browser(*args, **kwargs):
-        raise RuntimeError(f"browser startup failed with {sentinel}")
+        raise RuntimeError(
+            f"browser startup failed with {sentinel}; Cookie={cookie_sentinel}; "
+            f"Authorization: Bearer {token_sentinel}"
+        )
 
     monkeypatch.setattr(diagnostic, "create_browser", fail_before_browser)
     exit_code, report = diagnostic.run_diagnostic(tmp_path)
@@ -198,9 +205,15 @@ def test_diagnostic_exception_writes_safe_report_without_exception_message(tmp_p
     assert report["status"] == "FAIL"
     assert report["error_category"] == "RuntimeError"
     assert len(report_files) == 1
+    assert report_files[0].name == "run-81.json"
     content = report_files[0].read_text(encoding="utf-8")
     assert sentinel not in content
+    assert cookie_sentinel not in content
+    assert token_sentinel not in content
     assert "browser startup failed" not in content
+    assert "Cookie" not in content
+    assert "Authorization" not in content
+    assert "token" not in content.lower()
 
 
 class _FakeRoute:
@@ -265,7 +278,92 @@ def test_manual_pipeline_uses_credentials_binding_and_has_no_automatic_trigger()
     for credential_id in diagnostic.SIGNED_REQUEST_ENV_NAMES:
         assert f"credentialsId: '{credential_id}'" in pipeline
     assert "scripts/diagnose_lavetir_search_home_url.py" in pipeline
-    assert "artifacts/diagnostics/lavetir-mobile-search-url/**" in pipeline
+    assert "archiveArtifacts" in pipeline
+
+
+def test_pipeline_archive_directory_matches_script_default_output_directory():
+    pipeline = (
+        diagnostic.PROJECT_ROOT
+        / "jenkins"
+        / "Jenkinsfile.lavetir-mobile-search-diagnostic"
+    ).read_text(encoding="utf-8")
+    expected_directory = f"artifacts/diagnostics/{diagnostic.DIAGNOSTIC_NAME}"
+    expected_report = f'{expected_directory}/run-${{env.BUILD_NUMBER}}.json'
+
+    assert f'def expectedReport = "{expected_report}"' in pipeline
+    assert "archiveArtifacts artifacts: expectedReport, allowEmptyArchive: false" in pipeline
+
+
+def test_pipeline_requires_current_report_after_diagnostic_starts_and_archives_failures():
+    pipeline = (
+        diagnostic.PROJECT_ROOT
+        / "jenkins"
+        / "Jenkinsfile.lavetir-mobile-search-diagnostic"
+    ).read_text(encoding="utf-8")
+    post_actions = pipeline.split("    post {", 1)[1]
+
+    assert "DIAGNOSTIC_EXECUTION_STARTED == 'true'" in pipeline
+    assert "fileExists(expectedReport)" in post_actions
+    assert "Diagnostic report missing for build" in post_actions
+    assert "currentBuild.currentResult != 'FAILURE'" in post_actions
+    assert "Diagnostic was not started; preserving the earlier stage result." in post_actions
+    assert "allowEmptyArchive: false" in post_actions
+    assert "allowEmptyArchive: true" not in post_actions
+    assert "DIAGNOSTIC_EXIT_CODE" not in post_actions
+    assert "always {" in post_actions
+
+
+def test_pipeline_clears_only_the_current_build_report_before_execution():
+    pipeline = (
+        diagnostic.PROJECT_ROOT
+        / "jenkins"
+        / "Jenkinsfile.lavetir-mobile-search-diagnostic"
+    ).read_text(encoding="utf-8")
+    diagnostic_stage = pipeline.split("stage('Run Readonly URL Diagnostic')", 1)[1].split(
+        "stage('Secret Leakage Check')", 1
+    )[0]
+    unix_invocation = diagnostic_stage.index("script: '.venv/bin/python")
+    windows_invocation = diagnostic_stage.index("script: '.venv\\\\Scripts\\\\python.exe")
+
+    assert "run-${env.BUILD_NUMBER}.json" in diagnostic_stage[:unix_invocation]
+    assert "rm -f" in diagnostic_stage[:unix_invocation]
+    assert "reportPath.replace('/', '\\\\')" in diagnostic_stage[:windows_invocation]
+    assert "del /f /q" in diagnostic_stage[:windows_invocation]
+
+
+def test_current_build_archive_pattern_matches_a_report_file(tmp_path):
+    pipeline = (
+        diagnostic.PROJECT_ROOT
+        / "jenkins"
+        / "Jenkinsfile.lavetir-mobile-search-diagnostic"
+    ).read_text(encoding="utf-8")
+    build_number = "81"
+    relative_dir = f"artifacts/diagnostics/{diagnostic.DIAGNOSTIC_NAME}"
+    expected_report = tmp_path / relative_dir / f"run-{build_number}.json"
+    expected_report.parent.mkdir(parents=True)
+    expected_report.write_text('{"status": "FAIL"}\n', encoding="utf-8")
+    report_match = re.search(r'def expectedReport = "([^\"]+)"', pipeline)
+    assert report_match is not None
+    expected_pattern = report_match.group(1).replace("${env.BUILD_NUMBER}", build_number)
+    assert "archiveArtifacts artifacts: expectedReport" in pipeline
+
+    assert list(tmp_path.glob(expected_pattern)) == [expected_report]
+
+
+def test_report_filename_uses_current_build_number(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUILD_NUMBER", "81")
+    report_dir = tmp_path / "artifacts" / "diagnostics" / diagnostic.DIAGNOSTIC_NAME
+
+    path = diagnostic._write_report(diagnostic._new_report(), report_dir)
+
+    assert path == report_dir / "run-81.json"
+
+
+def test_search_page_home_url_business_guard_remains_exact():
+    search_page = diagnostic.PROJECT_ROOT.joinpath("pages", "search_page.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'if self.page.url.rstrip("/") != home.base_url().rstrip("/"):' in search_page
 
 
 def test_script_never_submits_search_or_calls_transactional_flows():

@@ -75,13 +75,19 @@ pipeline {
                         string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_INPUT'),
                         string(credentialsId: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT', variable: 'LAVETIR_US_SHOPIFY_SIGNATURE_AGENT')
                     ]) {
+                        def reportPath = "artifacts/diagnostics/lavetir-mobile-search-home-url/run-${env.BUILD_NUMBER}.json"
                         int diagnosticExitCode
                         if (isUnix()) {
+                            sh "rm -f '${reportPath}'"
+                            env.DIAGNOSTIC_EXECUTION_STARTED = 'true'
                             diagnosticExitCode = sh(
                                 returnStatus: true,
                                 script: '.venv/bin/python scripts/diagnose_lavetir_search_home_url.py'
                             )
                         } else {
+                            def windowsReportPath = reportPath.replace('/', '\\')
+                            bat "if exist \"${windowsReportPath}\" del /f /q \"${windowsReportPath}\""
+                            env.DIAGNOSTIC_EXECUTION_STARTED = 'true'
                             diagnosticExitCode = bat(
                                 returnStatus: true,
                                 script: '.venv\\Scripts\\python.exe scripts\\diagnose_lavetir_search_home_url.py'
@@ -135,7 +141,22 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: 'artifacts/diagnostics/lavetir-mobile-search-url/**', allowEmptyArchive: true, fingerprint: false
+            script {
+                if (env.DIAGNOSTIC_EXECUTION_STARTED == 'true') {
+                    def expectedReport = "artifacts/diagnostics/lavetir-mobile-search-home-url/run-${env.BUILD_NUMBER}.json"
+                    if (!fileExists(expectedReport)) {
+                        if (currentBuild.currentResult != 'FAILURE') {
+                            error("Diagnostic report missing for build ${env.BUILD_NUMBER}")
+                        } else {
+                            echo "Diagnostic report missing; preserving existing ${currentBuild.currentResult} result."
+                        }
+                    } else {
+                        archiveArtifacts artifacts: expectedReport, allowEmptyArchive: false, fingerprint: false
+                    }
+                } else {
+                    echo 'Diagnostic was not started; preserving the earlier stage result.'
+                }
+            }
         }
     }
 }
