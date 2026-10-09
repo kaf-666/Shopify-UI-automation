@@ -14,7 +14,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from utils.errors import sanitize_message
-from utils.mutation_fingerprint import sanitize_pathname
 from utils.result import write_results_json
 
 
@@ -22,21 +21,62 @@ DIAGNOSTIC_ATTRIBUTE = "_search_home_url_diagnostic"
 DIAGNOSTIC_FILENAME_SUFFIX = "-search-home-url.json"
 _CASE_ID_RE = re.compile(r"^[A-Z0-9][A-Z0-9_-]{0,63}$")
 _HOST_RE = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$", re.I)
-_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
-_OPAQUE_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9])")
-_LONG_NUMBER_RE = re.compile(r"(?<!\d)\d{7,}(?!\d)")
-_SENSITIVE_TITLE_VALUE_RE = re.compile(
-    r"\b(cookie|authorization|token|signature|secret|password|email|phone)\s*[:=]\s*[^\s,;#&]+",
-    re.I,
+_TITLE_CATEGORIES = frozenset(
+    {"HOME", "SEARCH", "COLLECTION", "PRODUCT", "CHALLENGE", "ERROR", "UNKNOWN"}
 )
-_FORMATTED_PHONE_RE = re.compile(r"(?<!\d)\+?\d[\d ().-]{6,}\d(?!\d)")
-_SENSITIVE_PATH_MARKERS = frozenset(
+_PATH_CATEGORIES = frozenset(
     {
-        "account", "accounts", "customer", "customers", "user", "users",
-        "profile", "profiles", "order", "orders", "email", "emails",
-        "phone", "phones", "session", "sessions", "token", "tokens",
-        "signature", "signatures", "authorization", "address", "addresses",
+        "HOME", "SEARCH", "COLLECTION", "PRODUCT", "ACCOUNT", "CART",
+        "CHALLENGE", "ERROR", "PAGE", "BLOG", "POLICY", "UNKNOWN",
     }
+)
+_PATH_ROUTE_CATEGORIES = {
+    "search": "SEARCH",
+    "collection": "COLLECTION",
+    "collections": "COLLECTION",
+    "product": "PRODUCT",
+    "products": "PRODUCT",
+    "account": "ACCOUNT",
+    "accounts": "ACCOUNT",
+    "customer": "ACCOUNT",
+    "customers": "ACCOUNT",
+    "member": "ACCOUNT",
+    "members": "ACCOUNT",
+    "user": "ACCOUNT",
+    "users": "ACCOUNT",
+    "profile": "ACCOUNT",
+    "profiles": "ACCOUNT",
+    "order": "ACCOUNT",
+    "orders": "ACCOUNT",
+    "cart": "CART",
+    "challenge": "CHALLENGE",
+    "cdn-cgi": "CHALLENGE",
+    "error": "ERROR",
+    "404": "ERROR",
+    "500": "ERROR",
+    "page": "PAGE",
+    "pages": "PAGE",
+    "blog": "BLOG",
+    "blogs": "BLOG",
+    "policies": "POLICY",
+}
+_CHALLENGE_TITLE_MARKERS = (
+    "cloudflare",
+    "just a moment",
+    "checking your browser",
+    "verify you are human",
+    "attention required",
+    "challenge",
+)
+_ERROR_TITLE_MARKERS = (
+    "page not found",
+    "not found",
+    "access denied",
+    "service unavailable",
+    "temporarily unavailable",
+    "error",
+    "404",
+    "500",
 )
 _MISMATCH_TYPES = frozenset(
     {
@@ -94,27 +134,54 @@ def _safe_origin(raw_url: object) -> str:
     return safe_origin if "[REDACTED]" not in safe_origin else "[REDACTED_ORIGIN]"
 
 
-def _safe_pathname(raw_url: object) -> str:
+def _decoded_path(path: str) -> str:
+    """Decode only for classification; decoded path text is never persisted."""
+    value = path
+    for _ in range(4):
+        decoded = unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    return value
+
+
+def _path_metadata(raw_url: object) -> dict:
+    """Return route metadata while dropping every non-root pathname value."""
     _raw, parsed = _parsed_url(raw_url)
     if parsed is None:
-        return "/{token}"
-    path = sanitize_pathname(parsed.path or "/")
-    raw_segments = (parsed.path or "/").split("/")
-    safe_segments = path.split("/")
-    redact_remainder = False
-    for index, raw_segment in enumerate(raw_segments):
-        decoded = unquote(raw_segment).strip().lower()
-        if redact_remainder and index < len(safe_segments):
-            safe_segments[index] = "{token}"
-        if decoded in _SENSITIVE_PATH_MARKERS:
-            redact_remainder = True
-    safe = "/".join(safe_segments) or "/"
-    # Also protect any configured Signed Request value that happens to occur
-    # in an otherwise ordinary-looking route segment.
-    safe = sanitize_message(safe)
-    if not safe.startswith("/"):
-        safe = "/{token}"
-    return safe
+        return {
+            "pathname": "/[REDACTED]",
+            "path_is_root": False,
+            "path_category": "UNKNOWN",
+            "path_segment_count": None,
+            "pathname_redacted": True,
+        }
+
+    path = parsed.path or "/"
+    if path == "/":
+        return {
+            "pathname": "/",
+            "path_is_root": True,
+            "path_category": "HOME",
+            "path_segment_count": 0,
+            "pathname_redacted": False,
+        }
+
+    decoded = _decoded_path(path)
+    segments = [segment for segment in decoded.split("/") if segment]
+    first_segment = segments[0].strip().casefold() if segments else ""
+    return {
+        "pathname": "/[REDACTED]",
+        "path_is_root": False,
+        "path_category": _PATH_ROUTE_CATEGORIES.get(first_segment, "UNKNOWN"),
+        "path_segment_count": min(len(segments), 1000),
+        "pathname_redacted": True,
+    }
+
+
+def _safe_pathname(raw_url: object) -> str:
+    """Expose only the root path; replace every other pathname wholesale."""
+    return _path_metadata(raw_url)["pathname"]
 
 
 def _query_present(raw_url: str) -> bool:
@@ -171,17 +238,51 @@ def _mismatch(actual_raw: str, actual, configured_raw: str, configured) -> tuple
     return "MATCH", components
 
 
-def _safe_title(value: object) -> str:
-    title = sanitize_message(value)
-    title = _EMAIL_RE.sub("[REDACTED_EMAIL]", title)
-    title = _LONG_NUMBER_RE.sub("[REDACTED]", title)
-    title = _OPAQUE_RE.sub("[REDACTED]", title)
-    title = _SENSITIVE_TITLE_VALUE_RE.sub(r"\1=[REDACTED]", title)
-    title = _FORMATTED_PHONE_RE.sub("[REDACTED_PHONE]", title)
-    # A title may itself contain a URL; preserve useful surrounding text but
-    # never copy URL query or fragment values into the artifact.
-    title = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", title, flags=re.I)
-    return title[:160]
+def _title_category(value: object, *, path_is_root: bool) -> tuple[str, bool]:
+    """Classify a title using fixed markers; never return title text."""
+    title = str(value or "").strip()
+    if not title:
+        return "UNKNOWN", False
+    normalized = sanitize_message(title).casefold()
+    if any(marker in normalized for marker in _CHALLENGE_TITLE_MARKERS):
+        return "CHALLENGE", True
+    if any(marker in normalized for marker in _ERROR_TITLE_MARKERS):
+        return "ERROR", True
+    if re.search(r"\bsearch\b", normalized):
+        return "SEARCH", True
+    if re.search(r"\bcollections?\b", normalized):
+        return "COLLECTION", True
+    if re.search(r"\bproducts?\b", normalized):
+        return "PRODUCT", True
+    if path_is_root:
+        return "HOME", True
+    return "UNKNOWN", True
+
+
+def _safe_path_metadata(payload: dict, field: str, prefix: str = "") -> dict:
+    """Re-sanitize a path, retaining only bounded metadata from our redacted form."""
+    raw_path = payload.get(field)
+    metadata = _path_metadata(raw_path)
+    if raw_path != "/[REDACTED]":
+        return metadata
+
+    keys = {
+        "path_category": f"{prefix}path_category",
+        "path_segment_count": f"{prefix}path_segment_count",
+    }
+    category = payload.get(keys["path_category"])
+    count = payload.get(keys["path_segment_count"])
+    return {
+        "pathname": "/[REDACTED]",
+        "path_is_root": False,
+        "path_category": category
+        if isinstance(category, str) and category in _PATH_CATEGORIES
+        else "UNKNOWN",
+        "path_segment_count": min(count, 1000)
+        if type(count) is int and count >= 0
+        else None,
+        "pathname_redacted": True,
+    }
 
 
 def _safe_case_id(value: object) -> str:
@@ -220,8 +321,13 @@ def build_search_home_url_diagnostic(
     actual_raw, actual = _parsed_url(actual_url)
     configured_raw, configured = _parsed_url(configured_url)
     mismatch_type, components = _mismatch(actual_raw, actual, configured_raw, configured)
+    actual_path = _path_metadata(actual_raw)
+    configured_path = _path_metadata(configured_raw)
 
     title, title_error = _page_value(page.title, "")
+    title_category, title_present = _title_category(
+        title, path_is_root=actual_path["path_is_root"]
+    )
     ready_state, ready_error = _page_value(
         lambda: page.evaluate("document.readyState"), "UNKNOWN"
     )
@@ -236,14 +342,23 @@ def build_search_home_url_diagnostic(
         "viewport": _safe_viewport(viewport),
         "browser": _safe_browser(browser),
         "actual_origin": _safe_origin(actual_raw),
-        "actual_pathname": _safe_pathname(actual_raw),
+        "actual_pathname": actual_path["pathname"],
+        "path_is_root": actual_path["path_is_root"],
+        "path_category": actual_path["path_category"],
+        "path_segment_count": actual_path["path_segment_count"],
+        "pathname_redacted": actual_path["pathname_redacted"],
         "configured_origin": _safe_origin(configured_raw),
-        "configured_pathname": _safe_pathname(configured_raw),
+        "configured_pathname": configured_path["pathname"],
+        "configured_path_is_root": configured_path["path_is_root"],
+        "configured_path_category": configured_path["path_category"],
+        "configured_path_segment_count": configured_path["path_segment_count"],
+        "configured_pathname_redacted": configured_path["pathname_redacted"],
         "query_present": _query_present(actual_raw),
         "fragment_present": _fragment_present(actual_raw),
         "url_mismatch_type": mismatch_type,
         "mismatch_components": components,
-        "current_page_title": _safe_title(title),
+        "page_title_category": title_category,
+        "title_present": title_present,
         "document_ready_state": ready_state,
         "search_trigger_visible": trigger_visible,
         "diagnostic_collection_status": "COLLECTED",
@@ -270,14 +385,23 @@ def collection_failure_diagnostic(*, viewport: str, browser: str | None, case_id
         "viewport": _safe_viewport(viewport),
         "browser": _safe_browser(browser),
         "actual_origin": "UNKNOWN",
-        "actual_pathname": "UNKNOWN",
+        "actual_pathname": "/[REDACTED]",
+        "path_is_root": False,
+        "path_category": "UNKNOWN",
+        "path_segment_count": None,
+        "pathname_redacted": True,
         "configured_origin": "UNKNOWN",
-        "configured_pathname": "UNKNOWN",
+        "configured_pathname": "/[REDACTED]",
+        "configured_path_is_root": False,
+        "configured_path_category": "UNKNOWN",
+        "configured_path_segment_count": None,
+        "configured_pathname_redacted": True,
         "query_present": None,
         "fragment_present": None,
         "url_mismatch_type": "INVALID_URL",
         "mismatch_components": {},
-        "current_page_title": "UNKNOWN",
+        "page_title_category": "UNKNOWN",
+        "title_present": False,
         "document_ready_state": "UNKNOWN",
         "search_trigger_visible": None,
         "diagnostic_collection_status": "FAILED",
@@ -290,7 +414,7 @@ def safe_search_home_url_diagnostic(payload: object) -> dict:
     if not isinstance(payload, dict):
         payload = {}
     mismatch = payload.get("url_mismatch_type")
-    if mismatch not in _MISMATCH_TYPES:
+    if not isinstance(mismatch, str) or mismatch not in _MISMATCH_TYPES:
         mismatch = "INVALID_URL"
     components_value = payload.get("mismatch_components")
     components = {}
@@ -312,6 +436,20 @@ def safe_search_home_url_diagnostic(payload: object) -> dict:
     query = payload.get("query_present")
     fragment = payload.get("fragment_present")
     trigger_visible = payload.get("search_trigger_visible")
+    actual_path = _safe_path_metadata(payload, "actual_pathname")
+    configured_path = _safe_path_metadata(
+        payload, "configured_pathname", prefix="configured_"
+    )
+    title_present = payload.get("title_present")
+    if not isinstance(title_present, bool):
+        title_present = bool(str(payload.get("current_page_title") or "").strip())
+    page_title_category = payload.get("page_title_category")
+    if not isinstance(page_title_category, str) or page_title_category not in _TITLE_CATEGORIES:
+        page_title_category, inferred_present = _title_category(
+            payload.get("current_page_title"),
+            path_is_root=actual_path["path_is_root"],
+        )
+        title_present = title_present or inferred_present
     timestamp = str(payload.get("timestamp") or "")
     try:
         timestamp = datetime.fromisoformat(timestamp).isoformat(timespec="milliseconds")
@@ -323,14 +461,23 @@ def safe_search_home_url_diagnostic(payload: object) -> dict:
         "viewport": _safe_viewport(payload.get("viewport")),
         "browser": _safe_browser(payload.get("browser")),
         "actual_origin": _safe_origin(payload.get("actual_origin")),
-        "actual_pathname": _safe_pathname(payload.get("actual_pathname")),
+        "actual_pathname": actual_path["pathname"],
+        "path_is_root": actual_path["path_is_root"],
+        "path_category": actual_path["path_category"],
+        "path_segment_count": actual_path["path_segment_count"],
+        "pathname_redacted": actual_path["pathname_redacted"],
         "configured_origin": _safe_origin(payload.get("configured_origin")),
-        "configured_pathname": _safe_pathname(payload.get("configured_pathname")),
+        "configured_pathname": configured_path["pathname"],
+        "configured_path_is_root": configured_path["path_is_root"],
+        "configured_path_category": configured_path["path_category"],
+        "configured_path_segment_count": configured_path["path_segment_count"],
+        "configured_pathname_redacted": configured_path["pathname_redacted"],
         "query_present": query if isinstance(query, bool) else None,
         "fragment_present": fragment if isinstance(fragment, bool) else None,
         "url_mismatch_type": mismatch,
         "mismatch_components": components,
-        "current_page_title": _safe_title(payload.get("current_page_title")),
+        "page_title_category": page_title_category,
+        "title_present": title_present,
         "document_ready_state": payload.get("document_ready_state")
         if payload.get("document_ready_state") in {"loading", "interactive", "complete"}
         else "UNKNOWN",

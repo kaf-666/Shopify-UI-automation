@@ -141,7 +141,7 @@ class WebsiteSmokeV1Runner:
         if rel is not None:
             evidence.append({"type": "screenshot", "path": rel})
         else:
-            capture_errors.append("screenshot capture failed")
+            capture_errors.append("SCREENSHOT_CAPTURE_FAILED")
 
         try:
             search_diagnostic = find_search_home_url_diagnostic(error)
@@ -152,7 +152,7 @@ class WebsiteSmokeV1Runner:
                 evidence.append({"type": "search_home_url_diagnostic", "path": diag_rel})
         except Exception as exc:
             capture_errors.append(
-                f"search URL diagnostic capture failed: {type(exc).__name__}"
+                f"URL_DIAGNOSTIC_SIDECAR_WRITE_FAILED:{type(exc).__name__}"
             )
 
         if case_id == "WSMOKE-CART-03":
@@ -172,13 +172,13 @@ class WebsiteSmokeV1Runner:
                 try:
                     write_results_json(payload, self.artifact_dir / diag_rel)
                 except Exception as exc:
-                    capture_errors.append(f"quantity diagnostic capture failed: {type(exc).__name__}")
+                    capture_errors.append(
+                        f"QUANTITY_DIAGNOSTIC_WRITE_FAILED:{type(exc).__name__}"
+                    )
                 else:
                     evidence.append({"type": "quantity_timeline", "path": diag_rel})
 
-        if evidence:
-            return evidence, None
-        return [], "; ".join(capture_errors) or "evidence capture failed"
+        return evidence, "; ".join(capture_errors) if capture_errors else None
 
     @staticmethod
     def _quantity_diagnostic_detail(drawer: CartDrawer) -> str:

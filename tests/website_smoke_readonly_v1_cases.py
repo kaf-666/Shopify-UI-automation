@@ -176,7 +176,7 @@ class WebsiteSmokeReadonlyV1Runner:
         if rel is not None:
             evidence.append({"type": "screenshot", "path": rel})
         else:
-            capture_errors.append("screenshot capture failed")
+            capture_errors.append("SCREENSHOT_CAPTURE_FAILED")
 
         try:
             search_diagnostic = find_search_home_url_diagnostic(error)
@@ -187,11 +187,9 @@ class WebsiteSmokeReadonlyV1Runner:
                 evidence.append({"type": "search_home_url_diagnostic", "path": diag_rel})
         except Exception as exc:
             capture_errors.append(
-                f"search URL diagnostic capture failed: {type(exc).__name__}"
+                f"URL_DIAGNOSTIC_SIDECAR_WRITE_FAILED:{type(exc).__name__}"
             )
-        if evidence:
-            return evidence, None
-        return [], "; ".join(capture_errors) or "evidence capture failed"
+        return evidence, "; ".join(capture_errors) if capture_errors else None
 
     def _adopt_business_page(self, actual_page) -> None:
         """切换到真实业务 Page；旧 Page 保留到本次 Context 结束。"""

@@ -25,6 +25,7 @@ from utils.search_url_diagnostics import (
     DIAGNOSTIC_ATTRIBUTE,
     build_search_home_url_diagnostic,
     collection_failure_diagnostic,
+    safe_search_home_url_diagnostic,
 )
 
 
@@ -279,6 +280,7 @@ class SearchPage(BasePage):
         home = HomePage(self.page, self.site_config, self.viewport)
         base = home.base_url().rstrip("/")
         deadline = time.monotonic() + 10
+        last_url_diagnostic = None
         while time.monotonic() < deadline:
             try:
                 self.page.evaluate("document.readyState")
@@ -286,9 +288,31 @@ class SearchPage(BasePage):
                     home.open()
                 self.ensure_search_session_open(home, case_id=case_id, browser=browser)
                 return
-            except Exception:
+            except Exception as exc:
+                if (
+                    type(exc) is RuntimeError
+                    and str(exc) == "Search session can only be opened from Home"
+                ):
+                    payload = getattr(exc, DIAGNOSTIC_ATTRIBUTE, None)
+                    try:
+                        last_url_diagnostic = (
+                            safe_search_home_url_diagnostic(payload)
+                            if isinstance(payload, dict)
+                            else None
+                        )
+                    except Exception:
+                        last_url_diagnostic = None
+                else:
+                    # Do not carry a prior URL snapshot across unrelated errors.
+                    last_url_diagnostic = None
                 self.page.wait_for_timeout(500)
-        raise TimeoutError("session reopen failed: page not stable")
+        error = TimeoutError("session reopen failed: page not stable")
+        if last_url_diagnostic is not None:
+            try:
+                setattr(error, DIAGNOSTIC_ATTRIBUTE, last_url_diagnostic)
+            except Exception:
+                pass
+        raise error
 
     def wait_results(self, timeout_ms: int = 15_000) -> None:
         """等待结果就绪：出现结果卡片（>0）或空态文案（0 results found）。"""
