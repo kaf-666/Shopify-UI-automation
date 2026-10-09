@@ -1,0 +1,506 @@
+import groovy.json.JsonOutput
+
+def signedRequestBindings(String site) {
+    def prefixes = [mondressy: 'MONDRESSY', lavetir: 'LAVETIR']
+    def prefix = prefixes[site]
+    if (!prefix) {
+        throw new IllegalArgumentException('Unsupported integration pilot site')
+    }
+    return ['SIGNATURE', 'SIGNATURE_INPUT', 'SIGNATURE_AGENT'].collect { suffix ->
+        def name = "${prefix}_US_SHOPIFY_${suffix}"
+        [$class: 'StringBinding', credentialsId: name, variable: name]
+    }
+}
+
+pipeline {
+    agent any
+
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
+    }
+
+    parameters {
+        choice(
+            name: 'SITE',
+            choices: ['mondressy', 'lavetir'],
+            description: 'Readonly integration pilot site.'
+        )
+        choice(
+            name: 'SMOKE_VIEWPORT',
+            choices: ['both', 'desktop', 'mobile'],
+            description: 'Readonly target viewport(s).'
+        )
+        string(
+            name: 'EXPECTED_SHA',
+            defaultValue: '',
+            description: 'Required full 40-character reviewed integration commit SHA.'
+        )
+    }
+
+    stages {
+        stage('Manual Trigger Gate') {
+            steps {
+                script {
+                    def manualCause = currentBuild.getBuildCauses().any { cause ->
+                        cause._class == 'hudson.model.Cause$UserIdCause'
+                    }
+                    if (!manualCause) {
+                        error('Manual Trigger Gate requires Jenkins UserIdCause')
+                    }
+                    if (!(params.SITE in ['mondressy', 'lavetir'])) {
+                        error('SITE is outside the readonly pilot allowlist')
+                    }
+                    if (!(params.SMOKE_VIEWPORT in ['both', 'desktop', 'mobile'])) {
+                        error('SMOKE_VIEWPORT is outside the readonly pilot allowlist')
+                    }
+
+                    env.SMOKE_SITE = params.SITE
+                    env.SMOKE_VIEWPORT = params.SMOKE_VIEWPORT
+                    env.PILOT_ARTIFACT_DIR = "artifacts/smoke-integration-manual/${env.BUILD_NUMBER}"
+                    env.READONLY_PROCESS_STARTED = 'false'
+                    env.SECRET_GATE_PASSED = 'false'
+                }
+            }
+        }
+
+        stage('Checkout + SHA Gate') {
+            steps {
+                script {
+                    // The workspace is disposable build state; cleaning prevents stale results from passing the current-run gate.
+                    deleteDir()
+                    def scmVars = checkout scm
+                    def checkoutSha
+                    if (isUnix()) {
+                        checkoutSha = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    } else {
+                        checkoutSha = bat(returnStdout: true, script: '@git rev-parse HEAD').trim()
+                    }
+
+                    def expectedSha = "${params.EXPECTED_SHA ?: ''}"
+                    if (!(expectedSha ==~ /[0-9a-f]{40}/)) {
+                        error('EXPECTED_SHA must contain exactly 40 hexadecimal characters')
+                    }
+                    if (checkoutSha != expectedSha) {
+                        error('Checked-out SHA does not match EXPECTED_SHA')
+                    }
+
+                    def sourceBranch = "${scmVars?.GIT_BRANCH ?: env.BRANCH_NAME ?: ''}".trim()
+                    sourceBranch = sourceBranch.replaceFirst(/^refs\/remotes\//, '')
+                    sourceBranch = sourceBranch.replaceFirst(/^refs\/heads\//, '')
+                    if (sourceBranch.startsWith('origin/')) {
+                        sourceBranch = sourceBranch.substring('origin/'.length())
+                    }
+                    if (sourceBranch != 'integration/smoke-color-and-search-evidence') {
+                        error('Checkout is not from the approved integration branch')
+                    }
+
+                    env.CHECKED_OUT_SHA = checkoutSha
+                    echo "Checked-out reviewed SHA: ${checkoutSha}"
+                }
+            }
+        }
+
+        stage('Environment') {
+            steps {
+                script {
+                    echo "Readonly integration pilot site: ${env.SMOKE_SITE}"
+                    echo "Readonly viewport: ${env.SMOKE_VIEWPORT}"
+                    if (isUnix()) {
+                        env.SYSTEM_PYTHON = sh(
+                            returnStdout: true,
+                            script: '''
+                                if command -v python3 >/dev/null 2>&1; then
+                                    command -v python3
+                                elif command -v python >/dev/null 2>&1; then
+                                    command -v python
+                                else
+                                    echo "No Python interpreter found on this Jenkins Agent" >&2
+                                    exit 127
+                                fi
+                            '''
+                        ).trim()
+                        sh "${env.SYSTEM_PYTHON} --version"
+                    } else {
+                        env.SYSTEM_PYTHON = 'python'
+                        bat 'where python'
+                        bat 'python --version'
+                    }
+                }
+            }
+        }
+
+        stage('Install Locked Dependencies') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh "${env.SYSTEM_PYTHON} -m venv .venv"
+                        sh '.venv/bin/python -m pip install --no-input -r requirements.lock.txt'
+                    } else {
+                        bat 'python -m venv .venv'
+                        bat '.venv\\Scripts\\python.exe -m pip install --no-input -r requirements.lock.txt'
+                    }
+                }
+            }
+        }
+
+        stage('Install Playwright Browsers') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh '.venv/bin/python -m playwright install chromium webkit'
+                    } else {
+                        bat '.venv\\Scripts\\python.exe -m playwright install chromium webkit'
+                    }
+                }
+            }
+        }
+
+        stage('Static Validation') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh '.venv/bin/python -m compileall .'
+                        sh ".venv/bin/python scripts/validate_site_config.py --site ${env.SMOKE_SITE} --suite website_smoke_readonly_v1"
+                    } else {
+                        bat '.venv\\Scripts\\python.exe -m compileall .'
+                        bat ".venv\\Scripts\\python.exe scripts\\validate_site_config.py --site ${env.SMOKE_SITE} --suite website_smoke_readonly_v1"
+                    }
+                }
+            }
+        }
+
+        stage('Runtime Contract') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh '.venv/bin/python scripts/validate_runtime_contract.py'
+                    } else {
+                        bat '.venv\\Scripts\\python.exe scripts\\validate_runtime_contract.py'
+                    }
+                }
+            }
+        }
+
+        stage('Signed Request / Site Access') {
+            steps {
+                script {
+                    withCredentials(signedRequestBindings(env.SMOKE_SITE)) {
+                        int accessExitCode
+                        if (isUnix()) {
+                            accessExitCode = sh(
+                                returnStatus: true,
+                                script: ".venv/bin/python scripts/validate_site_access.py --site ${env.SMOKE_SITE} --viewport ${env.SMOKE_VIEWPORT}"
+                            )
+                        } else {
+                            accessExitCode = bat(
+                                returnStatus: true,
+                                script: ".venv\\Scripts\\python.exe scripts\\validate_site_access.py --site ${env.SMOKE_SITE} --viewport ${env.SMOKE_VIEWPORT}"
+                            )
+                        }
+                        if (accessExitCode != 0) {
+                            error('Signed Request / Site Access validation failed')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Website Smoke Readonly V1') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        if (isUnix()) {
+                            sh "mkdir -p ${env.PILOT_ARTIFACT_DIR}"
+                            env.SMOKE_RUN_STARTED_NS = sh(
+                                returnStdout: true,
+                                script: '.venv/bin/python -c "import time; print(time.time_ns())"'
+                            ).trim()
+                        } else {
+                            bat "if not exist ${env.PILOT_ARTIFACT_DIR} mkdir ${env.PILOT_ARTIFACT_DIR}"
+                            env.SMOKE_RUN_STARTED_NS = bat(
+                                returnStdout: true,
+                                script: '@.venv\\Scripts\\python.exe -c "import time;print(time.time_ns())"'
+                            ).trim()
+                        }
+
+                        if (env.SMOKE_SITE == 'mondressy') {
+                            withCredentials(signedRequestBindings('mondressy')) {
+                                env.READONLY_PROCESS_STARTED = 'true'
+                                if (isUnix()) {
+                                    sh '''
+                                        set +e
+                                        .venv/bin/python scripts/run_website_smoke_readonly_v1.py --site "$SMOKE_SITE" --viewport "$SMOKE_VIEWPORT" > "$PILOT_ARTIFACT_DIR/runner-output.log" 2>&1
+                                        runner_status=$?
+                                        cat "$PILOT_ARTIFACT_DIR/runner-output.log"
+                                        printf '%s\\n' "$runner_status" > "$PILOT_ARTIFACT_DIR/runner-exit-code.txt"
+                                        exit 0
+                                    '''
+                                } else {
+                                    bat '''
+@setlocal
+@.venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site "%SMOKE_SITE%" --viewport "%SMOKE_VIEWPORT%" > "%PILOT_ARTIFACT_DIR%\\runner-output.log" 2>&1
+@set "RUNNER_STATUS=%ERRORLEVEL%"
+@type "%PILOT_ARTIFACT_DIR%\\runner-output.log"
+@> "%PILOT_ARTIFACT_DIR%\\runner-exit-code.txt" echo %RUNNER_STATUS%
+@exit /b 0
+                                    '''
+                                }
+                            }
+                        } else {
+                            withCredentials(signedRequestBindings('lavetir')) {
+                                env.READONLY_PROCESS_STARTED = 'true'
+                                if (isUnix()) {
+                                    sh '''
+                                        set +e
+                                        .venv/bin/python scripts/run_website_smoke_readonly_v1.py --site "$SMOKE_SITE" --viewport "$SMOKE_VIEWPORT" > "$PILOT_ARTIFACT_DIR/runner-output.log" 2>&1
+                                        runner_status=$?
+                                        cat "$PILOT_ARTIFACT_DIR/runner-output.log"
+                                        printf '%s\\n' "$runner_status" > "$PILOT_ARTIFACT_DIR/runner-exit-code.txt"
+                                        exit 0
+                                    '''
+                                } else {
+                                    bat '''
+@setlocal
+@.venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site "%SMOKE_SITE%" --viewport "%SMOKE_VIEWPORT%" > "%PILOT_ARTIFACT_DIR%\\runner-output.log" 2>&1
+@set "RUNNER_STATUS=%ERRORLEVEL%"
+@type "%PILOT_ARTIFACT_DIR%\\runner-output.log"
+@> "%PILOT_ARTIFACT_DIR%\\runner-exit-code.txt" echo %RUNNER_STATUS%
+@exit /b 0
+                                    '''
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Secret Leakage Check') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        withCredentials(signedRequestBindings(env.SMOKE_SITE)) {
+                            int gateExitCode
+                            if (isUnix()) {
+                                gateExitCode = sh(
+                                    returnStatus: true,
+                                    script: '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                                )
+                            } else {
+                                gateExitCode = bat(
+                                    returnStatus: true,
+                                    script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                                )
+                            }
+                            if (gateExitCode != 0) {
+                                env.SECRET_GATE_PASSED = 'false'
+                                error('Secret Leakage Check failed')
+                            }
+                            env.SECRET_GATE_PASSED = 'true'
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Identify Current Run Results') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        if (env.READONLY_PROCESS_STARTED != 'true') {
+                            error('Readonly Runner did not start; no result can pass this gate')
+                        }
+
+                        writeFile(
+                            file: '.readonly-current-results.py',
+                            text: '''
+import json
+import os
+import sys
+from datetime import datetime
+from pathlib import Path
+
+site = os.environ["SMOKE_SITE"]
+started_ns = int(os.environ["SMOKE_RUN_STARTED_NS"])
+workspace_root = Path.cwd().resolve(strict=True)
+site_root = Path("artifacts/website-smoke-readonly-v1") / site
+if site_root.is_symlink():
+    print("Readonly results root is a symlink", file=sys.stderr)
+    raise SystemExit(2)
+root_real = site_root.resolve(strict=True)
+if not root_real.is_relative_to(workspace_root):
+    print("Readonly results root is outside the workspace", file=sys.stderr)
+    raise SystemExit(2)
+matches = []
+for candidate in site_root.glob("*/results.json"):
+    try:
+        if candidate.is_symlink() or candidate.parent.is_symlink():
+            continue
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_file() or not resolved.is_relative_to(root_real) or not resolved.is_relative_to(workspace_root):
+            continue
+        result = json.loads(resolved.read_text(encoding="utf-8"))
+        if result.get("site") != site or result.get("run_id") != candidate.parent.name:
+            continue
+        run_started_ns = int(datetime.fromisoformat(result["started_at"]).timestamp() * 1_000_000_000)
+        if run_started_ns < started_ns:
+            continue
+        matches.append(candidate.as_posix())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
+        continue
+
+if len(matches) != 1:
+    print("Current Readonly results.json was not uniquely identified", file=sys.stderr)
+    raise SystemExit(2)
+print(matches[0])
+'''
+                        )
+
+                        try {
+                            if (isUnix()) {
+                                env.CURRENT_RESULTS_PATH = sh(
+                                    returnStdout: true,
+                                    script: '.venv/bin/python .readonly-current-results.py'
+                                ).trim()
+                            } else {
+                                env.CURRENT_RESULTS_PATH = bat(
+                                    returnStdout: true,
+                                    script: '@.venv\\Scripts\\python.exe .readonly-current-results.py'
+                                ).trim()
+                            }
+                        } finally {
+                            if (isUnix()) {
+                                sh(returnStatus: true, script: 'rm -f .readonly-current-results.py')
+                            } else {
+                                bat(returnStatus: true, script: '@del /q .readonly-current-results.py 2>nul')
+                            }
+                        }
+
+                        def expectedResultsPrefix = "artifacts/website-smoke-readonly-v1/${env.SMOKE_SITE}/"
+                        if (!env.CURRENT_RESULTS_PATH.startsWith(expectedResultsPrefix) ||
+                            !env.CURRENT_RESULTS_PATH.endsWith('/results.json')) {
+                            error('Current results path is outside the selected Readonly site artifact root')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Readonly Mutation Guard Validation') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        if (env.READONLY_PROCESS_STARTED != 'true') {
+                            error('Readonly Runner did not start; Mutation Guard evidence is unavailable')
+                        }
+
+                        def runnerLogPath = "${env.PILOT_ARTIFACT_DIR}/runner-output.log"
+                        def runnerLog = readFile(file: runnerLogPath)
+                        def counts = []
+                        def violationMatcher = runnerLog =~ /Readonly Mutation Violations:\s*(\d+)/
+                        while (violationMatcher.find()) {
+                            counts << violationMatcher.group(1).toInteger()
+                        }
+                        int expectedCountLines = env.SMOKE_VIEWPORT == 'both' ? 3 : 2
+                        def viewportCounts = counts.size() == expectedCountLines ? counts[0..-2] : []
+                        def totalViolations = counts.size() == expectedCountLines ? counts[-1] : null
+                        def mutationSummaryValid = (
+                            counts.size() == expectedCountLines &&
+                            viewportCounts.sum() == totalViolations
+                        )
+                        def runnerExitPath = "${env.PILOT_ARTIFACT_DIR}/runner-exit-code.txt"
+                        def runnerExitCode = fileExists(runnerExitPath) ? readFile(file: runnerExitPath).trim() : 'UNKNOWN'
+                        def mutationSummary = [
+                            build_number: env.BUILD_NUMBER,
+                            site: env.SMOKE_SITE,
+                            viewport: env.SMOKE_VIEWPORT,
+                            checkout_sha: env.CHECKED_OUT_SHA,
+                            results_path: env.CURRENT_RESULTS_PATH,
+                            runner_exit_code: runnerExitCode,
+                            per_viewport_violation_counts: viewportCounts,
+                            violation_count: totalViolations,
+                            status: mutationSummaryValid && totalViolations == 0 ? 'PASS' : 'FAIL'
+                        ]
+                        writeFile(
+                            file: "${env.PILOT_ARTIFACT_DIR}/mutation-guard-summary.json",
+                            text: JsonOutput.prettyPrint(JsonOutput.toJson(mutationSummary)) + '\n'
+                        )
+                        if (!mutationSummaryValid) {
+                            error('Readonly Mutation Guard summary is missing or inconsistent')
+                        }
+                        if (totalViolations != 0) {
+                            error('Readonly Mutation Guard reported a violation')
+                        }
+
+                    }
+                }
+            }
+        }
+
+        stage('Result Validation') {
+            steps {
+                catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+                    script {
+                        if (env.READONLY_PROCESS_STARTED != 'true' || !env.CURRENT_RESULTS_PATH) {
+                            error('Readonly Runner produced no verifiable current-run results.json')
+                        }
+
+                        int schemaExitCode
+                        if (isUnix()) {
+                            schemaExitCode = sh(
+                                returnStatus: true,
+                                script: ".venv/bin/python scripts/validate_result_schema.py --suite website_smoke_readonly_v1 --results \"${env.CURRENT_RESULTS_PATH}\""
+                            )
+                        } else {
+                            schemaExitCode = bat(
+                                returnStatus: true,
+                                script: ".venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_readonly_v1 --results \"${env.CURRENT_RESULTS_PATH}\""
+                            )
+                        }
+                        if (schemaExitCode != 0) {
+                            error('Result Schema Validation failed for the current Run')
+                        }
+
+                        def runnerExitPath = "${env.PILOT_ARTIFACT_DIR}/runner-exit-code.txt"
+                        if (!fileExists(runnerExitPath)) {
+                            error('Readonly Runner exit code record is missing')
+                        }
+                        def runnerExitCode = readFile(file: runnerExitPath).trim()
+                        if (runnerExitCode != '0') {
+                            error('Readonly Runner reported business or framework failures')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Artifact Archive') {
+            when {
+                expression { env.SECRET_GATE_PASSED == 'true' }
+            }
+            steps {
+                script {
+                    env.ARTIFACT_ARCHIVE_ATTEMPTED = 'true'
+                }
+                archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                if (env.SECRET_GATE_PASSED == 'true' && env.ARTIFACT_ARCHIVE_ATTEMPTED != 'true') {
+                    env.ARTIFACT_ARCHIVE_ATTEMPTED = 'true'
+                    archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
+                } else if (env.SECRET_GATE_PASSED != 'true') {
+                    echo('Artifact archival skipped because the Secret Leakage Check did not pass')
+                }
+            }
+        }
+    }
+}
