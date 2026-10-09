@@ -85,6 +85,50 @@ def _color_markup(
     """
 
 
+def _color_options_markup(options: list[dict], *, hidden: bool = False) -> str:
+    inputs = []
+    for index, option in enumerate(options):
+        option_id = f"color-{index}"
+        value = option["value"]
+        checked = " checked" if option.get("checked") else ""
+        disabled = " disabled" if option.get("disabled") else ""
+        hidden_attr = " hidden" if hidden else ""
+        inputs.append(
+            f'<label for="{option_id}">{value}</label>'
+            f'<input id="{option_id}" type="radio" name="Color" '
+            f'value="{value}"{hidden_attr}{checked}{disabled}>'
+        )
+    return f"""
+        <form id="purchase">
+          <h1 id="title">Synthetic Product</h1>
+          <div id="colors">{"".join(inputs)}</div>
+          <button id="atc" type="button">Add to cart</button>
+        </form>
+        <script>
+          window.colorClickCounts = new Map();
+          document.querySelectorAll('#colors input[type="radio"]').forEach((input) => {{
+            window.colorClickCounts.set(input.value, 0);
+            input.addEventListener('click', () => {{
+              window.colorClickCounts.set(input.value, window.colorClickCounts.get(input.value) + 1);
+            }});
+          }});
+        </script>
+    """
+
+
+def _color_product(page, options: list[dict], *, hidden: bool = False) -> ProductPage:
+    page.set_content(_color_options_markup(options, hidden=hidden))
+    return ProductPage(
+        page,
+        _product_config(color_control={"strategy": "associated_label"}),
+        "desktop",
+    )
+
+
+def _color_click_count(page, value: str) -> int:
+    return page.evaluate("value => window.colorClickCounts.get(value)", value)
+
+
 def _size_markup(*, disabled: str = "disabled", aria_disabled: str = "") -> str:
     return f"""
         <form id="purchase">
@@ -198,3 +242,133 @@ def test_hidden_radio_without_control_is_unavailable(page) -> None:
     assert product.available_color_count() == 0
     with pytest.raises(RuntimeError, match="No available color"):
         product.first_available_color()
+
+
+def test_unique_selected_available_color_is_accepted(page) -> None:
+    product = _color_product(page, [{"value": "As Pic", "checked": True}])
+
+    assert product.available_color_count() == 1
+    assert product.first_available_color() == "As Pic"
+    assert product.select_color() == "As Pic"
+    assert product.get_selected_color() == "As Pic"
+    assert page.locator("#color-0").is_checked()
+    assert not page.locator("#color-0").is_disabled()
+    assert _color_click_count(page, "As Pic") == 0
+
+
+def test_unique_unselected_available_color_is_selected(page) -> None:
+    product = _color_product(page, [{"value": "Ivory"}])
+
+    assert product.first_available_color() == "Ivory"
+    assert product.select_color() == "Ivory"
+    assert product.get_selected_color() == "Ivory"
+    assert _color_click_count(page, "Ivory") == 1
+
+
+def test_multiple_colors_prefer_an_unselected_available_color(page) -> None:
+    product = _color_product(
+        page,
+        [
+            {"value": "Blue", "checked": True},
+            {"value": "Rose"},
+        ],
+    )
+
+    assert product.first_available_color() == "Rose"
+    assert product.select_color() == "Rose"
+    assert product.get_selected_color() == "Rose"
+    assert _color_click_count(page, "Blue") == 0
+    assert _color_click_count(page, "Rose") == 1
+
+
+def test_partially_disabled_colors_are_excluded_from_auto_selection(page) -> None:
+    product = _color_product(
+        page,
+        [
+            {"value": "Unavailable", "disabled": True},
+            {"value": "Mauve", "checked": True},
+            {"value": "Navy"},
+        ],
+    )
+
+    assert product.available_color_count() == 2
+    assert product.first_available_color() == "Navy"
+    assert product.select_color() == "Navy"
+    assert product.get_selected_color() == "Navy"
+    assert _color_click_count(page, "Unavailable") == 0
+    assert _color_click_count(page, "Navy") == 1
+
+
+def test_all_disabled_colors_fail_closed(page) -> None:
+    product = _color_product(
+        page,
+        [
+            {"value": "Blue", "disabled": True},
+            {"value": "Rose", "disabled": True},
+        ],
+    )
+
+    assert product.available_color_count() == 0
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.first_available_color()
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.select_color()
+
+
+def test_missing_colors_fail_closed(page) -> None:
+    product = _color_product(page, [])
+
+    assert product.available_color_count() == 0
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.first_available_color()
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.select_color()
+
+
+def test_checked_but_disabled_color_is_not_available(page) -> None:
+    product = _color_product(
+        page, [{"value": "As Pic", "checked": True, "disabled": True}]
+    )
+
+    assert product.get_selected_color() == "As Pic"
+    assert product.available_color_count() == 0
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.first_available_color()
+    with pytest.raises(RuntimeError, match="No available color"):
+        product.select_color()
+    with pytest.raises(LookupError, match="Color option not found: As Pic"):
+        product.select_color("As Pic")
+
+
+def test_hidden_radio_with_visible_label_remains_selectable(page) -> None:
+    product = _color_product(page, [{"value": "As Pic"}], hidden=True)
+
+    assert product.available_color_count() == 1
+    assert product.select_color() == "As Pic"
+    assert page.locator("#color-0").is_checked()
+    assert product.get_selected_color() == "As Pic"
+    assert _color_click_count(page, "As Pic") == 1
+
+
+def test_explicitly_selected_color_is_not_clicked_again(page) -> None:
+    product = _color_product(page, [{"value": "Red", "checked": True}])
+
+    assert product.select_color("Red") == "Red"
+    assert product.get_selected_color() == "Red"
+    assert _color_click_count(page, "Red") == 0
+
+
+def test_selection_return_value_matches_final_checked_color(page) -> None:
+    product = _color_product(
+        page,
+        [
+            {"value": "Dusty Pink"},
+            {"value": "Lilac"},
+        ],
+    )
+
+    selected = product.select_color()
+
+    assert selected == "Dusty Pink"
+    assert product.get_selected_color() == selected
+    assert _color_click_count(page, selected) == 1

@@ -760,11 +760,15 @@ class ProductPage(BasePage):
         raise LookupError(missing_msg)
 
     def first_available_color(self) -> str:
-        """返回第一个可见可用且当前未选中的颜色选项值。"""
-        for v, radio in self.available_options(
+        """返回第一个未选中的可用颜色，或已选中的可用颜色。"""
+        available = self.available_options(
             self.color_options(), self._color_option_control_config()
-        ):
+        )
+        for v, radio in available:
             if not radio.is_checked():
+                return v
+        for v, radio in available:
+            if radio.is_checked():
                 return v
         raise RuntimeError("No available color option to select")
 
@@ -778,16 +782,19 @@ class ProductPage(BasePage):
     def select_color(self, value: Optional[str] = None) -> str:
         """选择颜色。
 
-        未指定 value 时自动选择第一个可见可用且未选中的颜色。
+        未指定 value 时优先选择第一个可见可用且未选中的颜色；
+        若没有未选项，则接受当前已选且可用的颜色。
         主题可以把点击绑定在 radio 的可见关联控件上；隐藏 radio
         不直接执行 check/JS click，而是走真实用户控件点击，
-        再用 radio.checked 验证选择生效。
+        再用 radio.checked 验证选择生效。已选且可用时不重复点击。
         """
         if value is None:
             value = self.first_available_color()
         radio = self._find_option(
             self.color_options(), value, f"Color option not found: {value}"
         )
+        if radio.is_checked():
+            return value
         control = self._option_control(radio, self._color_option_control_config())
         if control is None:
             raise RuntimeError(f"Color option has no actionable control: {value}")
