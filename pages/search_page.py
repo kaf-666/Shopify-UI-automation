@@ -21,6 +21,11 @@ from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 from pages.home_page import HomePage
+from utils.search_url_diagnostics import (
+    DIAGNOSTIC_ATTRIBUTE,
+    build_search_home_url_diagnostic,
+    collection_failure_diagnostic,
+)
 
 
 class SearchSessionReloaded(Exception):
@@ -41,7 +46,7 @@ class SearchPage(BasePage):
     PAGE_NAME = "search"
 
     # ------------------------------------------------------------------ 打开
-    def open_from_home(self) -> None:
+    def open_from_home(self, *, case_id: str | None = None, browser: str | None = None) -> None:
         """从首页打开 Search：打开首页 -> 点击 Trigger -> 等待容器打开。
 
         站点抗干扰：首页加载后短暂停留再交互（与人工浏览节奏一致，
@@ -50,7 +55,7 @@ class SearchPage(BasePage):
         home = HomePage(self.page, self.site_config, self.viewport)
         home.open()
         home.wait_core_ready()
-        self.ensure_search_session_open(home)
+        self.ensure_search_session_open(home, case_id=case_id, browser=browser)
 
     # ------------------------------------------------------------------ 控件
     def container(self):
@@ -105,7 +110,13 @@ class SearchPage(BasePage):
         inp.click()
         inp.fill(query)
 
-    def submit_query(self, query: Optional[str] = None) -> bool:
+    def submit_query(
+        self,
+        query: Optional[str] = None,
+        *,
+        case_id: str | None = None,
+        browser: str | None = None,
+    ) -> bool:
         """真实 UI 提交：suggest 就绪后按 Enter（主题提交路径）。
 
         站点行为（真实探测）：
@@ -163,7 +174,7 @@ class SearchPage(BasePage):
                         pass
             if attempt == 0:
                 recovered = True
-                self._reopen_session()
+                self._reopen_session(case_id=case_id, browser=browser)
                 if query is not None:
                     self.fill_query(query)
                 continue
@@ -202,12 +213,43 @@ class SearchPage(BasePage):
             return False
 
     def ensure_search_session_open(
-        self, home: Optional[HomePage] = None, timeout_ms: int = 10_000
+        self,
+        home: Optional[HomePage] = None,
+        timeout_ms: int = 10_000,
+        *,
+        case_id: str | None = None,
+        browser: str | None = None,
     ) -> None:
         """确保首页 Search 会话已打开，且输入框可见、可用、可编辑。"""
         home = home or HomePage(self.page, self.site_config, self.viewport)
-        if self.page.url.rstrip("/") != home.base_url().rstrip("/"):
-            raise RuntimeError("Search session can only be opened from Home")
+        actual_url = self.page.url
+        configured_url = home.base_url()
+        if actual_url.rstrip("/") != configured_url.rstrip("/"):
+            error = RuntimeError("Search session can only be opened from Home")
+            try:
+                diagnostic = build_search_home_url_diagnostic(
+                    page=self.page,
+                    actual_url=actual_url,
+                    configured_url=configured_url,
+                    viewport=self.viewport,
+                    browser=browser or self._browser_name(),
+                    case_id=case_id,
+                    home=home,
+                )
+            except Exception as diagnostic_error:  # diagnostic must not mask the assertion
+                diagnostic = collection_failure_diagnostic(
+                    viewport=self.viewport,
+                    browser=browser or self._browser_name(),
+                    case_id=case_id,
+                    error=diagnostic_error,
+                )
+            try:
+                setattr(error, DIAGNOSTIC_ATTRIBUTE, diagnostic)
+            except Exception:
+                # Built-in RuntimeError supports attributes on CPython, but keep
+                # the original assertion authoritative on any runtime variance.
+                pass
+            raise error
         if not self.is_open():
             expect(home.search_trigger()).to_be_visible(timeout=timeout_ms)
             home.open_search()
@@ -217,7 +259,17 @@ class SearchPage(BasePage):
         expect(inp).to_be_enabled(timeout=timeout_ms)
         expect(inp).to_be_editable(timeout=timeout_ms)
 
-    def _reopen_session(self) -> None:
+    def _browser_name(self) -> str | None:
+        """Read the browser engine name without touching browser state."""
+        try:
+            context = getattr(self.page, "context", None)
+            browser = getattr(context, "browser", None)
+            browser_type = getattr(browser, "browser_type", None)
+            return getattr(browser_type, "name", None)
+        except Exception:
+            return None
+
+    def _reopen_session(self, *, case_id: str | None = None, browser: str | None = None) -> None:
         """重建 Search 会话：等待页面稳定后回到首页并打开 Search。
 
         站点抗干扰：会话中断后站点自身导航可能仍在进行，
@@ -232,7 +284,7 @@ class SearchPage(BasePage):
                 self.page.evaluate("document.readyState")
                 if self.page.url.rstrip("/") != base:
                     home.open()
-                self.ensure_search_session_open(home)
+                self.ensure_search_session_open(home, case_id=case_id, browser=browser)
                 return
             except Exception:
                 self.page.wait_for_timeout(500)

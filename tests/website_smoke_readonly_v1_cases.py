@@ -25,6 +25,10 @@ from pages.search_page import SearchPage, SearchResultNavigationError
 from utils.result import CaseResult, iso_now
 from utils.readonly_mutation_guard import ReadonlyMutationGuard
 from utils.screenshots import capture_case_failure
+from utils.search_url_diagnostics import (
+    find_search_home_url_diagnostic,
+    write_search_home_url_diagnostic,
+)
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -161,13 +165,33 @@ class WebsiteSmokeReadonlyV1Runner:
             return False
         return any(marker in body or marker in title for marker in CF_CHALLENGE_MARKERS)
 
-    def _capture_evidence(self, case_id: str) -> tuple[List[dict], Optional[str]]:
+    def _capture_evidence(
+        self, case_id: str, error: BaseException | None = None
+    ) -> tuple[List[dict], Optional[str]]:
         if self.artifact_dir is None:
             return [], None
+        evidence: List[dict] = []
+        capture_errors: List[str] = []
         rel = capture_case_failure(self.page, self.artifact_dir, self.viewport, case_id)
         if rel is not None:
-            return [{"type": "screenshot", "path": rel}], None
-        return [], "screenshot capture failed"
+            evidence.append({"type": "screenshot", "path": rel})
+        else:
+            capture_errors.append("screenshot capture failed")
+
+        try:
+            search_diagnostic = find_search_home_url_diagnostic(error)
+            if search_diagnostic is not None:
+                diag_rel = write_search_home_url_diagnostic(
+                    search_diagnostic, self.artifact_dir, self.viewport, case_id
+                )
+                evidence.append({"type": "search_home_url_diagnostic", "path": diag_rel})
+        except Exception as exc:
+            capture_errors.append(
+                f"search URL diagnostic capture failed: {type(exc).__name__}"
+            )
+        if evidence:
+            return evidence, None
+        return [], "; ".join(capture_errors) or "evidence capture failed"
 
     def _adopt_business_page(self, actual_page) -> None:
         """切换到真实业务 Page；旧 Page 保留到本次 Context 结束。"""
@@ -225,7 +249,7 @@ class WebsiteSmokeReadonlyV1Runner:
             except FlowError as exc:
                 cf_now = self._cf_detected()
                 duration = int((time.perf_counter() - started) * 1000)
-                evidence, ev_error = self._capture_evidence(case_id)
+                evidence, ev_error = self._capture_evidence(case_id, exc)
                 category = "PAGE_LOAD_FAILURE" if cf_now else exc.category
                 detail = (
                     f"AUTOMATION_ACCESS: Cloudflare Stability Failure | {exc}"
@@ -247,7 +271,7 @@ class WebsiteSmokeReadonlyV1Runner:
             except Exception as exc:  # noqa: BLE001 — case isolation is the contract
                 cf_now = self._cf_detected()
                 duration = int((time.perf_counter() - started) * 1000)
-                evidence, ev_error = self._capture_evidence(case_id)
+                evidence, ev_error = self._capture_evidence(case_id, exc)
                 category = "PAGE_LOAD_FAILURE" if cf_now else type(exc).__name__
                 detail = (
                     f"AUTOMATION_ACCESS: Cloudflare Stability Failure | "
@@ -478,7 +502,9 @@ class WebsiteSmokeReadonlyV1Runner:
         """Search Entry Available：首页打开 Search，输入框可用。"""
         search = SearchPage(self.page, self.site_config, self.viewport)
         try:
-            search.open_from_home()
+            search.open_from_home(
+                case_id="RSMOKE-SEARCH-01", browser=self.runtime.engine
+            )
             if not search.is_open():
                 raise FlowError("SEARCH_UI_NOT_OPENED", "search container not open")
             search.validate_input_usable()
@@ -498,7 +524,11 @@ class WebsiteSmokeReadonlyV1Runner:
         """Search Returns Products：提交正向查询并确认结果。"""
         search = self.state["search"]
         try:
-            recovered = search.submit_query(POSITIVE_QUERY)
+            recovered = search.submit_query(
+                POSITIVE_QUERY,
+                case_id="RSMOKE-SEARCH-02",
+                browser=self.runtime.engine,
+            )
             search.wait_predictive_ready()
         except Exception as exc:
             if self._cf_detected():

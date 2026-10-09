@@ -50,6 +50,10 @@ from pages.navigation import NavigationPage
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from pages.search_page import SearchPage, SearchResultNavigationError
 from utils.result import CaseResult, iso_now, write_results_json
+from utils.search_url_diagnostics import (
+    find_search_home_url_diagnostic,
+    write_search_home_url_diagnostic,
+)
 from utils.screenshots import capture_case_failure
 
 STATUS_PASS = "PASS"
@@ -126,7 +130,9 @@ class WebsiteSmokeV1Runner:
             return False
         return any(m in body or m in title for m in CF_CHALLENGE_MARKERS)
 
-    def _capture_evidence(self, case_id: str) -> tuple[List[dict], Optional[str]]:
+    def _capture_evidence(
+        self, case_id: str, error: BaseException | None = None
+    ) -> tuple[List[dict], Optional[str]]:
         if self.artifact_dir is None:
             return [], None
         evidence: List[dict] = []
@@ -136,6 +142,18 @@ class WebsiteSmokeV1Runner:
             evidence.append({"type": "screenshot", "path": rel})
         else:
             capture_errors.append("screenshot capture failed")
+
+        try:
+            search_diagnostic = find_search_home_url_diagnostic(error)
+            if search_diagnostic is not None:
+                diag_rel = write_search_home_url_diagnostic(
+                    search_diagnostic, self.artifact_dir, self.viewport, case_id
+                )
+                evidence.append({"type": "search_home_url_diagnostic", "path": diag_rel})
+        except Exception as exc:
+            capture_errors.append(
+                f"search URL diagnostic capture failed: {type(exc).__name__}"
+            )
 
         if case_id == "WSMOKE-CART-03":
             drawer = self.flow.state.get("drawer")
@@ -263,7 +281,7 @@ class WebsiteSmokeV1Runner:
             if cf_now:
                 self._mark_cf()
             duration = int((time.perf_counter() - started) * 1000)
-            evidence, ev_error = self._capture_evidence(case_id)
+            evidence, ev_error = self._capture_evidence(case_id, exc)
             category = "PAGE_LOAD_FAILURE" if cf_now else exc.category
             detail = (
                 f"AUTOMATION_ACCESS: Cloudflare Stability Failure | {exc}" if cf_now else str(exc)
@@ -278,7 +296,7 @@ class WebsiteSmokeV1Runner:
             if cf_now:
                 self._mark_cf()
             duration = int((time.perf_counter() - started) * 1000)
-            evidence, ev_error = self._capture_evidence(case_id)
+            evidence, ev_error = self._capture_evidence(case_id, exc)
             category = "PAGE_LOAD_FAILURE" if cf_now else type(exc).__name__
             detail = (
                 f"AUTOMATION_ACCESS: Cloudflare Stability Failure | {type(exc).__name__}: {exc}"
@@ -534,7 +552,9 @@ class WebsiteSmokeV1Runner:
         """Search Entry Available：首页进入 Search，容器打开且输入框可用。"""
         search = SearchPage(self.page, self.site_config, self.viewport)
         try:
-            search.open_from_home()
+            search.open_from_home(
+                case_id="WSMOKE-SEARCH-01", browser=self.runtime.engine
+            )
         except Exception as exc:
             if self._cf_detected():
                 self._mark_cf()
@@ -556,7 +576,11 @@ class WebsiteSmokeV1Runner:
         """Search Returns Products：提交 dress，结果数量 > 0 且 URL query 正确。"""
         search = self.state["search"]
         try:
-            recovered = search.submit_query(POSITIVE_QUERY)
+            recovered = search.submit_query(
+                POSITIVE_QUERY,
+                case_id="WSMOKE-SEARCH-02",
+                browser=self.runtime.engine,
+            )
         except Exception as exc:
             if self._cf_detected():
                 self._mark_cf()
