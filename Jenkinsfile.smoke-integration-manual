@@ -12,6 +12,88 @@ def signedRequestBindings(String site) {
     }
 }
 
+def currentGateProofText(String gateName, String resultsPath = '') {
+    def checkoutSha = "${env.CHECKED_OUT_SHA ?: ''}"
+    def expectedSha = "${params.EXPECTED_SHA ?: ''}"
+    def currentBuildNumber = "${currentBuild.number}"
+
+    if (!(checkoutSha ==~ /[0-9a-f]{40}/) || checkoutSha != expectedSha) {
+        return null
+    }
+    if (!(currentBuildNumber ==~ /[0-9]+/) || "${env.BUILD_NUMBER ?: ''}" != currentBuildNumber) {
+        return null
+    }
+
+    return JsonOutput.toJson([
+        gate: gateName,
+        gate_status: 'PASS',
+        exit_code: 0,
+        build_number: currentBuildNumber,
+        workspace: pwd(),
+        checkout_sha: checkoutSha,
+        results_path: resultsPath
+    ]) + '\n'
+}
+
+def currentGateProofFile(String gateName) {
+    def safeGateName = gateName.toLowerCase().replaceAll(/[^a-z0-9-]/, '-')
+    return ".smoke-integration-${safeGateName}-${currentBuild.number}.json"
+}
+
+def writeCurrentGateProof(String gateName, String resultsPath = '') {
+    def proofFile = currentGateProofFile(gateName)
+    def expectedProof = currentGateProofText(gateName, resultsPath)
+    if (expectedProof == null) {
+        error('Cannot create a current-build gate proof')
+    }
+    writeFile(file: proofFile, text: expectedProof)
+}
+
+def currentGateProofMatches(String gateName, String resultsPath = '') {
+    try {
+        def proofFile = currentGateProofFile(gateName)
+        def expectedProof = currentGateProofText(gateName, resultsPath)
+        return expectedProof != null && fileExists(proofFile) && readFile(file: proofFile) == expectedProof
+    } catch (Exception ignored) {
+        return false
+    }
+}
+
+def currentRunResultsFileAvailable() {
+    try {
+        def site = "${env.SMOKE_SITE ?: ''}"
+        def resultsPath = "${env.CURRENT_RESULTS_PATH ?: ''}"
+        if (!(site in ['mondressy', 'lavetir'])) {
+            return false
+        }
+
+        def expectedPrefix = "artifacts/website-smoke-readonly-v1/${site}/"
+        return resultsPath.startsWith(expectedPrefix) &&
+            resultsPath.endsWith('/results.json') &&
+            fileExists(resultsPath)
+    } catch (Exception ignored) {
+        return false
+    }
+}
+
+def currentRunArchiveEligible() {
+    try {
+        if (!currentRunResultsFileAvailable()) {
+            return false
+        }
+
+        def resultsPath = "${env.CURRENT_RESULTS_PATH}"
+        return currentGateProofMatches(
+            'SECRET_LEAKAGE_CHECK'
+        ) && currentGateProofMatches(
+            'RESULT_SCHEMA_VALIDATION',
+            resultsPath
+        )
+    } catch (Exception ignored) {
+        return false
+    }
+}
+
 pipeline {
     agent any
 
@@ -20,7 +102,6 @@ pipeline {
         disableConcurrentBuilds()
         timestamps()
         timeout(time: 60, unit: 'MINUTES')
-        buildDiscarder(logRotator(numToKeepStr: '10', artifactNumToKeepStr: '10'))
     }
 
     parameters {
@@ -45,11 +126,29 @@ pipeline {
         stage('Manual Trigger Gate') {
             steps {
                 script {
-                    def manualCause = currentBuild.getBuildCauses().any { cause ->
-                        cause._class == 'hudson.model.Cause$UserIdCause'
+                    def causes
+                    try {
+                        causes = currentBuild.getBuildCauses()
+                    } catch (Exception ignored) {
+                        error('Manual Trigger Gate could not verify build cause data')
                     }
-                    if (!manualCause) {
-                        error('Manual Trigger Gate requires Jenkins UserIdCause')
+
+                    if (!(causes instanceof List) || causes.isEmpty()) {
+                        error('Manual Trigger Gate requires a non-empty verified cause list')
+                    }
+
+                    def allCausesAreApprovedManual = false
+                    try {
+                        allCausesAreApprovedManual = causes.every { cause ->
+                            cause instanceof Map &&
+                                cause.get('_class') instanceof String &&
+                                cause.get('_class') == 'hudson.model.Cause$UserIdCause'
+                        }
+                    } catch (Exception ignored) {
+                        error('Manual Trigger Gate could not verify build cause data')
+                    }
+                    if (!allCausesAreApprovedManual) {
+                        error('Manual Trigger Gate accepts only verified UserIdCause entries')
                     }
                     if (!(params.SITE in ['mondressy', 'lavetir'])) {
                         error('SITE is outside the readonly pilot allowlist')
@@ -62,7 +161,6 @@ pipeline {
                     env.SMOKE_VIEWPORT = params.SMOKE_VIEWPORT
                     env.PILOT_ARTIFACT_DIR = "artifacts/smoke-integration-manual/${env.BUILD_NUMBER}"
                     env.READONLY_PROCESS_STARTED = 'false'
-                    env.SECRET_GATE_PASSED = 'false'
                 }
             }
         }
@@ -297,10 +395,11 @@ pipeline {
                                 )
                             }
                             if (gateExitCode != 0) {
-                                env.SECRET_GATE_PASSED = 'false'
                                 error('Secret Leakage Check failed')
                             }
-                            env.SECRET_GATE_PASSED = 'true'
+                            writeCurrentGateProof(
+                                'SECRET_LEAKAGE_CHECK'
+                            )
                         }
                     }
                 }
@@ -465,6 +564,14 @@ print(matches[0])
                             error('Result Schema Validation failed for the current Run')
                         }
 
+                        if (!currentRunResultsFileAvailable()) {
+                            error('Current Readonly results.json is missing after schema validation')
+                        }
+                        writeCurrentGateProof(
+                            'RESULT_SCHEMA_VALIDATION',
+                            env.CURRENT_RESULTS_PATH
+                        )
+
                         def runnerExitPath = "${env.PILOT_ARTIFACT_DIR}/runner-exit-code.txt"
                         if (!fileExists(runnerExitPath)) {
                             error('Readonly Runner exit code record is missing')
@@ -480,13 +587,19 @@ print(matches[0])
 
         stage('Artifact Archive') {
             when {
-                expression { env.SECRET_GATE_PASSED == 'true' }
+                expression { env.READONLY_PROCESS_STARTED == 'true' }
             }
             steps {
                 script {
-                    env.ARTIFACT_ARCHIVE_ATTEMPTED = 'true'
+                    if (!currentRunArchiveEligible()) {
+                        error('Current-build Secret Gate and results proofs are required for archiving')
+                    }
+                    writeCurrentGateProof(
+                        'ARTIFACT_ARCHIVE_ATTEMPT',
+                        env.CURRENT_RESULTS_PATH
+                    )
                 }
-                archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
+                archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: false, fingerprint: false
             }
         }
     }
@@ -494,11 +607,20 @@ print(matches[0])
     post {
         always {
             script {
-                if (env.SECRET_GATE_PASSED == 'true' && env.ARTIFACT_ARCHIVE_ATTEMPTED != 'true') {
-                    env.ARTIFACT_ARCHIVE_ATTEMPTED = 'true'
-                    archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
-                } else if (env.SECRET_GATE_PASSED != 'true') {
-                    echo('Artifact archival skipped because the Secret Leakage Check did not pass')
+                if (!currentRunArchiveEligible()) {
+                    if (env.READONLY_PROCESS_STARTED == 'true') {
+                        error('Artifact archival requires current-build Secret Gate and results proofs')
+                    }
+                    echo('Artifact archival skipped because the Readonly Runner did not start')
+                } else if (!currentGateProofMatches(
+                    'ARTIFACT_ARCHIVE_ATTEMPT',
+                    env.CURRENT_RESULTS_PATH
+                )) {
+                    writeCurrentGateProof(
+                        'ARTIFACT_ARCHIVE_ATTEMPT',
+                        env.CURRENT_RESULTS_PATH
+                    )
+                    archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: false, fingerprint: false
                 }
             }
         }

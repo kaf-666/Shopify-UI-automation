@@ -10,11 +10,89 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE = PROJECT_ROOT / "Jenkinsfile.smoke-integration-manual"
 READONLY_RUNNER = PROJECT_ROOT / "scripts" / "run_website_smoke_readonly_v1.py"
 FULL_RUNNER = "scripts/run_website_smoke_v1.py"
+USER_CAUSE = "hudson.model.Cause$UserIdCause"
+
+
+def _manual_causes_are_allowed(causes: object, *, read_failed: bool = False) -> bool:
+    """Offline model of the Pipeline's fail-closed cause-set contract."""
+    if read_failed or not isinstance(causes, list) or not causes:
+        return False
+    try:
+        return all(
+            isinstance(cause, dict)
+            and isinstance(cause.get("_class"), str)
+            and cause.get("_class") == USER_CAUSE
+            for cause in causes
+        )
+    except Exception:
+        return False
+
+
+def _proof_matches(
+    proof: dict[str, str] | None,
+    *,
+    gate: str,
+    build_number: str,
+    workspace: str,
+    checkout_sha: str,
+    expected_sha: str,
+    results_path: str = "",
+) -> bool:
+    """Model exact, current-build proof matching used by the Groovy Pipeline."""
+    if proof is None or not re.fullmatch(r"[0-9a-f]{40}", checkout_sha):
+        return False
+    if checkout_sha != expected_sha:
+        return False
+    expected = {
+        "gate": gate,
+        "build_number": build_number,
+        "workspace": workspace,
+        "checkout_sha": checkout_sha,
+        "results_path": results_path,
+    }
+    return proof == expected
+
+
+def _archive_allowed(
+    *,
+    secret_proof: dict[str, str] | None,
+    results_proof: dict[str, str] | None,
+    build_number: str,
+    workspace: str,
+    checkout_sha: str,
+    expected_sha: str,
+    results_path: str | None,
+    result_file_exists: bool,
+    inherited_secret_gate_passed: bool = False,
+) -> bool:
+    # Deliberately ignore the inherited Boolean; only current-build proof files count.
+    if not results_path or not result_file_exists:
+        return False
+    return _proof_matches(
+        secret_proof,
+        gate="SECRET_LEAKAGE_CHECK",
+        build_number=build_number,
+        workspace=workspace,
+        checkout_sha=checkout_sha,
+        expected_sha=expected_sha,
+    ) and _proof_matches(
+        results_proof,
+        gate="RESULT_SCHEMA_VALIDATION",
+        build_number=build_number,
+        workspace=workspace,
+        checkout_sha=checkout_sha,
+        expected_sha=expected_sha,
+        results_path=results_path,
+    )
+
+
 def pipeline_text() -> str:
     return PIPELINE.read_text(encoding="utf-8")
 
@@ -36,6 +114,55 @@ def test_pipeline_is_manual_only_and_requires_a_real_manual_cause() -> None:
         r"retry\s*\(",
     ):
         assert re.search(pattern, content, flags=re.IGNORECASE) is None
+
+
+def test_manual_trigger_gate_requires_every_cause_to_be_exactly_user_id_cause() -> None:
+    content = pipeline_text()
+    assert "causes = currentBuild.getBuildCauses()" in content
+    assert "causes instanceof List" in content
+    assert "causes.isEmpty()" in content
+    assert "causes.every" in content
+    assert "cause instanceof Map" in content
+    assert "cause.get('_class')" in content
+    assert "cause.get('_class') == 'hudson.model.Cause$UserIdCause'" in content
+    assert "currentBuild.getBuildCauses().any" not in content
+    assert "toString().contains('UserIdCause')" not in content
+    assert "could not verify build cause data" in content
+
+
+@pytest.mark.parametrize(
+    ("causes", "read_failed", "expected"),
+    [
+        ([{"_class": USER_CAUSE}], False, True),
+        ([{"_class": USER_CAUSE}, {"_class": "hudson.triggers.TimerTrigger$TimerTriggerCause"}], False, False),
+        ([{"_class": USER_CAUSE}, {"_class": "hudson.triggers.SCMTrigger$SCMTriggerCause"}], False, False),
+        ([{"_class": USER_CAUSE}, {"_class": "hudson.model.Cause$UpstreamCause"}], False, False),
+        ([{"_class": USER_CAUSE}, {"_class": "org.jenkinsci.plugins.workflow.cps.replay.ReplayCause"}], False, False),
+        ([{"_class": USER_CAUSE}, {"_class": "com.sonyericsson.rebuild.RebuildCause"}], False, False),
+        ([{"_class": "hudson.triggers.TimerTrigger$TimerTriggerCause"}], False, False),
+        ([], False, False),
+        ([{"_class": "example.UnknownCause"}], False, False),
+        ([{}], False, False),
+        ([{"_class": "org.jenkinsci.plugins.workflow.cps.replay.ReplayCause"}], False, False),
+        ([{"_class": "com.sonyericsson.rebuild.RebuildCause"}], False, False),
+        (None, True, False),
+    ],
+)
+def test_manual_cause_contract_matrix(
+    causes: object, read_failed: bool, expected: bool
+) -> None:
+    assert _manual_causes_are_allowed(causes, read_failed=read_failed) is expected
+
+
+def test_pipeline_does_not_set_or_shorten_build_retention() -> None:
+    content = pipeline_text()
+
+    # The Pipeline does not set a retention policy or claim that removing one
+    # preserves a property's prior Declarative-managed value on a reused Job.
+    assert "buildDiscarder" not in content
+    assert "logRotator" not in content
+    assert re.search(r"\b(?:numToKeepStr|artifactNumToKeepStr)\b", content) is None
+    assert re.search(r"\bproperties\s*\(", content) is None
 
 
 def test_pipeline_allowlists_sites_viewports_and_exact_checkout_sha() -> None:
@@ -96,17 +223,170 @@ def test_readonly_guard_secret_gate_and_artifact_boundaries_are_preserved() -> N
     assert "Readonly Mutation Violations:" in content
     assert "totalViolations != 0" in content
     assert "scripts/validate_ci_safe_outputs.py" in content
-    assert "env.SECRET_GATE_PASSED = 'true'" in content
-    assert "env.SECRET_GATE_PASSED == 'true'" in content
-    assert "Artifact archival skipped because the Secret Leakage Check did not pass" in content
-    assert "archiveArtifacts artifacts: 'artifacts/**'" in content
-    assert "env.ARTIFACT_ARCHIVE_ATTEMPTED = 'true'" in content
-    assert "env.ARTIFACT_ARCHIVE_ATTEMPTED != 'true'" in content
+    assert "currentGateProofFile(gateName)" in content
+    assert '".smoke-integration-${safeGateName}-${currentBuild.number}.json"' in content
+    assert "'SECRET_LEAKAGE_CHECK'" in content
+    assert "'RESULT_SCHEMA_VALIDATION'" in content
+    assert "currentRunArchiveEligible()" in content
+    assert "Artifact archival skipped because the Readonly Runner did not start" in content
+    assert "Artifact archival requires current-build Secret Gate and results proofs" in content
+    assert "archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: false" in content
+    assert "SECRET_GATE_PASSED" not in content
+    assert "ARTIFACT_ARCHIVE_ATTEMPTED" not in content
+    assert "'ARTIFACT_ARCHIVE_ATTEMPT'" in content
     assert "post {" in content
     assert "stage('Artifact Archive')" in content
     # Search failure sidecars are conditional evidence; ordinary PASS needs no sidecar.
     assert "search-url-diagnostic" not in content
     assert "search_url_diagnostic" not in content
+
+
+def test_archive_proof_is_bound_to_build_workspace_and_checked_out_sha() -> None:
+    content = pipeline_text()
+
+    assert "currentBuild.number" in content
+    assert "pwd()" in content
+    assert "env.CHECKED_OUT_SHA" in content
+    assert "params.EXPECTED_SHA" in content
+    assert "fileExists(proofFile)" in content
+    assert "readFile(file: proofFile) == expectedProof" in content
+    assert "currentRunResultsFileAvailable()" in content
+    assert "currentGateProofFile(gateName)" in content
+    assert "safeGateName" in content
+    assert "currentBuild.number}" in content
+    assert "env.SECRET_GATE_PASSED" not in content
+
+    proof_builder = content[content.index("def currentGateProofText"):content.index("def writeCurrentGateProof")]
+    for field in (
+        "gate_status: 'PASS'",
+        "exit_code: 0",
+        "build_number: currentBuildNumber",
+        "workspace: pwd()",
+        "checkout_sha: checkoutSha",
+        "results_path: resultsPath",
+    ):
+        assert field in proof_builder
+    assert "signature" not in proof_builder.lower()
+    assert "cookie" not in proof_builder.lower()
+
+
+def test_secret_and_schema_proofs_are_written_only_after_their_gates_pass() -> None:
+    content = pipeline_text()
+    secret_stage = content[content.index("stage('Secret Leakage Check')"):content.index("stage('Identify Current Run Results')")]
+    result_stage = content[content.index("stage('Result Validation')"):content.index("stage('Artifact Archive')")]
+
+    assert secret_stage.index("if (gateExitCode != 0)") < secret_stage.index("writeCurrentGateProof(")
+    assert result_stage.index("if (schemaExitCode != 0)") < result_stage.index("writeCurrentGateProof(")
+    assert result_stage.index("currentRunResultsFileAvailable()") < result_stage.index("writeCurrentGateProof(")
+    assert "Current Readonly results.json is missing after schema validation" in result_stage
+    # The schema-success proof is written before the runner's business exit code
+    # is raised, preserving evidence for a genuine Readonly failure.
+    assert result_stage.index("writeCurrentGateProof(") < result_stage.index("runnerExitCode != '0'")
+    archive_stage = content[content.index("stage('Artifact Archive')"):content.index("post {")]
+    assert "expression { env.READONLY_PROCESS_STARTED == 'true' }" in archive_stage
+    assert "currentRunArchiveEligible()" in archive_stage
+
+
+def test_archive_proof_scenarios_fail_closed_and_preserve_runner_failure_evidence() -> None:
+    sha = "a" * 40
+    workspace = r"C:\jenkins\workspace\pilot"
+    results_path = "artifacts/website-smoke-readonly-v1/mondressy/run-1/results.json"
+    secret = {
+        "gate": "SECRET_LEAKAGE_CHECK",
+        "build_number": "7",
+        "workspace": workspace,
+        "checkout_sha": sha,
+        "results_path": "",
+    }
+    result_proof = {
+        "gate": "RESULT_SCHEMA_VALIDATION",
+        "build_number": "7",
+        "workspace": workspace,
+        "checkout_sha": sha,
+        "results_path": results_path,
+    }
+
+    # Manual, parameter, checkout, SHA, or Secret Gate failures cannot produce
+    # a pair of current-build proofs. Each condition must therefore skip archive.
+    early_or_secret_failures = (
+        ("Manual Gate FAIL", None, None, results_path, True, sha, sha),
+        ("parameter Gate FAIL", None, None, results_path, True, sha, sha),
+        ("Checkout FAIL", None, None, results_path, True, "", sha),
+        ("SHA mismatch", {**secret, "checkout_sha": "b" * 40}, result_proof, results_path, True, "b" * 40, sha),
+        ("Secret Gate NOT_RUN", None, result_proof, results_path, True, sha, sha),
+        ("Secret Gate FAIL", None, result_proof, results_path, True, sha, sha),
+    )
+    for _condition, secret_proof, results_gate_proof, candidate_path, result_exists, current_sha, expected_sha in early_or_secret_failures:
+        assert not _archive_allowed(
+            secret_proof=secret_proof,
+            results_proof=results_gate_proof,
+            build_number="7",
+            workspace=workspace,
+            checkout_sha=current_sha,
+            expected_sha=expected_sha,
+            results_path=candidate_path,
+            result_file_exists=result_exists,
+        )
+
+    # An inherited SECRET_GATE_PASSED=true has no bearing on proof validation.
+    assert not _archive_allowed(
+        secret_proof=None,
+        results_proof=result_proof,
+        build_number="7",
+        workspace=workspace,
+        checkout_sha=sha,
+        expected_sha=sha,
+        results_path=results_path,
+        result_file_exists=True,
+        inherited_secret_gate_passed=True,
+    )
+
+    # Stale build/workspace markers and missing current result all fail closed.
+    assert not _archive_allowed(
+        secret_proof={**secret, "build_number": "6"},
+        results_proof=result_proof,
+        build_number="7",
+        workspace=workspace,
+        checkout_sha=sha,
+        expected_sha=sha,
+        results_path=results_path,
+        result_file_exists=True,
+    )
+    assert not _archive_allowed(
+        secret_proof={**secret, "workspace": r"C:\jenkins\workspace\old"},
+        results_proof=result_proof,
+        build_number="7",
+        workspace=workspace,
+        checkout_sha=sha,
+        expected_sha=sha,
+        results_path=results_path,
+        result_file_exists=True,
+    )
+    assert not _archive_allowed(
+        secret_proof=secret,
+        results_proof=result_proof,
+        build_number="7",
+        workspace=workspace,
+        checkout_sha=sha,
+        expected_sha=sha,
+        results_path=results_path,
+        result_file_exists=False,
+    )
+
+    # A failing Readonly runner still has archivable evidence when the Secret
+    # Gate and current result/schema contracts have succeeded.
+    runner_exit_code = 1
+    assert runner_exit_code != 0
+    assert _archive_allowed(
+        secret_proof=secret,
+        results_proof=result_proof,
+        build_number="7",
+        workspace=workspace,
+        checkout_sha=sha,
+        expected_sha=sha,
+        results_path=results_path,
+        result_file_exists=True,
+    )
 
 
 def test_runner_failure_is_kept_as_failure_while_later_gates_run() -> None:
@@ -143,7 +423,7 @@ def test_current_run_results_are_required_and_schema_validation_is_explicit() ->
     assert "len(matches) != 1" in content
     assert "CURRENT_RESULTS_PATH" in content
     assert "scripts/validate_result_schema.py --suite website_smoke_readonly_v1 --results" in content
-    assert "allowEmptyArchive: true" in content  # Only early failures can reach archive without runner results.
+    assert "allowEmptyArchive: false" in content
 
 
 def test_embedded_results_gate_selects_a_real_current_run_file(tmp_path: Path) -> None:
