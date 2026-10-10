@@ -393,6 +393,40 @@ class TransactionalMutationPolicy:
             "scope_name": scope_name,
         }
 
+    def authorize_api_cleanup(self, url: str, method: str) -> str:
+        """Authorize and audit the fixed infrastructure API cleanup endpoint.
+
+        APIRequestContext does not pass through context.route. Callers must
+        obtain this decision before sending a request and disable redirects.
+        Browser mutation classification and its allowlist remain unchanged.
+        """
+        from utils.cart_cleanup import storefront_origin
+
+        allowed = False
+        try:
+            expected = storefront_origin(self.canonical_origin) + "/cart/clear.js"
+            allowed = (
+                self._attached and method == "POST" and url == expected
+                and self._classify(url, method) == self.EXPECTED
+            )
+        except Exception:
+            pass
+        category = self.EXPECTED if allowed else self.UNEXPECTED
+        fingerprint = safe_endpoint_fingerprint(
+            url, method, self.first_party_hosts, canonical_origin=self.canonical_origin
+        )
+        # Rejected caller-controlled paths are never copied into the audit.
+        fingerprint["sanitized_path"] = "/cart/clear.js" if allowed else "/{redacted}"
+        reason = "API_CLEANUP_EXPECTED_MUTATION" if allowed else "PATH_NOT_ALLOWED"
+        self._events.append({
+            "classification": category, **fingerprint,
+            "path": fingerprint["sanitized_path"], "reason": reason,
+            "classification_reason": reason, **self._scope,
+            "blocked": not allowed, "recognized": allowed,
+            "allowed_to_send": allowed, "gating_failure": not allowed,
+        })
+        return "API_CLEANUP_EXPECTED_MUTATION" if allowed else "UNEXPECTED_MUTATION"
+
     def _handle_route(self, route) -> None:
         request = route.request
         url = getattr(request, "url", "")

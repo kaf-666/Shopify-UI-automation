@@ -114,6 +114,7 @@ def run_viewport(
     mutation_policy: Optional[TransactionalMutationPolicy] = None,
 ) -> Tuple[List, WebsiteSmokeV1Runner, dict]:
     runtime = create_browser(viewport, site_name=site_name)
+    runner = None
     try:
         if traffic_reduction is not None:
             # Signed Request was registered by create_browser(). This handler
@@ -144,6 +145,33 @@ def run_viewport(
         results = runner.run_all()
         return results, runner, runtime_meta
     finally:
+        if runner is not None:
+            # Finish and persist the cleanup audit while its session and
+            # mutation policy still exist, including early/fatal runner exits.
+            try:
+                runner.finalize_cleanup()
+            except Exception:
+                from utils.cart_cleanup import cleanup_report
+                report = cleanup_report("browse", viewport)
+                report["safe_error_code"] = "FINAL_CLEANUP_UNAVAILABLE"
+                runner.cleanup_reports = [r for r in runner.cleanup_reports if r["journey"] != "browse"]
+                runner.cleanup_reports.append(report)
+                runner.cleanup_status = ("FAIL" if any(r["status"] == "FAIL" for r in runner.cleanup_reports)
+                                         else "BLOCKED")
+                runner.cleanup_error = "FINAL_CLEANUP_UNAVAILABLE"
+            try:
+                relative = f"{viewport}/cart-cleanup.json"
+                path = artifact_dir / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                write_results_json({
+                    "viewport": viewport, "status": runner.cleanup_status,
+                    "journeys": runner.cleanup_reports,
+                    "mutation_summary": runner.mutation_summary(),
+                }, path)
+                runner.cleanup_artifact = relative
+            except Exception:
+                runner.cleanup_status = "FAIL"
+                runner.cleanup_error = "CLEANUP_AUDIT_WRITE_FAILED"
         if mutation_policy is not None:
             mutation_policy.detach()
         close_browser(runtime)
@@ -409,6 +437,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                     cleanup={
                         "status": runner.cleanup_status,
                         "detail": runner.cleanup_error or runner.cleanup_detail,
+                        "journeys": runner.cleanup_reports,
+                        "audit_path": runner.cleanup_artifact,
                     },
                     cases=results,
                     mutation_summary=mutation_summary,

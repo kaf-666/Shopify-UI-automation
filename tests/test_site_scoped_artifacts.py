@@ -24,6 +24,8 @@ def _full_runner() -> SimpleNamespace:
         pre_clean_error=None,
         cleanup_error=None,
         cleanup_detail="PASS",
+        cleanup_reports=[],
+        cleanup_artifact=None,
         search_recovery_used=False,
         cf_interruption=False,
     )

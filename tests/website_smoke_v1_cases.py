@@ -36,6 +36,8 @@
 
 from __future__ import annotations
 
+from utils.cart_cleanup import cleanup_report
+
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -83,15 +85,20 @@ class WebsiteSmokeV1Runner:
         self.page = runtime.page
         self.site_config = site_config
         self.flow = ShoppingFlow(
-            runtime.page, site_config, viewport, access_policy=runtime.access_policy
+            runtime.page, site_config, viewport, access_policy=runtime.access_policy,
+            api_request=getattr(getattr(runtime, "context", None), "request", None),
+            mutation_policy=mutation_policy
         )
         self.state: dict = {}
         self.results: Dict[str, CaseResult] = {}
         self.pre_clean_status = "PASS"
         self.pre_clean_error = ""
-        self.cleanup_status = "PASS"
+        self.cleanup_status = "BLOCKED"
         self.cleanup_error = ""
-        self.cleanup_detail = "context_disposed_after_checkout"
+        self.cleanup_detail = "FINAL_CLEANUP_NOT_RUN"
+        self.cleanup_reports = []
+        self.cleanup_artifact = None
+        self._final_cleanup_done = False
         self.search_recovery_used = False
         self.cf_interruption = False
         self._extra_pages: List = []
@@ -320,36 +327,54 @@ class WebsiteSmokeV1Runner:
             self._run_case(case_id, name, deps, fn)
 
     def _journey_cleanup(self) -> None:
-        """Journey 结束后兜底清理：抽屉有残留时 API 清空（不影响 Case 结论）。"""
+        """Keep every cleanup outcome; no earlier PASS can hide a later failure."""
         self._traffic_observe(
-            "set_scope",
-            self.viewport,
-            journey="infrastructure",
-            case_id=None,
+            "set_scope", self.viewport, journey="infrastructure", case_id=None,
             scope_name=f"{self._journey.upper()}_JOURNEY_CLEANUP",
         )
+        self.flow.last_cleanup_report = None
         try:
-            quantity = self.flow.cart_state_quantity(0)
-        except FlowError as exc:
-            self.cleanup_status = "BLOCKED" if exc.category == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
-            self.cleanup_error = f"{exc.category}: {exc}"
-            return
-        except Exception as exc:
-            self.cleanup_status = "FAIL"
-            self.cleanup_error = f"{type(exc).__name__}: {exc}"
-            return
+            if self._mutation_policy is not None:
+                self._mutation_policy.set_scope(
+                    self.viewport, "infrastructure", None,
+                    scope_name=f"{self._journey.upper()}_JOURNEY_CLEANUP",
+                )
+            self.flow.cleanup_cart(journey=self._journey)
+        except Exception:
+            # The flow stores a safe report before raising. Never expose the
+            # exception's request content, or overwrite a business Case result.
+            pass
+        report = self.flow.last_cleanup_report
+        if report is None:
+            report = cleanup_report(self._journey, self.viewport)
+            report["safe_error_code"] = "CLEANUP_REPORT_UNAVAILABLE"
+        self.cleanup_reports.append(dict(report))
+        self._update_cleanup_summary()
 
-        # cart_state_quantity() 的 None 只表示没有第一个 item；不能把
-        # None 当作“有残留”而无条件 POST /cart/clear.js。
-        if quantity is None or quantity == "0":
-            self.cleanup_detail = "cart_already_empty_no_clear_request"
+    def _update_cleanup_summary(self) -> None:
+        statuses = [item["status"] for item in self.cleanup_reports]
+        self.cleanup_status = ("FAIL" if "FAIL" in statuses else
+                               "BLOCKED" if "BLOCKED" in statuses else "PASS")
+        self.cleanup_error = "; ".join(
+            item["safe_error_code"] for item in self.cleanup_reports
+            if item["status"] != "PASS"
+        )
+        self.cleanup_detail = "CART_VERIFIED_EMPTY" if self.cleanup_status == "PASS" else "CLEANUP_UNVERIFIED"
+
+    def finalize_cleanup(self) -> None:
+        """Idempotent final cleanup, also called by CLI before policy detach."""
+        if self._final_cleanup_done:
             return
+        self._final_cleanup_done = True
+        self._journey = "browse"
         try:
-            self.flow.cleanup_cart()
-            self.cleanup_detail = "api_clear_after_verified_residual_item"
-        except Exception as exc:
-            self.cleanup_status = "BLOCKED" if getattr(exc, "category", "") == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
-            self.cleanup_error = f"journey cleanup: {type(exc).__name__}: {exc}"
+            self._journey_cleanup()
+        except Exception:
+            report = cleanup_report("browse", self.viewport)
+            report["safe_error_code"] = "FINAL_CLEANUP_UNAVAILABLE"
+            self.cleanup_reports = [r for r in self.cleanup_reports if r["journey"] != "browse"]
+            self.cleanup_reports.append(report)
+            self._update_cleanup_summary()
 
     # ------------------------------------------------------------ 一致性辅助
     def _capture_selected_variant(self) -> None:
@@ -434,20 +459,27 @@ class WebsiteSmokeV1Runner:
             scope_name="PRE_CLEAN",
         )
         try:
+            if self._mutation_policy is not None:
+                self._mutation_policy.set_scope(self.viewport, "infrastructure", None, "PRE_CLEAN")
             self.flow.pre_clean_cart()
         except FlowError as exc:
             self.pre_clean_status = "BLOCKED" if exc.category == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
             self.pre_clean_error = f"{exc.category}: {exc}"
             self._block_all_cases("pre-clean")
             return list(self.results.values())
+        finally:
+            if self.flow.last_cleanup_report is not None:
+                self.cleanup_reports.append(dict(self.flow.last_cleanup_report))
 
-        # 执行顺序：Direct -> Search -> Browse（Browse 最后进入 Checkout 后销毁 Context）
-        self._run_journey("direct")
-        self._journey_cleanup()
-        self._run_journey("search")
-        self._journey_cleanup()
-        self._run_journey("browse")
-        # Browse 结束于 Checkout；无需返回购物车清理（Context 由 CLI dispose）
+        # Keep business order; final cleanup runs even if journey execution raises.
+        try:
+            self._run_journey("direct")
+            self._journey_cleanup()
+            self._run_journey("search")
+            self._journey_cleanup()
+            self._run_journey("browse")
+        finally:
+            self.finalize_cleanup()
 
         # 关闭多余旧页面，保持单 active business page
         for p in self._extra_pages:

@@ -16,6 +16,7 @@ from typing import Optional
 from pages.cart_drawer import CartDrawer
 from pages.collection_page import CollectionPage
 from pages.product_page import ProductPage
+from utils.cart_cleanup import (CartStateUnavailable, cleanup_cart_session, read_cart, storefront_origin)
 from utils.config import resolve_url
 from utils.errors import sanitize_message
 
@@ -51,11 +52,15 @@ def sanitized_cart_line(item: object) -> dict:
 class ShoppingFlow:
     """购物车抽屉购物流程：以可复用步骤组织完整购物链，供 run() 与 Smoke Cases 共用。"""
 
-    def __init__(self, page, site_config: dict, viewport: str, access_policy=None):
+    def __init__(self, page, site_config: dict, viewport: str, access_policy=None,
+                 api_request=None, mutation_policy=None):
         self.page = page
         self.site_config = site_config
         self.viewport = viewport
         self.access_policy = access_policy
+        self.api_request = api_request
+        self.mutation_policy = mutation_policy
+        self.last_cleanup_report = None
         self.base = resolve_url(site_config.get("base_url"), "site.base_url")
         self.state: dict = {}
 
@@ -64,105 +69,43 @@ class ShoppingFlow:
         policy = self.access_policy
         return policy.request_headers(url) if policy is not None else {}
 
+    def _session_api(self):
+        # The context's API session remains usable when its page is closed.
+        return self.api_request if self.api_request is not None else self.page.request
+
     def pre_clean_cart(self) -> None:
-        """测试前置条件（不属于被测行为）。
+        self.cleanup_cart(journey="pre_clean")
+        self.state["pre_clean_item_count"] = self.last_cleanup_report["cart_item_count"]
 
-        最小化 API 调用：先 GET /cart.js 检查，仅当购物车确实有商品时才 POST /cart/clear.js。
-        """
-        cart_url = f"{self.base}/cart.js"
+    def cleanup_cart(self, *, journey="cleanup") -> None:
+        """Verify the complete cart, authorize clear if needed, then re-verify."""
         try:
-            resp = self.page.request.get(
-                cart_url,
-                headers=self._api_headers(cart_url),
-                timeout=15000,
-            )
-        except Exception as exc:
-            raise FlowError("CLEANUP_FAILURE", f"/cart.js check failed: {exc}") from exc
-        if resp.status == 429:
-            # 无法确认购物车状态时绝不能默认它是干净的。
-            raise FlowError(
-                "CART_PRECONDITION_UNVERIFIED",
-                "/cart.js returned HTTP 429; cart state is unverified",
-            )
-        if resp.status != 200:
-            raise FlowError("CLEANUP_FAILURE", f"/cart.js check returned HTTP {resp.status}")
-        try:
-            cart = resp.json()
-        except Exception as exc:
-            raise FlowError("CART_PRECONDITION_UNVERIFIED", "/cart.js response was not valid JSON") from exc
-        item_count = int(cart.get("item_count", 0) or 0)
-        self.state["pre_clean_item_count"] = item_count
-        if item_count == 0:
-            return  # 购物车已干净，零副作用
-        self.page.wait_for_timeout(5000)  # 拉长 API 调用间隔
-        resp = self.page.request.post(
-            f"{self.base}/cart/clear.js",
-            headers=self._api_headers(f"{self.base}/cart/clear.js"),
-            timeout=15000,
+            api = self._session_api()
+        except Exception:
+            api = None
+        report = cleanup_cart_session(
+            api, self.base, self._api_headers, self.mutation_policy,
+            journey=journey, viewport=self.viewport,
         )
-        if resp.status != 200:
-            raise FlowError(
-                "CLEANUP_FAILURE", f"pre-clean /cart/clear.js returned HTTP {resp.status}"
-            )
-
-    def cleanup_cart(self) -> None:
-        """仅用于异常后的兜底清理；正常路径通过 UI Remove 完成。"""
-        # 先验证状态，避免空购物车再次 POST /cart/clear.js。
-        try:
-            current = self._cart_json()
-        except FlowError:
-            raise
-        if int(current.get("item_count", 0) or 0) == 0:
-            return
-
-        for attempt in range(2):
-            try:
-                self.page.wait_for_timeout(3000)
-                resp = self.page.request.post(
-                    f"{self.base}/cart/clear.js",
-                    headers=self._api_headers(f"{self.base}/cart/clear.js"),
-                    timeout=15000,
-                )
-                if resp.status == 200:
-                    return
-            except Exception:
-                pass
-            if attempt == 0:
-                self.page.wait_for_timeout(10000)  # 429 限流窗口短暂等待后重试一次
-        raise FlowError("CLEANUP_FAILURE", "/cart/clear.js failed twice during cleanup")
+        self.last_cleanup_report = report
+        if report["status"] != "PASS":
+            category = ("CART_PRECONDITION_UNVERIFIED"
+                        if report["status"] == "BLOCKED" else "CLEANUP_FAILURE")
+            raise FlowError(category, report["safe_error_code"])
 
     def _cart_json(self) -> dict:
-        self.page.wait_for_timeout(3000)  # 拉长 cart API 调用间隔
-        cart_url = f"{self.base}/cart.js"
-        resp = self.page.request.get(
-            cart_url,
-            headers=self._api_headers(cart_url),
-            timeout=15000,
-        )
-        self.state["_last_cart_read_diagnostic"] = {"cart_js_http_status": resp.status}
-        if resp.status == 429:
-            raise FlowError(
-                "CART_PRECONDITION_UNVERIFIED",
-                "/cart.js returned HTTP 429; cart state is unverified",
-            )
-        if resp.status != 200:
-            raise FlowError(
-                "CART_STATE_VERIFICATION_UNAVAILABLE",
-                f"/cart.js returned HTTP {resp.status}",
-            )
         try:
-            data = resp.json()
-        except Exception as exc:
-            raise FlowError("CART_STATE_VERIFICATION_UNAVAILABLE", "/cart.js response was not valid JSON") from exc
-        if isinstance(data, dict):
-            items = data.get("items") or []
-            self.state["_last_cart_read_diagnostic"].update(
-                {
-                    "item_count": data.get("item_count"),
-                    "items_length": len(items),
-                    "items_0": sanitized_cart_line(items[0]) if items else {},
-                }
-            )
+            data = read_cart(self._session_api(), storefront_origin(self.base), self._api_headers)
+        except CartStateUnavailable as exc:
+            raise FlowError("CART_PRECONDITION_UNVERIFIED", str(exc)) from None
+        except Exception:
+            raise FlowError("CART_PRECONDITION_UNVERIFIED", "CART_READ_UNAVAILABLE") from None
+        items = data["items"]
+        self.state["_last_cart_read_diagnostic"] = {
+            "cart_js_http_status": 200, "item_count": data["item_count"],
+            "items_length": len(items),
+            "items_0": sanitized_cart_line(items[0]) if items else {},
+        }
         return data
 
     def cart_state_quantity(self, index: int = 0) -> Optional[str]:

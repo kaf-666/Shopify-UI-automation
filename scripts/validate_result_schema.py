@@ -210,6 +210,7 @@ def _validate_mutation_summary(value: object) -> bool:
                     valid_row = isinstance(row.get("query_present"), bool) or row.get("query_present") == "UNKNOWN"
                 if valid_row and "reason" in row:
                     valid_row = row.get("reason") in {
+                        "API_CLEANUP_EXPECTED_MUTATION",
                         "EXPECTED_CART_MUTATION",
                         "EXPECTED_TRANSACTIONAL_MUTATION",
                         "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
@@ -397,6 +398,81 @@ def _validate_evidence(
     return ok_all
 
 
+def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> bool:
+    """Validate the opt-in Full cleanup extension; old reports stay compatible."""
+    if "journeys" not in value and "audit_path" not in value:
+        return True
+    from utils.cart_cleanup import SAFE_CLEANUP_ERRORS, cleanup_report
+
+    reports = value.get("journeys")
+    valid = isinstance(reports, list) and bool(reports)
+    if not valid:
+        return check(False, "Full cleanup audit records")
+    journeys = []
+    for report in reports:
+        shape = isinstance(report, dict) and set(report) == set(cleanup_report("", ""))
+        valid = shape and valid
+        if not shape:
+            continue
+        text_fields = ("journey", "viewport", "status", "precheck_status",
+                       "api_policy_decision", "clear_response_category",
+                       "postcheck_status", "safe_error_code")
+        if not all(isinstance(report[key], str) for key in text_fields):
+            valid = False
+            continue
+        count = report["cart_item_count"]
+        valid = all((
+            report["journey"] in {"pre_clean", "direct", "search", "browse"},
+            report["viewport"] == viewport,
+            report["status"] in VALID_BASE_STATUSES,
+            report["precheck_status"] in {"PASS", "BLOCKED"},
+            count is None or (type(count) is int and count >= 0),
+            type(report["clear_requested"]) is bool,
+            report["api_policy_decision"] in {"NOT_REQUESTED", "DENIED", "API_CLEANUP_EXPECTED_MUTATION"},
+            report["clear_response_category"] in {"NOT_REQUESTED", "HTTP_200", "HTTP_OR_REDIRECT_FAILURE", "REQUEST_FAILED"},
+            report["postcheck_status"] in {"NOT_RUN", "PASS", "FAIL", "BLOCKED"},
+            report["safe_error_code"] in SAFE_CLEANUP_ERRORS,
+        )) and valid
+        if report["status"] == "PASS":
+            valid = (report["precheck_status"] == "PASS" and report["postcheck_status"] == "PASS"
+                     and report["safe_error_code"] == "NONE" and type(count) is int) and valid
+        else:
+            valid = report["safe_error_code"] != "NONE" and valid
+        if report["clear_requested"]:
+            valid = (report["api_policy_decision"] == "API_CLEANUP_EXPECTED_MUTATION"
+                     and type(count) is int and count > 0) and valid
+            if report["status"] == "PASS":
+                valid = report["clear_response_category"] == "HTTP_200" and valid
+        elif report["status"] == "PASS":
+            valid = (count == 0) and valid
+        if not report["clear_requested"]:
+            valid = report["clear_response_category"] == "NOT_REQUESTED" and valid
+        journeys.append(report["journey"])
+    valid = len(journeys) == len(set(journeys)) and valid
+    expected_status = ("FAIL" if any(r.get("status") == "FAIL" for r in reports if isinstance(r, dict))
+                       else "BLOCKED" if any(r.get("status") == "BLOCKED" for r in reports if isinstance(r, dict))
+                       else "PASS")
+    path = value.get("audit_path")
+    if path is None:
+        valid = (value.get("status") == "FAIL" and value.get("detail") == "CLEANUP_AUDIT_WRITE_FAILED") and valid
+    else:
+        valid = value.get("status") == expected_status and valid
+        if value.get("status") == "PASS":
+            valid = journeys == ["pre_clean", "direct", "search", "browse"] and valid
+        if path != f"{viewport}/cart-cleanup.json":
+            valid = False
+        else:
+            try:
+                resolved = (run_dir / path).resolve(strict=True)
+                valid = resolved.is_relative_to(run_dir.resolve(strict=True)) and resolved.is_file() and valid
+                if valid:
+                    audit = json.loads(resolved.read_text(encoding="utf-8"))
+                    valid = audit.get("viewport") == viewport and audit.get("status") == value.get("status") and audit.get("journeys") == reports
+            except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
+                valid = False
+    return check(valid, "Full cleanup audit contract")
+
+
 def validate_json(run_dir: Path, suite: str) -> bool:
     result_path = run_dir / "results.json"
     ok_all = True
@@ -437,6 +513,8 @@ def validate_json(run_dir: Path, suite: str) -> bool:
             ok_all = check(isinstance(value, dict), f"{vp_name} {base_name} mapping") and ok_all
             if isinstance(value, dict):
                 ok_all = check(value.get("status") in VALID_BASE_STATUSES, f"{vp_name} {base_name} status") and ok_all
+                if suite == "website_smoke_v1" and base_name == "cleanup":
+                    ok_all = _validate_cleanup_audit(run_dir, vp_name, value) and ok_all
 
         cases = vp.get("cases", [])
         all_cases.extend(cases)
