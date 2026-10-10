@@ -1,0 +1,2 @@
+# Keep the legacy pipeline byte-stable on Windows checkouts.
+/Jenkinsfile text eol=lf

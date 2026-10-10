@@ -1,15 +1,12 @@
-"""购物车抽屉页面对象。
+"""配置驱动的购物车抽屉页面对象。
 
-封装 Mondressy 购物车抽屉（#CartDrawer，Brooklyn 主题）的定位、
-状态读取和基础 UI 操作，包括抽屉状态、商品信息、数量读取、
-商品移除与空购物车状态判断。
+封装抽屉状态、商品信息、数量读取、商品移除与空购物车状态判断。
 
 业务断言由上层 Flow / Case Runner 负责，本模块仅提供页面操作能力。
 """
 
 from __future__ import annotations
 
-import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -32,16 +29,11 @@ class CartDrawer(BasePage):
         return self.locator("drawer").first
 
     def is_open(self) -> bool:
-        d = self.drawer()
-        if d.count() == 0:
-            return False
-        # 关闭状态的抽屉通过 translateX(100%) 移出视口，is_visible() 会误报；
-        # 主题通过 drawer--is-open class 标记真实打开状态，以此为准。
-        return "drawer--is-open" in (d.get_attribute("class") or "")
+        return self.locator("drawer_open").count() > 0
 
     def wait_open(self, timeout: int = DRAWER_OPEN_TIMEOUT_MS) -> None:
-        """等待抽屉真正打开（以 drawer--is-open class 为准）。"""
-        expect(self.drawer()).to_have_class(re.compile(r"(?:^|\s)drawer--is-open(?:\s|$)"), timeout=timeout)
+        """等待配置的抽屉打开状态。"""
+        expect(self.locator("drawer_open").first).to_be_visible(timeout=timeout)
 
     # ----------------------------------------------------------------- 商品项
     def cart_items(self):
@@ -151,28 +143,109 @@ class CartDrawer(BasePage):
                 identity["product_url_variant_id"] = variant
         return identity
 
-    @staticmethod
-    def _parse_label_value(text: str, key: str | None = None) -> str:
+    @classmethod
+    def _parse_label_value(cls, text: str, key: str | None = None) -> str:
         """解析 "Color: Pink" / "Size:\\n 2" → "Pink" / "2"（精确取值，不做模糊匹配）。"""
         import re
 
         if key is not None:
-            # One metadata container may contain both fields. Match exact
-            # labels and stop at the next label instead of joining its value.
-            if not re.match(r"^\s*(?:color|size)\s*:", text, re.IGNORECASE):
-                return ""
-            labels = list(re.finditer(r"(?<!\S)(color|size)\s*:\s*", text, re.IGNORECASE))
-            indices = [i for i, label in enumerate(labels)
-                       if label.group(1).casefold() == key.casefold()]
-            if len(indices) != 1:
-                return ""
-            index = indices[0]
-            end = labels[index + 1].start() if index + 1 < len(labels) else len(text)
-            return " ".join(text[labels[index].end():end].split())
+            return cls._extract_labeled_property(text, key)
         m = re.match(r"^\s*([^:]+):\s*(.*)$", text, re.DOTALL)
         if not m:
             return ""
         return " ".join(m.group(2).split())
+
+    @staticmethod
+    def _following_property_label(text: str):
+        """Return the start of a property label suffix before the next colon.
+
+        Shopify themes commonly render several ``Label: Value`` pairs in one
+        text node. Known variant labels are matched exactly; a title-cased
+        multi-word suffix also lets unrelated properties (for example,
+        ``Rush Order``) terminate the preceding value.
+        """
+        import re
+
+        value = text.rstrip()
+        # Treat Custom Size as a distinct property boundary. It must stop a
+        # preceding value without satisfying a request for the variant Size.
+        custom_size = re.search(r"(?<!\S)Custom\s+Size\s*$", value, re.IGNORECASE)
+        if custom_size:
+            return custom_size.start()
+        for label in ("Colour", "Color", "Size"):
+            match = re.search(
+                rf"(?<!\S)(?P<label>{re.escape(label)})\s*$",
+                value,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.start("label")
+
+        match = re.search(
+            r"(?<!\S)(?P<label>[A-Z][a-z][A-Za-z0-9'’&/.-]*(?:\s+[A-Z][a-z][A-Za-z0-9'’&/.-]*)*)\s*$",
+            value,
+        )
+        return match.start("label") if match else None
+
+    @classmethod
+    def _extract_labeled_property(cls, text: str, key: str) -> str:
+        """Extract one exact property from combined or separate label/value text.
+
+        The first property must occupy the full text before its colon. Later
+        properties are recognized as exact known-label suffixes immediately
+        before their colon, so ``Custom Size`` and ``Color Family`` do not
+        satisfy a request for ``Size`` or ``Color``.
+        """
+        import re
+
+        aliases = {
+            "color": {"color", "colour"},
+            "colour": {"color", "colour"},
+            "size": {"size"},
+        }
+        wanted = aliases.get(" ".join(str(key).split()).casefold(), {
+            " ".join(str(key).split()).casefold()
+        })
+        parts = str(text or "").split(":")
+        # Subsequent labels are meaningful only when the metadata begins with
+        # a variant-related label. This prevents prose such as
+        # ``Description: Multi Color Size: XL`` from becoming variant data,
+        # while still allowing a later exact field after ``Custom Size`` or
+        # ``Color Family`` metadata.
+        has_variant_label_hint = bool(
+            re.search(r"(?<!\w)(?:color|colour|size)(?!\w)", parts[0], re.IGNORECASE)
+        )
+
+        def matches(label: str) -> bool:
+            return " ".join(label.split()).casefold() in wanted
+
+        values = []
+        for index in range(len(parts) - 1):
+            segment = parts[index]
+            if index == 0:
+                # At the beginning, compare the complete label, not a suffix
+                # embedded in a longer name such as ``Custom Size``.
+                if not matches(segment):
+                    continue
+            else:
+                if not has_variant_label_hint:
+                    continue
+                label_start = cls._following_property_label(segment)
+                if label_start is None or not matches(segment[label_start:]):
+                    continue
+                # ``Custom Size: M`` is a separate property, not a variant
+                # Size. A following explicit ``Size:`` remains eligible.
+                prefix = segment[:label_start]
+                if "size" in wanted and re.search(r"\bcustom\s*$", prefix, re.IGNORECASE):
+                    continue
+
+            value = parts[index + 1]
+            if index + 2 < len(parts):
+                following_label_start = cls._following_property_label(value)
+                if following_label_start is not None:
+                    value = value[:following_label_start]
+            values.append(" ".join(re.sub(r"\s+", " ", value).split()))
+        return values[0] if len(values) == 1 else ""
 
     def _variant_part(self, item, key: str) -> str:
         """从商品行的变体元数据容器读取变体行文本。"""

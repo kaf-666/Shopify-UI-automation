@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from flows.shopping_flow import FlowError, ShoppingFlow, normalize, titles_match
+from flows.shopping_flow import FlowError, ShoppingFlow, normalize, product_match_basis
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from utils.result import CaseResult, iso_now
 from utils.screenshots import capture_case_failure
@@ -292,10 +292,21 @@ class DirectPdpCaseRunner:
         cart_title = self.flow.state["cart_title"]
         rendered = self.flow.state["pdp_title"]
         stored = self.state.get("pdp_title_stored", rendered)
-        product_ok = titles_match(rendered, cart_title) or titles_match(stored, cart_title)
-        title_note = ""
-        if not titles_match(rendered, cart_title) and titles_match(stored, cart_title):
-            title_note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+        product_basis = product_match_basis(
+            rendered,
+            cart_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+            cart_identity=self.flow.state.get("cart_identity"),
+            pdp_title_stored=stored,
+        )
+        product_ok = product_basis is not None
+        title_note = (
+            " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+            if product_basis == "STORED_TITLE"
+            else " product_identity=PRODUCT_PATH"
+            if product_basis == "PRODUCT_PATH"
+            else ""
+        )
         color_ok = normalize(self.flow.state["color"]) == normalize(
             self.flow.state["cart_color"]
         )

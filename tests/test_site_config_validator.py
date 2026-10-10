@@ -126,6 +126,23 @@ def test_capability_false_rejects_requested_suite_before_browser_start() -> None
     _assert_error(config, "SITE_CAPABILITY_UNSUPPORTED", suite=WEBSITE_SMOKE_V1)
 
 
+def test_full_validator_does_not_require_unused_checkout_observation_selectors() -> None:
+    config = _profile()
+    checkout = config["pages"]["checkout"]["selectors"]
+    checkout.pop("shipping_form")
+    checkout.pop("express")
+
+    _validate(config, suite=WEBSITE_SMOKE_V1)
+
+
+@pytest.mark.parametrize("field", ["root", "contact", "delivery", "email"])
+def test_full_validator_requires_checkout_selectors_consumed_by_runner(field: str) -> None:
+    config = _profile()
+    del config["pages"]["checkout"]["selectors"][field]
+
+    _assert_error(config, "MISSING_CAPABILITY_REQUIREMENT")
+
+
 def test_full_runner_rejects_an_unsupported_profile_before_artifact_or_browser_start(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(full_cli, "ARTIFACT_ROOT", tmp_path / "artifacts")
     monkeypatch.setattr(full_cli, "make_run_id", lambda: "unsupported-suite")

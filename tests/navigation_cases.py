@@ -25,6 +25,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 from flows.shopping_flow import FlowError
 from pages.collection_page import CollectionPage
@@ -164,9 +165,11 @@ class NavigationCaseRunner:
         except RuntimeError as exc:
             raise FlowError("NAVIGATION_TARGET_NOT_FOUND", str(exc)) from exc
         except TimeoutError as exc:
+            self.page = getattr(exc, "actual_page", None) or nav.page
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", str(exc)) from exc
+        self.page = nav.page
         target_path = nav.target_path()
-        if target_path not in url:
+        if urlparse(url).path != target_path:
             raise FlowError("NAVIGATION_COLLECTION_FAILURE", f"url={url[:120]} expected_path={target_path}")
         # Collection 页面主体已加载（商品列表有效性由 NAV-04 验证）；
         # URL pathname 先于渲染完成，等待网格真实可见（状态等待，不固定 sleep）。
@@ -189,11 +192,15 @@ class NavigationCaseRunner:
     def _case_nav04(self) -> str:
         """Collection Product List Available：商品网格与卡片真实可用（复用 CollectionPage）。"""
         coll = self.state["coll"]
+        try:
+            coll.wait_for_products_ready(0)
+        except Exception as exc:
+            raise FlowError("COLLECTION_PRODUCTS_NOT_AVAILABLE", f"products not ready: {exc}") from exc
         count = coll.product_count()
         if count <= 0:
             raise FlowError("COLLECTION_PRODUCTS_NOT_AVAILABLE", f"product_count={count}")
-        card = coll.product_cards().first
-        link = card.locator("a.grid-product__link").first
+        card = coll.visible_product_cards().first
+        link = coll.product_link(card)
         card_ok = bool(card.count() and card.is_visible())
         link_ok = bool(link.count() and link.is_visible() and link.is_enabled())
         if not (card_ok and link_ok):

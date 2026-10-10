@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
-from flows.shopping_flow import FlowError, ShoppingFlow, normalize, titles_match
+from flows.shopping_flow import FlowError, ShoppingFlow, normalize, product_match_basis
 from pages.cart_drawer import CartDrawer
 from pages.checkout_page import CheckoutPage
 from pages.collection_page import CollectionPage
@@ -62,7 +62,6 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
-POSITIVE_QUERY = "dress"
 
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 
@@ -87,6 +86,7 @@ class WebsiteSmokeV1Runner:
         self._context = getattr(runtime, "context", None)
         self._api_request = getattr(self._context, "request", None)
         self._mutation_policy = mutation_policy
+        self.positive_query = str(((site_config.get("pages") or {}).get("search") or {}).get("smoke_query") or "")
         self.flow = self._build_flow(self.page)
         self.state: dict = {}
         self.results: Dict[str, CaseResult] = {}
@@ -430,10 +430,21 @@ class WebsiteSmokeV1Runner:
         """
         rendered = self.flow.state["pdp_title"]
         cart_title = self.flow.state["cart_title"]
-        product_ok = titles_match(rendered, cart_title) or titles_match(stored_title, cart_title)
-        note = ""
-        if not titles_match(rendered, cart_title) and titles_match(stored_title, cart_title):
-            note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+        product_basis = product_match_basis(
+            rendered,
+            cart_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+            cart_identity=self.flow.state.get("cart_identity"),
+            pdp_title_stored=stored_title,
+        )
+        product_ok = product_basis is not None
+        note = (
+            " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+            if product_basis == "STORED_TITLE"
+            else " product_identity=PRODUCT_PATH"
+            if product_basis == "PRODUCT_PATH"
+            else ""
+        )
         color_ok = normalize(self.flow.state["color"]) == normalize(self.flow.state["cart_color"])
         size_ok = normalize(self.flow.state["size"]) == normalize(self.flow.state["cart_size"])
         qty_ok = int(self.flow.state["cart_qty"] or 0) == 1
@@ -645,11 +656,11 @@ class WebsiteSmokeV1Runner:
         return "search_mode=HYBRID_SEARCH container_open=True input_usable=True"
 
     def _c_search02(self) -> str:
-        """Search Returns Products：提交 dress，结果数量 > 0 且 URL query 正确。"""
+        """Search Returns Products：提交站点查询词并验证结果与 URL query。"""
         search = self.state["search"]
         try:
             recovered = search.submit_query(
-                POSITIVE_QUERY,
+                self.positive_query,
                 case_id="WSMOKE-SEARCH-02",
                 browser=self.runtime.engine,
             )
@@ -663,18 +674,18 @@ class WebsiteSmokeV1Runner:
             raise FlowError("SEARCH_SUBMIT_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         self.search_recovery_used = self.search_recovery_used or recovered
         search.wait_predictive_ready()
-        predictive = search.predictive_product_cards().count()
+        predictive = search.predictive_product_count()
         count = search.result_count()
         url_query = search.current_query()
         if count <= 0:
             raise FlowError("SEARCH_RESULTS_NOT_FOUND", f"result_count={count}")
-        if url_query != POSITIVE_QUERY:
+        if url_query != self.positive_query:
             raise FlowError(
                 "SEARCH_QUERY_STATE_MISMATCH",
-                f"url_q={url_query!r} expected={POSITIVE_QUERY!r}",
+                f"url_q={url_query!r} expected={self.positive_query!r}",
             )
         return (
-            f"query={POSITIVE_QUERY} result_count={count} "
+            f"query={self.positive_query} result_count={count} "
             f"predictive_products={predictive} recovery={recovered}"
         )
 
@@ -771,7 +782,10 @@ class WebsiteSmokeV1Runner:
         mode = nav.current_mode()
         try:
             url = nav.open_collection()
+            self._adopt_business_page(nav.page)
         except Exception as exc:
+            if getattr(exc, "actual_page", None) is not None:
+                self._adopt_business_page(exc.actual_page)
             if self._cf_detected():
                 self._mark_cf()
                 raise FlowError(
@@ -935,15 +949,21 @@ class WebsiteSmokeV1Runner:
         title_note = ""
         if not checkout_title:
             raise FlowError("CHECKOUT_PRODUCT_MISMATCH", "checkout product title unreadable")
-        if titles_match(pdp_title, checkout_title):
-            pass
-        elif titles_match(stored, checkout_title):
-            title_note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
-        else:
+        product_basis = product_match_basis(
+            pdp_title,
+            checkout_title,
+            pdp_url=self.flow.state.get("pdp_url", ""),
+            pdp_title_stored=stored,
+        )
+        if product_basis is None:
             raise FlowError(
                 "CHECKOUT_PRODUCT_MISMATCH",
                 f"pdp={pdp_title[:50]!r} checkout={checkout_title[:50]!r}",
             )
+        if product_basis == "STORED_TITLE":
+            title_note = " rendered_title=CSS_CAPITALIZE_DIFFERENCE"
+        elif product_basis == "PATH_CONFIRMED_TITLE_SUFFIX":
+            title_note = " product_identity=PATH_CONFIRMED_TITLE_SUFFIX"
         qty = checkout.get_product_quantity(0)
         qty_detail = qty
         if qty and qty != self.flow.state["cart_qty"]:
