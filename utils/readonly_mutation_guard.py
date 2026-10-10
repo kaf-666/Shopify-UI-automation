@@ -394,7 +394,7 @@ class TransactionalMutationPolicy:
             "scope_name": scope_name,
         }
 
-    def authorize_api_cleanup(self, url: str, method: str) -> str:
+    def authorize_api_cleanup(self, url: str, method: str, *, operation_id=None, cleanup_stage=None) -> str:
         """Authorize and audit the fixed infrastructure API cleanup endpoint.
 
         APIRequestContext does not pass through context.route. Callers must
@@ -429,11 +429,17 @@ class TransactionalMutationPolicy:
         record = {"authorization": "ALLOWED" if allowed else "DENIED",
                   "dispatch": "NOT_ATTEMPTED", "response": "NOT_RECEIVED",
                   "http_status": None, "viewport": self._scope.get("viewport"),
+                  "operation_id": operation_id, "cleanup_stage": cleanup_stage,
+                  "attempt_id": 1 + sum(r["operation_id"] == operation_id
+                                        for r in self._api_cleanup_events) if operation_id else 1,
                   "event": event}
         self._api_cleanup_events.append(record)
         if not allowed:
             self._events.append(event)
         return "API_CLEANUP_EXPECTED_MUTATION" if allowed else "UNEXPECTED_MUTATION"
+
+    def api_cleanup_attempt_id(self) -> int:
+        return self._api_cleanup_events[-1]["attempt_id"]
 
     def record_api_cleanup_attempt(self) -> None:
         record = self._api_cleanup_events[-1]

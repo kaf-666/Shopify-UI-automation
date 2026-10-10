@@ -5,6 +5,7 @@ headers or underlying exception messages are included in reports.
 """
 
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 
 class CartStateUnavailable(RuntimeError):
@@ -25,6 +26,7 @@ SAFE_CLEANUP_ERRORS = frozenset({
 def cleanup_report(journey, viewport):
     return {
         "journey": journey, "viewport": viewport,
+        "operation_id": uuid4().hex, "attempt_id": None,
         "precheck_status": "BLOCKED", "cart_item_count": None,
         "clear_requested": False, "api_policy_decision": "NOT_REQUESTED",
         "clear_response_category": "NOT_REQUESTED", "postcheck_status": "NOT_RUN",
@@ -87,8 +89,10 @@ def read_cart(api, origin, headers):
         raise CartStateUnavailable("CART_READ_UNAVAILABLE") from None
 
 
-def cleanup_cart_session(api, base, headers, policy, *, journey, viewport):
+def cleanup_cart_session(api, base, headers, policy, *, journey, viewport, operation_id=None):
     report = cleanup_report(journey, viewport)
+    if operation_id is not None:
+        report["operation_id"] = operation_id
     try:
         origin = storefront_origin(base)
         cart = read_cart(api, origin, headers)
@@ -103,7 +107,9 @@ def cleanup_cart_session(api, base, headers, policy, *, journey, viewport):
     try:
         if policy is None:
             raise RuntimeError
-        decision = policy.authorize_api_cleanup(url, "POST")
+        decision = policy.authorize_api_cleanup(
+            url, "POST", operation_id=report["operation_id"], cleanup_stage=journey)
+        report["attempt_id"] = policy.api_cleanup_attempt_id()
         if decision != "API_CLEANUP_EXPECTED_MUTATION":
             raise RuntimeError
         report["api_policy_decision"] = decision

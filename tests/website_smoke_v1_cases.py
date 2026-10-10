@@ -99,6 +99,10 @@ class WebsiteSmokeV1Runner:
         self.cleanup_reports = []
         self.cleanup_artifact = None
         self._final_cleanup_done = False
+        self.execution_phase = "CREATED"
+        self.active_journey = None
+        self.completed_journeys = []
+        self.pre_clean_completed = False
         self.search_recovery_used = False
         self.cf_interruption = False
         self._extra_pages: List = []
@@ -361,6 +365,15 @@ class WebsiteSmokeV1Runner:
         )
         self.cleanup_detail = "CART_VERIFIED_EMPTY" if self.cleanup_status == "PASS" else "CLEANUP_UNVERIFIED"
 
+    def cleanup_contract_snapshot(self) -> dict:
+        return {"contract_version": 3, "progress": {
+            "phase": self.execution_phase, "active_journey": self.active_journey,
+            "completed_journeys": list(self.completed_journeys),
+            "pre_clean_completed": self.pre_clean_completed,
+            "recorded_case_ids": list(self.results),
+            "final_cleanup_attempted": self._final_cleanup_done,
+        }}
+
     def finalize_cleanup(self) -> None:
         """Idempotent final cleanup, also called by CLI before policy detach."""
         if self._final_cleanup_done:
@@ -450,6 +463,7 @@ class WebsiteSmokeV1Runner:
 
     # -------------------------------------------------------------------- API
     def run_all(self) -> List[CaseResult]:
+        self.execution_phase = "PRE_CLEAN"
         # 前置：API 级购物车清理（基础设施，不产生业务页面导航）
         self._traffic_observe(
             "set_scope",
@@ -462,7 +476,9 @@ class WebsiteSmokeV1Runner:
             if self._mutation_policy is not None:
                 self._mutation_policy.set_scope(self.viewport, "infrastructure", None, "PRE_CLEAN")
             self.flow.pre_clean_cart()
+            self.pre_clean_completed = True
         except FlowError as exc:
+            self.execution_phase = "PRE_CLEAN_FAILED"
             self.pre_clean_status = "BLOCKED" if exc.category == "CART_PRECONDITION_UNVERIFIED" else "FAIL"
             self.pre_clean_error = f"{exc.category}: {exc}"
             self._block_all_cases("pre-clean")
@@ -473,11 +489,16 @@ class WebsiteSmokeV1Runner:
 
         # Keep business order; final cleanup runs even if journey execution raises.
         try:
-            self._run_journey("direct")
-            self._journey_cleanup()
-            self._run_journey("search")
-            self._journey_cleanup()
-            self._run_journey("browse")
+            for journey in ("direct", "search", "browse"):
+                self.execution_phase = "JOURNEY"
+                self.active_journey = journey
+                self._run_journey(journey)
+                self.completed_journeys.append(journey)
+                self.execution_phase = "JOURNEY_CLEANUP"
+                if journey != "browse":
+                    self._journey_cleanup()
+            self.active_journey = None
+            self.execution_phase = "COMPLETE"
         finally:
             self.finalize_cleanup()
 

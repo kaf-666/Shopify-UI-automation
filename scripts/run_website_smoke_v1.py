@@ -134,7 +134,8 @@ def _build_viewport_result(vp, results, runner, metadata, started_at, started, *
         pre_clean={"status": runner.pre_clean_status, "detail": runner.pre_clean_error or "PASS"},
         cleanup={"status": runner.cleanup_status,
                  "detail": runner.cleanup_error or runner.cleanup_detail,
-                 "journeys": runner.cleanup_reports, "audit_path": runner.cleanup_artifact},
+                 "journeys": runner.cleanup_reports, "audit_path": runner.cleanup_artifact,
+                 **(runner.cleanup_contract_snapshot() if hasattr(runner, "cleanup_contract_snapshot") else {})},
         cases=results, mutation_summary=mutation,
     )
 
@@ -202,6 +203,7 @@ def run_viewport(
                     "viewport": viewport, "status": runner.cleanup_status,
                     "journeys": runner.cleanup_reports,
                     "mutation_summary": runner.mutation_summary(),
+                    **runner.cleanup_contract_snapshot(),
                 }, artifact_dir, relative)
                 runner.cleanup_artifact = relative
             except Exception:

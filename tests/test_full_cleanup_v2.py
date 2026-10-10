@@ -205,6 +205,8 @@ def test_schema_old_legal_full_report(monkeypatch, tmp_path):
     for vp in data["viewports"]:
         vp["cleanup"].pop("journeys")
         vp["cleanup"].pop("audit_path")
+        vp["cleanup"].pop("contract_version")
+        vp["cleanup"].pop("progress")
         vp["mutation_summary"].pop("api_cleanup")
     data["mutation_summary"].pop("api_cleanup")
     path.write_text(json.dumps(data), encoding="utf-8")

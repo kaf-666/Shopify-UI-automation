@@ -30,6 +30,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.screenshots import capture_case_failure
+from utils.full_cleanup_contract import uses_v3, validate_progress, validate_operations
 
 ARTIFACT_ROOTS = {
     "legacy": PROJECT_ROOT / "artifacts" / "smoke",
@@ -417,8 +418,18 @@ def _validate_api_cleanup(value):
         return False
     records = value["records"]
     for record in records:
-        if not isinstance(record, dict) or set(record) != {"authorization", "dispatch", "response", "http_status", "viewport"}:
+        legacy_keys = {"authorization", "dispatch", "response", "http_status", "viewport"}
+        new_keys = legacy_keys | {"operation_id", "cleanup_stage", "attempt_id"}
+        if not isinstance(record, dict) or set(record) not in (legacy_keys, new_keys):
             return False
+        if set(record) == new_keys:
+            operation = record["operation_id"]
+            if (type(record["attempt_id"]) is not int or record["attempt_id"] <= 0
+                    or (operation is None and record["cleanup_stage"] is not None)
+                    or (operation is not None and (not isinstance(operation, str)
+                        or not re.fullmatch(r"[0-9a-f]{32}", operation)
+                        or record["cleanup_stage"] not in {"pre_clean", "direct", "search", "browse", "cleanup"}))):
+                return False
         if (record["authorization"] not in {"ALLOWED", "DENIED"}
                 or record["dispatch"] not in {"NOT_ATTEMPTED", "ATTEMPTED"}
                 or record["response"] not in {"NOT_RECEIVED", "OUTCOME_UNKNOWN", "RESPONSE_RECEIVED"}
@@ -444,10 +455,19 @@ def _validate_api_cleanup(value):
     return all(type(value[k]) is int and value[k] == expected[k] for k in keys)
 
 
-def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> bool:
+def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict, *,
+                            viewport_data=None, fatal=None, overall=None) -> bool:
     """Validate the opt-in Full cleanup extension; old reports stay compatible."""
+    vp = viewport_data or {}
+    mutation = vp.get("mutation_summary")
+    v3 = uses_v3(value, mutation)
     if "journeys" not in value and "audit_path" not in value:
-        return True
+        return check(not v3, "CLEANUP_AUDIT_CONSISTENCY_ERROR")
+    if v3:
+        if not (validate_progress(value, vp, vp.get("cases", []), vp.get("partial", False),
+                                  fatal, overall, WEBSITE_CASE_IDS)
+                and validate_operations(value, mutation, viewport)):
+            return check(False, "CLEANUP_AUDIT_CONSISTENCY_ERROR")
     from utils.cart_cleanup import SAFE_CLEANUP_ERRORS, cleanup_report
 
     reports = value.get("journeys")
@@ -456,7 +476,10 @@ def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> boo
         return check(False, "Full cleanup audit records")
     journeys = []
     for report in reports:
-        shape = isinstance(report, dict) and set(report) == set(cleanup_report("", ""))
+        expected_keys = set(cleanup_report("", ""))
+        if not v3:
+            expected_keys -= {"operation_id", "attempt_id"}
+        shape = isinstance(report, dict) and set(report) == expected_keys
         valid = shape and valid
         if not shape:
             continue
@@ -503,7 +526,7 @@ def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> boo
         valid = (value.get("status") == "FAIL" and value.get("detail") == "CLEANUP_AUDIT_WRITE_FAILED") and valid
     else:
         valid = value.get("status") == expected_status and valid
-        if value.get("status") == "PASS":
+        if value.get("status") == "PASS" and not v3:
             valid = journeys == ["pre_clean", "direct", "search", "browse"] and valid
         if path != f"{viewport}/cart-cleanup.json":
             valid = False
@@ -514,6 +537,9 @@ def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> boo
                 if valid:
                     audit = json.loads(resolved.read_text(encoding="utf-8"))
                     valid = audit.get("viewport") == viewport and audit.get("status") == value.get("status") and audit.get("journeys") == reports
+                    if v3:
+                        valid = (audit.get("contract_version") == 3 and
+                                 audit.get("progress") == value.get("progress") and valid)
             except (OSError, ValueError, RuntimeError, TypeError, AttributeError):
                 valid = False
     return check(valid, "Full cleanup audit contract")
@@ -560,7 +586,8 @@ def validate_json(run_dir: Path, suite: str) -> bool:
             if isinstance(value, dict):
                 ok_all = check(value.get("status") in VALID_BASE_STATUSES, f"{vp_name} {base_name} status") and ok_all
                 if suite == "website_smoke_v1" and base_name == "cleanup":
-                    ok_all = _validate_cleanup_audit(run_dir, vp_name, value) and ok_all
+                    ok_all = _validate_cleanup_audit(run_dir, vp_name, value, viewport_data=vp,
+                                                     fatal=fatal, overall=data.get("overall_status")) and ok_all
 
         cases = vp.get("cases", [])
         partial = vp.get("partial", False)
