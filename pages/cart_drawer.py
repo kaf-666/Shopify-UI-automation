@@ -152,10 +152,23 @@ class CartDrawer(BasePage):
         return identity
 
     @staticmethod
-    def _parse_label_value(text: str) -> str:
+    def _parse_label_value(text: str, key: str | None = None) -> str:
         """解析 "Color: Pink" / "Size:\\n 2" → "Pink" / "2"（精确取值，不做模糊匹配）。"""
         import re
 
+        if key is not None:
+            # One metadata container may contain both fields. Match exact
+            # labels and stop at the next label instead of joining its value.
+            if not re.match(r"^\s*(?:color|size)\s*:", text, re.IGNORECASE):
+                return ""
+            labels = list(re.finditer(r"(?<!\S)(color|size)\s*:\s*", text, re.IGNORECASE))
+            indices = [i for i, label in enumerate(labels)
+                       if label.group(1).casefold() == key.casefold()]
+            if len(indices) != 1:
+                return ""
+            index = indices[0]
+            end = labels[index + 1].start() if index + 1 < len(labels) else len(text)
+            return " ".join(text[labels[index].end():end].split())
         m = re.match(r"^\s*([^:]+):\s*(.*)$", text, re.DOTALL)
         if not m:
             return ""
@@ -172,8 +185,9 @@ class CartDrawer(BasePage):
             containers = item.locator(".cart__item--variants, .cart__item--properties")
         for i in range(containers.count()):
             text = containers.nth(i).inner_text()
-            if key.lower() in text.lower():
-                return self._parse_label_value(text)
+            value = self._parse_label_value(text, key)
+            if value:
+                return value
         return ""
 
     def remove_item(self, index: int = 0) -> None:
