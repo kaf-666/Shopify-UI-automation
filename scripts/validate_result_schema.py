@@ -143,6 +143,9 @@ def _summary_matches_cases(summary: dict, cases: list, label: str) -> bool:
 
 def _validate_mutation_summary(value: object) -> bool:
     """Validate the optional Full-suite transactional mutation audit."""
+    if isinstance(value, dict) and "api_cleanup" in value:
+        if not _validate_api_cleanup(value["api_cleanup"]):
+            return check(False, "API cleanup audit lifecycle")
     if value is None:
         # Keep validation compatible with historical Full artifacts written
         # before the transactional policy field was introduced.
@@ -247,6 +250,13 @@ def _validate_mutation_summary(value: object) -> bool:
             "mutation_summary known_blocked_side_effect",
             "non-negative integer",
         ) and ok_all
+    if "api_cleanup" in value and isinstance(rows, list):
+        attempts = value["api_cleanup"]["post_invocations"]
+        api_count = sum(row.get("count", 0) for row in rows
+                        if isinstance(row, dict) and row.get("reason") == "API_CLEANUP_EXPECTED_MUTATION"
+                        and type(row.get("count")) is int)
+        ok_all = check(api_count == attempts and counts["expected_mutation"] >= attempts,
+                       "API cleanup invocation count matches mutation audit") and ok_all
     return ok_all
 
 
@@ -398,6 +408,42 @@ def _validate_evidence(
     return ok_all
 
 
+def _validate_api_cleanup(value):
+    if not isinstance(value, dict):
+        return False
+    keys = ("authorization_allowed", "authorization_denied", "post_invocations",
+            "responses_received", "outcome_unknown")
+    if set(value) != {*keys, "records"} or not isinstance(value["records"], list):
+        return False
+    records = value["records"]
+    for record in records:
+        if not isinstance(record, dict) or set(record) != {"authorization", "dispatch", "response", "http_status", "viewport"}:
+            return False
+        if (record["authorization"] not in {"ALLOWED", "DENIED"}
+                or record["dispatch"] not in {"NOT_ATTEMPTED", "ATTEMPTED"}
+                or record["response"] not in {"NOT_RECEIVED", "OUTCOME_UNKNOWN", "RESPONSE_RECEIVED"}
+                or record["viewport"] not in {None, "desktop", "mobile"}):
+            return False
+        if record["dispatch"] == "NOT_ATTEMPTED":
+            if record["response"] != "NOT_RECEIVED" or record["http_status"] is not None:
+                return False
+        elif record["authorization"] != "ALLOWED" or record["response"] == "NOT_RECEIVED":
+            return False
+        if record["response"] == "RESPONSE_RECEIVED":
+            if type(record["http_status"]) is not int or not 100 <= record["http_status"] <= 599:
+                return False
+        elif record["http_status"] is not None:
+            return False
+    expected = {
+        "authorization_allowed": sum(r["authorization"] == "ALLOWED" for r in records),
+        "authorization_denied": sum(r["authorization"] == "DENIED" for r in records),
+        "post_invocations": sum(r["dispatch"] == "ATTEMPTED" for r in records),
+        "responses_received": sum(r["response"] == "RESPONSE_RECEIVED" for r in records),
+        "outcome_unknown": sum(r["response"] == "OUTCOME_UNKNOWN" for r in records),
+    }
+    return all(type(value[k]) is int and value[k] == expected[k] for k in keys)
+
+
 def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict) -> bool:
     """Validate the opt-in Full cleanup extension; old reports stay compatible."""
     if "journeys" not in value and "audit_path" not in value:
@@ -517,11 +563,32 @@ def validate_json(run_dir: Path, suite: str) -> bool:
                     ok_all = _validate_cleanup_audit(run_dir, vp_name, value) and ok_all
 
         cases = vp.get("cases", [])
+        partial = vp.get("partial", False)
+        ok_all = check(type(partial) is bool and (not partial or (suite == "website_smoke_v1" and fatal is not None and vp.get("status") == "FAIL")),
+                       f"{vp_name} partial requires fatal FAIL") and ok_all
+        if suite == "website_smoke_v1":
+            unsafe = (any((vp.get(k) or {}).get("status") != "PASS" for k in ("pre_clean", "cleanup"))
+                      or (vp.get("mutation_summary") or {}).get("status", "PASS") != "PASS"
+                      or any(c.get("status") != "PASS" for c in cases))
+            ok_all = check(not unsafe or vp.get("status") == "FAIL", f"{vp_name} cross-layer status") and ok_all
+            cleanup = vp.get("cleanup") or {}
+            if cleanup.get("audit_path"):
+                try:
+                    audit_file = (run_dir / cleanup["audit_path"]).resolve(strict=True)
+                    if (cleanup["audit_path"] != f"{vp_name}/cart-cleanup.json"
+                            or not audit_file.is_relative_to(run_dir.resolve(strict=True))):
+                        raise ValueError
+                    audit = json.loads(audit_file.read_text(encoding="utf-8"))
+                    ok_all = check(audit.get("mutation_summary") == vp.get("mutation_summary"),
+                                   f"{vp_name} audit mutation summary matches") and ok_all
+                except (OSError, ValueError, TypeError):
+                    ok_all = check(False, f"{vp_name} audit readable") and ok_all
         all_cases.extend(cases)
         ids = [c.get("case_id") for c in cases]
         total_case_count += len(cases)
         ok_all = check(
-            tuple(ids) == tuple(expected_ids),
+            (tuple(ids) == tuple(cid for cid in expected_ids if cid in ids)
+             if partial else tuple(ids) == tuple(expected_ids)),
             f"{vp_name} case IDs complete and ordered",
             f"count={len(ids)}",
         ) and ok_all
@@ -553,7 +620,12 @@ def validate_json(run_dir: Path, suite: str) -> bool:
         if vp.get("mutation_summary") is not None:
             ok_all = _validate_mutation_summary(vp.get("mutation_summary")) and ok_all
 
-    expected_total = len(expected_ids) * len(viewports)
+    if suite == "website_smoke_v1":
+        unsafe_run = (any(v.get("status") != "PASS" for v in viewports)
+                      or (data.get("mutation_summary") or {}).get("status", "PASS") != "PASS")
+        ok_all = check(not unsafe_run or data.get("overall_status") == "FAIL", "run cross-layer status") and ok_all
+    expected_total = sum(len(v.get("cases", [])) if v.get("partial") is True
+                         else len(expected_ids) for v in viewports)
     ok_all = check(total_case_count == expected_total, "case count matches viewport count", f"{total_case_count}/{expected_total}") and ok_all
     top_summary = data.get("summary", {})
     ok_all = _summary_matches_cases(top_summary, all_cases, "run") and ok_all

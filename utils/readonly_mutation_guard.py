@@ -240,6 +240,7 @@ class TransactionalMutationPolicy:
         self.canonical_origin = canonical_origin
         self._scope = {"viewport": None, "journey": None, "case_id": None, "scope_name": None}
         self._events: List[dict] = []
+        self._api_cleanup_events: List[dict] = []
         self._context = None
         self._attached = False
         self._handler = self._handle_route
@@ -418,14 +419,48 @@ class TransactionalMutationPolicy:
         # Rejected caller-controlled paths are never copied into the audit.
         fingerprint["sanitized_path"] = "/cart/clear.js" if allowed else "/{redacted}"
         reason = "API_CLEANUP_EXPECTED_MUTATION" if allowed else "PATH_NOT_ALLOWED"
-        self._events.append({
+        event = {
             "classification": category, **fingerprint,
             "path": fingerprint["sanitized_path"], "reason": reason,
             "classification_reason": reason, **self._scope,
             "blocked": not allowed, "recognized": allowed,
             "allowed_to_send": allowed, "gating_failure": not allowed,
-        })
+        }
+        record = {"authorization": "ALLOWED" if allowed else "DENIED",
+                  "dispatch": "NOT_ATTEMPTED", "response": "NOT_RECEIVED",
+                  "http_status": None, "viewport": self._scope.get("viewport"),
+                  "event": event}
+        self._api_cleanup_events.append(record)
+        if not allowed:
+            self._events.append(event)
         return "API_CLEANUP_EXPECTED_MUTATION" if allowed else "UNEXPECTED_MUTATION"
+
+    def record_api_cleanup_attempt(self) -> None:
+        record = self._api_cleanup_events[-1]
+        if record["authorization"] != "ALLOWED" or record["dispatch"] != "NOT_ATTEMPTED":
+            raise RuntimeError("API_CLEANUP_POLICY_DENIED")
+        record["dispatch"] = "ATTEMPTED"
+        record["response"] = "OUTCOME_UNKNOWN"
+        self._events.append(record["event"])
+
+    def record_api_cleanup_response(self, status: int) -> None:
+        record = self._api_cleanup_events[-1]
+        if record["dispatch"] != "ATTEMPTED":
+            raise RuntimeError("API_CLEANUP_POLICY_DENIED")
+        record["response"] = "RESPONSE_RECEIVED"
+        record["http_status"] = status if type(status) is int else None
+
+    def api_cleanup_summary(self) -> dict:
+        records = [{k: v for k, v in r.items() if k != "event"}
+                   for r in getattr(self, "_api_cleanup_events", [])]
+        return {
+            "authorization_allowed": sum(r["authorization"] == "ALLOWED" for r in records),
+            "authorization_denied": sum(r["authorization"] == "DENIED" for r in records),
+            "post_invocations": sum(r["dispatch"] == "ATTEMPTED" for r in records),
+            "responses_received": sum(r["response"] == "RESPONSE_RECEIVED" for r in records),
+            "outcome_unknown": sum(r["response"] == "OUTCOME_UNKNOWN" for r in records),
+            "records": records,
+        }
 
     def _handle_route(self, route) -> None:
         request = route.request
@@ -564,6 +599,7 @@ class TransactionalMutationPolicy:
             "high_risk_mutation": high_risk,
             "blocked_mutation": sum(1 for event in self._events if event["blocked"]),
             "by_path": paths,
+            "api_cleanup": self.api_cleanup_summary(),
         }
 
 
@@ -690,4 +726,11 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
         "high_risk_mutation": high_risk,
         "blocked_mutation": blocked,
         "by_path": paths,
+        "api_cleanup": {
+            **{key: sum(item.get("api_cleanup", {}).get(key, 0) for item in items)
+               for key in ("authorization_allowed", "authorization_denied", "post_invocations",
+                           "responses_received", "outcome_unknown")},
+            "records": [record for item in items
+                        for record in item.get("api_cleanup", {}).get("records", [])],
+        },
     }

@@ -388,7 +388,7 @@ def test_audit_write_failure_is_visible_and_context_still_closes(monkeypatch, tm
     monkeypatch.setattr(cli, "close_browser", lambda _runtime: closed.append(True))
     def fail_write(*_args):
         raise OSError(SECRET)
-    monkeypatch.setattr(cli, "write_results_json", fail_write)
+    monkeypatch.setattr(cli, "write_run_json", fail_write)
     _results, runner, _meta = cli.run_viewport("desktop", tmp_path, mutation_policy=policy(api))
     assert closed == [True]
     assert runner.cleanup_status == "FAIL"

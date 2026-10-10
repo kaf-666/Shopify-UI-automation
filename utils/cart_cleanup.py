@@ -17,7 +17,7 @@ SAFE_CLEANUP_ERRORS = frozenset({
     "CART_QUANTITY_INVALID", "CART_COUNT_INCONSISTENT", "CART_READ_HTTP_UNAVAILABLE",
     "CART_READ_TARGET_CHANGED", "CART_READ_UNAVAILABLE", "API_CLEANUP_POLICY_DENIED",
     "API_CLEANUP_ACCESS_UNAVAILABLE", "API_CLEANUP_RESPONSE_REJECTED",
-    "API_CLEANUP_REQUEST_FAILED", "CART_RESIDUAL_ITEMS",
+    "API_CLEANUP_REQUEST_FAILED", "API_CLEANUP_REQUEST_UNAVAILABLE", "CART_RESIDUAL_ITEMS",
     "CLEANUP_REPORT_UNAVAILABLE", "FINAL_CLEANUP_UNAVAILABLE",
 })
 
@@ -115,9 +115,18 @@ def cleanup_cart_session(api, base, headers, policy, *, journey, viewport):
     except Exception:
         report["safe_error_code"] = "API_CLEANUP_ACCESS_UNAVAILABLE"
         return report
-    report["clear_requested"] = True
     try:
-        response = api.post(url, headers=signed_headers, timeout=15000, max_redirects=0)
+        post = api.post
+        if not callable(post):
+            raise RuntimeError
+    except Exception:
+        report["safe_error_code"] = "API_CLEANUP_REQUEST_UNAVAILABLE"
+        return report
+    try:
+        policy.record_api_cleanup_attempt()
+        report["clear_requested"] = True
+        response = post(url, headers=signed_headers, timeout=15000, max_redirects=0)
+        policy.record_api_cleanup_response(response.status)
         if response.status != 200 or response.url != url:
             report.update(status="FAIL", clear_response_category="HTTP_OR_REDIRECT_FAILURE",
                           safe_error_code="API_CLEANUP_RESPONSE_REJECTED")

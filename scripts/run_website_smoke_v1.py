@@ -15,7 +15,7 @@
 
 执行模型：
     每 viewport 一个 BrowserContext，顺序执行 Direct -> Search -> Browse
-    Journey（15 Cases / viewport）；Browse 结束于 Checkout，Context 直接销毁。
+    Journey（15 Cases / viewport）；Browse 结束于 Checkout，最终清理后销毁 Context。
     Desktop / Mobile 顺序执行，不并行。
 
 退出码：0 = 30/30 全 PASS，1 = 任一 FAIL/BLOCKED，2 = 非法视口。
@@ -44,6 +44,7 @@ from utils.artifacts import (
 from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
+from utils.safe_artifact_write import write_run_json
 from utils.result import (
     ResultWriteError,
     RunResult,
@@ -105,6 +106,39 @@ def _traffic_first_party_hosts(site_config: dict, base_url: str) -> tuple[str, .
     raise CliConfigError("unable to derive first-party hosts", category="INVALID_ACCESS_CONFIG")
 
 
+class PartialViewportFailure(Exception):
+    """Carry in-memory state through finally without inventing Case results."""
+    def __init__(self, runner, metadata, original):
+        super().__init__("FULL_VIEWPORT_FATAL")
+        self.runner, self.metadata, self.original = runner, metadata, original
+
+
+class PartialViewportResult(ViewportResult):
+    def to_dict(self):
+        return {**super().to_dict(), "partial": True}
+
+
+def _build_viewport_result(vp, results, runner, metadata, started_at, started, *, partial=False):
+    counts = count_statuses(results)
+    mutation = _runner_mutation_summary(runner)
+    passed = (not partial and counts["FAIL"] == counts["BLOCKED"] == 0
+              and runner.pre_clean_status == runner.cleanup_status == "PASS"
+              and mutation.get("status") == "PASS")
+    cls = PartialViewportResult if partial else ViewportResult
+    return cls(
+        viewport=vp, browser=metadata, status="PASS" if passed else "FAIL",
+        started_at=started_at, finished_at=iso_now(),
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        summary={"pass": counts["PASS"], "fail": counts["FAIL"],
+                 "blocked": counts["BLOCKED"], "total": len(results)},
+        pre_clean={"status": runner.pre_clean_status, "detail": runner.pre_clean_error or "PASS"},
+        cleanup={"status": runner.cleanup_status,
+                 "detail": runner.cleanup_error or runner.cleanup_detail,
+                 "journeys": runner.cleanup_reports, "audit_path": runner.cleanup_artifact},
+        cases=results, mutation_summary=mutation,
+    )
+
+
 def run_viewport(
     viewport: str,
     artifact_dir: Path,
@@ -142,7 +176,10 @@ def run_viewport(
             traffic_inventory=traffic_inventory,
             mutation_policy=mutation_policy,
         )
-        results = runner.run_all()
+        try:
+            results = runner.run_all()
+        except Exception as exc:
+            raise PartialViewportFailure(runner, runtime_meta, exc) from None
         return results, runner, runtime_meta
     finally:
         if runner is not None:
@@ -161,20 +198,26 @@ def run_viewport(
                 runner.cleanup_error = "FINAL_CLEANUP_UNAVAILABLE"
             try:
                 relative = f"{viewport}/cart-cleanup.json"
-                path = artifact_dir / relative
-                path.parent.mkdir(parents=True, exist_ok=True)
-                write_results_json({
+                write_run_json({
                     "viewport": viewport, "status": runner.cleanup_status,
                     "journeys": runner.cleanup_reports,
                     "mutation_summary": runner.mutation_summary(),
-                }, path)
+                }, artifact_dir, relative)
                 runner.cleanup_artifact = relative
             except Exception:
                 runner.cleanup_status = "FAIL"
                 runner.cleanup_error = "CLEANUP_AUDIT_WRITE_FAILED"
         if mutation_policy is not None:
             mutation_policy.detach()
-        close_browser(runtime)
+        pending_failure = sys.exc_info()[0] is not None
+        try:
+            close_browser(runtime)
+        except Exception as exc:
+            if not pending_failure:
+                if runner is not None:
+                    raise PartialViewportFailure(runner, runtime_meta, exc) from None
+                raise
+            # A teardown error must not replace the already propagating failure.
 
 
 def print_viewport(viewport: str, results: List, runner: Optional[WebsiteSmokeV1Runner] = None) -> None:
@@ -271,7 +314,7 @@ def _write_run_result(
         fatal_error=fatal_error,
     )
     try:
-        write_results_json(result.to_dict(), artifact_dir / "results.json")
+        write_run_json(result.to_dict(), artifact_dir, "results.json")
         return True
     except ResultWriteError as exc:
         print(f"RESULT_WRITE_FAILURE: {sanitize_message(exc)}")
@@ -402,50 +445,21 @@ def main(argv: Optional[List[str]] = None) -> int:
                 mutation_policy=mutation_policy,
             )
             runtime_by_viewport[vp] = runtime_meta
-            vp_duration = int((time.perf_counter() - vp_started) * 1000)
-
-            counts = count_statuses(results)
-            mutation_summary = _runner_mutation_summary(runner)
-            mutation_summaries.append(mutation_summary)
-            cases_ok = counts["FAIL"] == 0 and counts["BLOCKED"] == 0
-            base_states_ok = (
-                runner.pre_clean_status == "PASS" and runner.cleanup_status == "PASS"
-            )
-            vp_status = (
-                "PASS"
-                if cases_ok and base_states_ok and mutation_summary.get("status") == "PASS"
-                else "FAIL"
-            )
-            vp_results.append(
-                ViewportResult(
-                    viewport=vp,
-                    browser=runtime_meta,
-                    status=vp_status,
-                    started_at=vp_started_ts,
-                    finished_at=iso_now(),
-                    duration_ms=vp_duration,
-                    summary={
-                        "pass": counts["PASS"],
-                        "fail": counts["FAIL"],
-                        "blocked": counts["BLOCKED"],
-                        "total": len(results),
-                    },
-                    pre_clean={
-                        "status": runner.pre_clean_status,
-                        "detail": runner.pre_clean_error or "PASS",
-                    },
-                    cleanup={
-                        "status": runner.cleanup_status,
-                        "detail": runner.cleanup_error or runner.cleanup_detail,
-                        "journeys": runner.cleanup_reports,
-                        "audit_path": runner.cleanup_artifact,
-                    },
-                    cases=results,
-                    mutation_summary=mutation_summary,
-                )
-            )
+            viewport_result = _build_viewport_result(
+                vp, results, runner, runtime_meta, vp_started_ts, vp_started)
+            mutation_summaries.append(viewport_result.mutation_summary)
+            vp_results.append(viewport_result)
             print_viewport(vp, results, runner)
-    except Exception as exc:  # framework fatal: retain any completed viewport data
+    except Exception as exc:  # retain completed and genuinely executed partial state
+        if isinstance(exc, PartialViewportFailure):
+            runner, runtime_meta = exc.runner, exc.metadata
+            runtime_by_viewport[vp] = runtime_meta
+            partial = _build_viewport_result(
+                vp, list(runner.results.values()), runner, runtime_meta,
+                vp_started_ts, vp_started, partial=True)
+            vp_results.append(partial)
+            mutation_summaries.append(partial.mutation_summary)
+            exc = exc.original
         classification, exit_code = _fatal_classification(exc)
         partial_mutation_summary = merge_transactional_mutation_summaries(mutation_summaries)
         print_mutation_fingerprints(partial_mutation_summary)
