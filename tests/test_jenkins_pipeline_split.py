@@ -12,6 +12,7 @@ ORIGINAL_PIPELINE = PROJECT_ROOT / "Jenkinsfile"
 FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full"
 READONLY_PIPELINE = PROJECT_ROOT / "Jenkinsfile.readonly"
 LAVETIR_FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full.lavetir"
+SHIREES_FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full.shirees"
 
 COMMON_STAGES = (
     "Checkout",
@@ -39,6 +40,39 @@ def test_split_pipeline_files_exist() -> None:
     assert FULL_PIPELINE.exists()
     assert READONLY_PIPELINE.exists()
     assert LAVETIR_FULL_PIPELINE.exists()
+    assert SHIREES_FULL_PIPELINE.exists()
+
+
+def test_shirees_full_pipeline_is_manual_site_scoped_and_keeps_safety_gates() -> None:
+    content = _text(SHIREES_FULL_PIPELINE)
+    assert "agent any" in content
+    assert "name: 'SMOKE_VIEWPORT'" in content
+    assert "choices: ['both', 'desktop', 'mobile']" in content
+    assert "stage('Website Smoke V1')" in content
+    assert "scripts/run_website_smoke_v1.py --site shirees" in content
+    assert "scripts/run_website_smoke_readonly_v1.py" not in content
+    assert "scripts/validate_site_config.py --site shirees --suite website_smoke_v1" in content
+    assert "scripts/validate_site_access.py --site shirees --viewport both" in content
+    assert "scripts/validate_runtime_contract.py" in content
+    assert "scripts/validate_ci_safe_outputs.py" in content
+    assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
+    assert "scripts/record_stability.py" in content
+    assert "artifacts/website-smoke-v1/shirees" in content
+    assert "LAVETIR" not in content
+    assert "MONDRESSY" not in content
+    assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in content
+    assert "returnStatus: true" in content
+    assert "archiveArtifacts artifacts: 'artifacts/**'" in content
+
+    for credential_id in (
+        "SHIREES_US_SHOPIFY_SIGNATURE",
+        "SHIREES_US_SHOPIFY_SIGNATURE_INPUT",
+        "SHIREES_US_SHOPIFY_SIGNATURE_AGENT",
+    ):
+        assert f"credentials('{credential_id}')" in content
+
+    for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\("):
+        assert re.search(pattern, content, flags=re.IGNORECASE) is None
 
 
 def test_lavetir_full_pipeline_is_manual_only_and_fixed_to_site() -> None:
