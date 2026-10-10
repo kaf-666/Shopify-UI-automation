@@ -10,6 +10,7 @@ from playwright.sync_api import sync_playwright
 
 import pages.size_option_resolver as resolver_module
 from pages.size_option_resolver import SizeOptionResolver
+from pages.base_page import BasePage
 
 
 @pytest.fixture(scope="module")
@@ -249,3 +250,31 @@ def test_metadata_failure_never_replaces_business_failure(page, monkeypatch):
 @pytest.mark.parametrize("raw", ["Signature secret", "Cookie token", "王小明 /account/private", "private@example.com"])
 def test_uncontrolled_action_exception_is_only_a_category(raw):
     assert SizeOptionResolver._action_error_category(RuntimeError(raw)) == "ACTION_ERROR"
+
+
+@pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])
+def test_native_theme_label_is_used_when_radio_has_a_visible_box_but_is_covered(page, viewport):
+    page.set_viewport_size(viewport)
+    page.set_default_timeout(200)
+    page.set_content('''
+      <style>
+        label { display:inline-block; position:relative; width:45px; height:35px; }
+        input { position:absolute; inset:0; width:45px; height:35px; opacity:0; }
+        label span { position:absolute; inset:0; background:white; }
+      </style>
+      <form class="product-single__form">
+        <fieldset name="Size" data-handle="size">
+          <label><input id="s" type="radio" name="Size" data-variant-input value="S" checked><span>S</span></label>
+          <label><input id="m" type="radio" name="Size" data-variant-input value="M"><span>M</span></label>
+          <label><input id="l" type="radio" name="Size" data-variant-input value="L" disabled><span>L</span></label>
+        </fieldset>
+      </form>''')
+    config = BasePage.load_site_config(site_name="mondressy")["pages"]["product"]
+    resolver = SizeOptionResolver(page, config, lambda: page.locator('form.product-single__form'))
+    assert page.locator('#m').is_visible()  # visibility alone doesn't ensure a radio receives a click
+    assert resolver.select("M") == "M"
+    assert resolver.selected_value() == "M"
+    assert page.locator('#m').is_checked()
+    assert not page.locator('#s').is_checked()
+    with pytest.raises(LookupError):
+        resolver.select("L")

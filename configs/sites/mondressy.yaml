@@ -297,6 +297,8 @@ pages:
 
         - id: SIZE_MODEL_02
           name: SHOPIFY_NATIVE_VARIANT_RADIO_GROUP
+          # Native radios have a visible box but the themed label receives clicks.
+          control_strategy: associated_label
           group_selector: "fieldset[name=\"Size\"][data-handle=\"size\"]"
           option_selector: "input[type=\"radio\"][name=\"Size\"][data-variant-input]"
           wait_option_selector: "input[type=\"radio\"][name=\"Size\"][data-variant-input]"
