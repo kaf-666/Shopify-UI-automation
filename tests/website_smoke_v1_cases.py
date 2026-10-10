@@ -84,11 +84,10 @@ class WebsiteSmokeV1Runner:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.page = runtime.page
         self.site_config = site_config
-        self.flow = ShoppingFlow(
-            runtime.page, site_config, viewport, access_policy=runtime.access_policy,
-            api_request=getattr(getattr(runtime, "context", None), "request", None),
-            mutation_policy=mutation_policy
-        )
+        self._context = getattr(runtime, "context", None)
+        self._api_request = getattr(self._context, "request", None)
+        self._mutation_policy = mutation_policy
+        self.flow = self._build_flow(self.page)
         self.state: dict = {}
         self.results: Dict[str, CaseResult] = {}
         self.pre_clean_status = "PASS"
@@ -108,7 +107,6 @@ class WebsiteSmokeV1Runner:
         self._extra_pages: List = []
         self._journey = ""
         self._traffic_inventory = traffic_inventory
-        self._mutation_policy = mutation_policy
 
         self._cases: Dict[str, tuple] = {
             # ------------------------------------------------------- Direct
@@ -243,20 +241,41 @@ class WebsiteSmokeV1Runner:
             except Exception:
                 pass
 
+    def _build_flow(self, page) -> ShoppingFlow:
+        """Use the original Context session and policies for every business Page."""
+        return ShoppingFlow(
+            page, self.site_config, self.viewport,
+            access_policy=self.runtime.access_policy,
+            api_request=self._api_request,
+            mutation_policy=self._mutation_policy,
+        )
+
     def _adopt_business_page(self, actual_page) -> None:
         """切换当前业务 Page；保留旧 Page 到 Context 生命周期结束时清理。"""
-        if actual_page is None or actual_page.is_closed():
+        if actual_page is None:
             return
+        try:
+            if actual_page.is_closed():
+                raise FlowError("BUSINESS_PAGE_ADOPTION_REJECTED", "PAGE_CLOSED")
+            if self._context is None or actual_page.context is not self._context:
+                raise FlowError("BUSINESS_PAGE_ADOPTION_REJECTED", "PAGE_CONTEXT_MISMATCH")
+            if (self._api_request is None
+                    or self._context.request is not self._api_request
+                    or not callable(self._api_request.get)
+                    or not callable(self._api_request.post)):
+                raise FlowError("BUSINESS_PAGE_ADOPTION_REJECTED", "CONTEXT_API_UNAVAILABLE")
+            if self._mutation_policy is None:
+                raise FlowError("BUSINESS_PAGE_ADOPTION_REJECTED", "MUTATION_POLICY_UNAVAILABLE")
+        except FlowError:
+            raise
+        except Exception:
+            raise FlowError("BUSINESS_PAGE_ADOPTION_REJECTED", "PAGE_SESSION_UNVERIFIED") from None
+        flow = self._build_flow(actual_page)
         if actual_page is not self.page:
             self._extra_pages.append(self.page)
         self.page = actual_page
         self._traffic_observe("set_active_page", actual_page, self.viewport)
-        self.flow = ShoppingFlow(
-            actual_page,
-            self.site_config,
-            self.viewport,
-            access_policy=self.runtime.access_policy,
-        )
+        self.flow = flow
 
     def _run_case(self, case_id: str, name: str, deps: List[str], fn: Callable) -> None:
         self._traffic_observe(
