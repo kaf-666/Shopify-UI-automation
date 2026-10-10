@@ -296,11 +296,26 @@ def _validate_readonly_requirements(config: Mapping[str, Any], groups: Mapping[s
 
     search = _page(config, "search")
     _require_page_url(search, "search")
+    _required_text(search, "smoke_query")
+    submit_strategy = str(search.get("submit_strategy") or "enter").strip().lower()
+    if submit_strategy not in {"enter", "button"}:
+        _fail("INVALID_SITE_CONFIG", f"unsupported search.submit_strategy: {submit_strategy}")
+    entry = search.get("entry_strategy", "direct_trigger")
+    entries = entry.values() if isinstance(entry, Mapping) else (entry,)
+    if any(str(value) not in {"direct_trigger", "navigation_drawer"} for value in entries):
+        _fail("INVALID_SITE_CONFIG", "unsupported search.entry_strategy")
+    overlay_wait = search.get("blocking_overlay_wait_ms", 0)
+    if type(overlay_wait) is not int or not 0 <= overlay_wait <= 15_000:
+        _fail("INVALID_SITE_CONFIG", "search.blocking_overlay_wait_ms must be 0..15000")
+    if overlay_wait and not (search.get("selectors") or {}).get("blocking_overlay_dismiss"):
+        _fail("MISSING_CAPABILITY_REQUIREMENT", "search.blocking_overlay_wait_ms requires blocking_overlay_dismiss")
     _require_selectors(
         search,
         "search",
-        ("container", "input", "submit", "predictive_results", "predictive_product", "result_card", "result_link"),
+        ("container", "open_state", "input", "result_card", "result_link"),
     )
+    if submit_strategy == "button":
+        _require_selectors(search, "search", ("submit",))
 
     _validate_navigation_requirements(config, groups["navigation"])
 
@@ -345,10 +360,13 @@ def _validate_full_requirements(config: Mapping[str, Any], groups: Mapping[str, 
     _require_selectors(
         cart,
         "cart",
-        ("drawer", "cart_item", "quantity_input", "quantity_plus", "quantity_minus", "subtotal", "checkout_button"),
+        ("drawer", "drawer_open", "cart_item", "quantity_input", "quantity_plus", "quantity_minus", "subtotal", "checkout_button"),
     )
     checkout = _page(config, "checkout")
-    _require_selectors(checkout, "checkout", ("root", "contact", "delivery", "shipping_form", "email", "express"))
+    # CheckoutPage and WebsiteSmokeV1Runner consume these four configured
+    # selectors. shipping_form and express are optional observations and are
+    # not prerequisites for the frozen Full case contract.
+    _require_selectors(checkout, "checkout", ("root", "contact", "delivery", "email"))
 
 
 def validate_site_config_mapping(

@@ -120,6 +120,7 @@ def _search_site_config(base_url: str) -> dict:
                 "url": "/search",
                 "selectors": {
                     "container": {"by": "css", "value": "#search-container"},
+                    "open_state": {"by": "css", "value": "#search-container.is-active"},
                     "input": {"by": "css", "value": "#Search"},
                     "submit": {"by": "css", "value": "#search-submit"},
                     "close": {"by": "css", "value": "#search-close"},

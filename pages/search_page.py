@@ -1,17 +1,7 @@
-"""Search 页面对象（选择器驱动，无硬编码定位符）。
-
-Search 模型（真实探测）：HYBRID_SEARCH
-    首页头部 Trigger -> 内联搜索容器（is-active 打开）-> 输入 ->
-    真实 Enter 提交 -> /search?q=... 独立结果页 -> 结果卡片
-    （target=_blank 新标签页打开 PDP）。
-
-打开状态按容器 is-active 类判定：关闭过渡期容器仍占用布局，
-is_visible() 会误报，不能作为打开信号。
-"""
+"""配置驱动的搜索入口、状态、提交与结果页对象。"""
 
 from __future__ import annotations
 
-import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse, urlsplit
@@ -21,6 +11,7 @@ from playwright.sync_api import expect
 
 from pages.base_page import BasePage
 from pages.home_page import HomePage
+from pages.navigation import NavigationPage
 from utils.search_url_diagnostics import (
     DIAGNOSTIC_ATTRIBUTE,
     build_search_home_url_diagnostic,
@@ -42,7 +33,7 @@ class SearchResultNavigationError(TimeoutError):
 
 
 class SearchPage(BasePage):
-    """Search 页面对象：头部内联搜索入口、提交、结果页与空态操作。"""
+    """Search 页面对象：入口、提交、结果页与空态操作。"""
 
     PAGE_NAME = "search"
 
@@ -60,19 +51,19 @@ class SearchPage(BasePage):
 
     # ------------------------------------------------------------------ 控件
     def container(self):
-        """返回搜索容器定位器（.site-header__search-container）。"""
+        """返回配置的搜索容器。"""
         return self.locator("container").first
 
     def input(self):
-        """返回搜索输入框定位器（input#Search）。"""
+        """返回配置的搜索输入框。"""
         return self.locator("input").first
 
     def submit_button(self):
-        """返回提交按钮定位器（button.btn--search，type=submit）。"""
+        """返回配置的可选提交按钮。"""
         return self.locator("submit").first
 
     def close_button(self):
-        """返回关闭按钮定位器（button.btn--close-search）。"""
+        """返回配置的关闭按钮。"""
         return self.locator("close").first
 
     def clear_button(self):
@@ -83,30 +74,54 @@ class SearchPage(BasePage):
         """
         return None
 
+    def entry_strategy(self) -> str:
+        configured = self.page_config().get("entry_strategy", "direct_trigger")
+        if isinstance(configured, dict):
+            return str(configured.get(self.viewport, "direct_trigger"))
+        return str(configured)
+
+    def _open_entry(self, home: HomePage) -> None:
+        self._dismiss_blocking_overlay()
+        strategy = self.entry_strategy()
+        if strategy == "direct_trigger":
+            expect(home.search_trigger()).to_be_visible(timeout=10_000)
+            home.open_search()
+        elif strategy == "navigation_drawer":
+            NavigationPage(self.page, self.site_config, self.viewport).open_drawer_shell()
+        else:
+            raise RuntimeError(f"unsupported search entry strategy: {strategy}")
+
+    def _dismiss_blocking_overlay(self) -> None:
+        """Use an optional real close control when a marketing modal blocks entry."""
+        if not (self.page_config().get("selectors") or {}).get("blocking_overlay_dismiss"):
+            return
+        dismiss = self.locator("blocking_overlay_dismiss").first
+        wait_ms = int(self.page_config().get("blocking_overlay_wait_ms") or 0)
+        if wait_ms:
+            try:
+                dismiss.wait_for(state="visible", timeout=wait_ms)
+            except PlaywrightTimeoutError:
+                return
+        if dismiss.count() and dismiss.is_visible():
+            dismiss.click(timeout=3_000)
+            expect(dismiss).not_to_be_visible(timeout=3_000)
+
     # ------------------------------------------------------------------ 状态
     def is_open(self) -> bool:
-        """容器是否处于打开状态（class 含 is-active）。"""
-        cls = self.container().get_attribute("class") or ""
-        return "is-active" in cls.split()
+        """配置的 open-state 选择器是否匹配。"""
+        return self.locator("open_state").count() > 0
 
     def wait_open(self, timeout_ms: int = 10_000) -> None:
-        """等待容器打开（is-active 出现）。"""
-        self._wait_class("is-active", present=True, timeout_ms=timeout_ms)
+        expect(self.locator("open_state").first).to_be_visible(timeout=timeout_ms)
 
     def wait_closed(self, timeout_ms: int = 10_000) -> None:
-        """等待容器关闭（is-active 消失）。"""
-        self._wait_class("is-active", present=False, timeout_ms=timeout_ms)
-
-    def _wait_class(self, token: str, present: bool, timeout_ms: int) -> None:
-        pattern = re.compile(rf"(?:^|\s){re.escape(token)}(?:\s|$)")
-        if present:
-            expect(self.container()).to_have_class(pattern, timeout=timeout_ms)
-        else:
-            expect(self.container()).not_to_have_class(pattern, timeout=timeout_ms)
+        expect(self.locator("open_state")).to_have_count(0, timeout=timeout_ms)
 
     # ------------------------------------------------------------- 输入 / 提交
     def fill_query(self, query: str) -> None:
         """点击输入框并填入查询词。"""
+        if not str(query or "").strip():
+            raise ValueError("search query must not be empty")
         inp = self.input()
         inp.click()
         inp.fill(query)
@@ -118,7 +133,7 @@ class SearchPage(BasePage):
         case_id: str | None = None,
         browser: str | None = None,
     ) -> bool:
-        """真实 UI 提交：suggest 就绪后按 Enter（主题提交路径）。
+        """通过配置的提交动作执行真实 UI 搜索，并保留恢复诊断链路。
 
         站点行为（真实探测）：
         - 输入触发 /search/suggest；请求进行中按 Enter 会被吞掉（不导航）
@@ -137,7 +152,10 @@ class SearchPage(BasePage):
                 self._wait_submit_ready()
                 if not self.input().is_visible():
                     raise SearchSessionReloaded("search input lost visibility")
-                self.input().press("Enter")
+                if str(self.page_config().get("submit_strategy") or "enter") == "button":
+                    self.submit_button().click()
+                else:
+                    self.input().press("Enter")
                 if self._watch_navigation():
                     try:
                         self.wait_results()
@@ -184,24 +202,18 @@ class SearchPage(BasePage):
             )
 
     def _wait_submit_ready(self, timeout_ms: int = 4_000) -> None:
-        """等待提交就绪：suggest 完成（建议链接渲染或遮罩清除），超时兜底。
-
-        站点行为：suggest 请求进行中按 Enter 会被吞掉；就绪后 Enter 正常提交。
-        空结果查询词可能不渲染建议也不清除遮罩，超时后仍按 Enter
-        （此时无拦截，走原生表单提交）。
-        """
+        """按配置观察可选 predictive UI；无该能力时直接走 Enter。"""
+        selectors = self.page_config().get("selectors") or {}
+        if not selectors.get("predictive_loading"):
+            return
         deadline = time.monotonic() + timeout_ms / 1000
         while time.monotonic() < deadline:
             try:
-                state = self.page.evaluate(
-                    "(() => { const b = document.querySelector('#predictive-search');"
-                    "const s = document.querySelector('.predictive__screen');"
-                    "return {links: b ? b.querySelectorAll('a').length : 0,"
-                    "screen: s ? s.offsetParent !== null : false}; })()"
-                )
+                loading = self.locator("predictive_loading").count() > 0
+                links = self.locator("predictive_product").count() if selectors.get("predictive_product") else 0
             except Exception as exc:
                 raise SearchSessionReloaded(f"page reloaded: {type(exc).__name__}") from exc
-            if state["links"] > 0 or not state["screen"]:
+            if links > 0 or not loading:
                 return
             self.page.wait_for_timeout(250)
 
@@ -252,8 +264,7 @@ class SearchPage(BasePage):
                 pass
             raise error
         if not self.is_open():
-            expect(home.search_trigger()).to_be_visible(timeout=timeout_ms)
-            home.open_search()
+            self._open_entry(home)
         self.wait_open(timeout_ms=timeout_ms)
         inp = self.input()
         expect(inp).to_be_visible(timeout=timeout_ms)
@@ -391,20 +402,28 @@ class SearchPage(BasePage):
             pass
 
     def predictive_results(self):
-        """返回 predictive 建议容器定位器（#predictive-search，输入后出现）。"""
+        """返回可选 predictive 建议容器。"""
+        if not (self.page_config().get("selectors") or {}).get("predictive_results"):
+            return None
         return self.locator("predictive_results").first
 
     def predictive_product_cards(self):
         """返回 predictive 商品链接定位器集合（仅观察用途）。"""
+        if not (self.page_config().get("selectors") or {}).get("predictive_product"):
+            return None
         return self.locator("predictive_product")
+
+    def predictive_product_count(self) -> int:
+        cards = self.predictive_product_cards()
+        return cards.count() if cards is not None else 0
 
     # ---------------------------------------------------------------- 结果页
     def results_grid(self):
-        """返回结果网格定位器（#CollectionAjaxContent）。"""
+        """返回配置的结果网格。"""
         return self.locator("results_grid").first
 
     def result_cards(self):
-        """返回结果商品卡片定位器集合（#CollectionAjaxContent .grid-product）。"""
+        """返回配置的结果商品卡片。"""
         return self.locator("result_card")
 
     def result_count(self) -> int:
@@ -486,11 +505,14 @@ class SearchPage(BasePage):
 
     def no_result_state(self) -> Optional[str]:
         """返回空态文案（"0 results found ..." 行），无空态返回 None。"""
+        if not (self.page_config().get("selectors") or {}).get("no_results"):
+            return None
         container = self.locator("no_results").first
         if not container.count():
             return None
+        expected = str(self.page_config().get("no_results_text") or "0 results found").casefold()
         for line in container.inner_text().splitlines():
-            if "0 results found" in line:
+            if expected in line.casefold():
                 return line.strip()
         return None
 
@@ -503,6 +525,9 @@ class SearchPage(BasePage):
         """点击关闭按钮并等待容器关闭。"""
         self.close_button().click()
         self.wait_closed()
+
+    def reopen(self) -> None:
+        self.ensure_search_session_open()
 
     def clear_query(self) -> str:
         """按 Escape 关闭 Search 并返回关闭后输入框的值。

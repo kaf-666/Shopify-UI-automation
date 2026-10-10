@@ -1,0 +1,252 @@
+schema_version: 1
+site: shirees
+base_url: "@url:`https://www.shirees.com`"
+
+capabilities:
+  suites:
+    website_smoke_readonly_v1: true
+    website_smoke_v1: true
+  navigation:
+    desktop: mega_menu_hover
+    mobile: drawer_accordion
+  collection:
+    product_cards: true
+    filters: false
+    sort: true
+  product:
+    color: true
+    size: true
+    custom_size: false
+
+access:
+  mode: signed_request
+  source: env
+  env:
+    Signature: SHIREES_US_SHOPIFY_SIGNATURE
+    Signature-Input: SHIREES_US_SHOPIFY_SIGNATURE_INPUT
+    Signature-Agent: SHIREES_US_SHOPIFY_SIGNATURE_AGENT
+  allowed_hosts:
+    - shirees.com
+    - www.shirees.com
+
+pages:
+  home:
+    url: /
+    selectors:
+      logo:
+        by: css
+        value: '#logo a[href="/"]:visible'
+      search:
+        desktop:
+          by: css
+          value: 'a[aria-label="Search our store"]:visible'
+        mobile:
+          by: css
+          value: 'button[aria-label="Open navigation"]'
+      cart:
+        by: css
+        value: 'button[aria-label="Open cart"]'
+
+  search:
+    url: /search
+    # Readonly Build #1 observed a ready mobile Home at the configured root
+    # with a query string before Search entry; keep the main URL checks strict.
+    home_query_policy: configured_root_with_home_controls
+    smoke_query: SHI22501284
+    submit_strategy: enter
+    entry_strategy:
+      desktop: direct_trigger
+      mobile: navigation_drawer
+    blocking_overlay_wait_ms: 15000
+    selectors:
+      container:
+        desktop:
+          by: css
+          value: '#slideout-search'
+        mobile:
+          by: css
+          value: '#slideout-mobile-navigation'
+      open_state:
+        desktop:
+          by: css
+          value: '#slideout-search:popover-open'
+        mobile:
+          by: css
+          value: '#slideout-mobile-navigation:popover-open'
+      input:
+        desktop:
+          by: css
+          value: '#search-slideout-input'
+        mobile:
+          by: css
+          value: '#search-mobile-navigation'
+      close:
+        desktop:
+          by: css
+          value: '#slideout-search button[aria-label="Close search"]'
+        mobile:
+          by: css
+          value: '#slideout-mobile-navigation button[aria-label="Close navigation"]'
+      blocking_overlay_dismiss:
+        by: css
+        value: '[data-testid="modal"]:has(#trustoo-popup-optIn-title) button.ecomsend__Modal__CloseText:has-text("No, thanks")'
+      results_grid:
+        by: css
+        value: '#skusearchgrid'
+      result_card:
+        by: css
+        value: '#skusearchgrid .product-index'
+      result_link:
+        by: css
+        value: '#skusearchgrid .product-index a.titlelink'
+      no_results:
+        by: css
+        value: '#breadcrumb .page-title'
+
+  navigation:
+    smoke_collection:
+      name: Mother of the Bride Dresses
+      path: /collections/mother-dresses
+    selectors:
+      header:
+        by: css
+        value: 'header.header__wrapper'
+      desktop_menu:
+        by: css
+        value: 'header .gm-menu-trigger-hover'
+      desktop_menu_item:
+        by: css
+        value: 'header .gm-menu-trigger-hover > li.gm-item'
+      desktop_target_parent:
+        by: css
+        value: 'header .gm-menu-trigger-hover > li > a[title="Moms"]'
+      mobile_trigger:
+        by: css
+        value: 'button[aria-label="Open navigation"]'
+      mobile_drawer:
+        by: css
+        value: '#slideout-mobile-navigation'
+      mobile_drawer_open:
+        by: css
+        value: '#slideout-mobile-navigation:popover-open'
+      mobile_menu:
+        by: css
+        value: '#slideout-mobile-navigation .gm-menu-mobile'
+      mobile_menu_item:
+        by: css
+        value: '#slideout-mobile-navigation .gm-menu-mobile > li.gm-item'
+      mobile_close:
+        by: css
+        value: '#slideout-mobile-navigation button[aria-label="Close navigation"]'
+      mobile_target_parent:
+        by: css
+        value: 'a[title="Moms"] .gm-retractor'
+      target_collection:
+        by: css
+        value: 'a[title="Mother of the Bride Dresses"][href="/collections/mother-dresses"]'
+
+  collection:
+    url: /collections/mother-dresses
+    selectors:
+      product_grid:
+        by: css
+        value: '#CollectionProductGrid'
+      product_card:
+        by: css
+        value: '#CollectionProductGrid .product-index'
+      product_link:
+        by: css
+        value: 'a.titlelink'
+      product_title:
+        by: css
+        value: 'a.titlelink'
+      sort:
+        by: css
+        value: 'select[name="sort_by"]'
+
+  product:
+    url: /products/a-line-princess-v-neck-floor-length-mother-of-the-bride-groom-dresses-with-ruffles-ruched-waist-shi22501284
+    color_option_control:
+      strategy: associated_label
+    size_resolver:
+      models:
+        - id: SHOPIFY_PROPERTY_RADIO_LABEL_GROUP
+          group_selector: '.shopify-size-selector[data-size-type="general_size"]'
+          option_selector: 'input[type="radio"][name="properties[Size]"]'
+          wait_option_selector: 'input[type="radio"][name="properties[Size]"]:not([value="Custom Size"])'
+          custom_size_value: Custom Size
+          control_strategy: associated_label
+    selectors:
+      purchase_area:
+        by: css
+        value: 'form.product_form.js-prod-form-submit'
+      title:
+        by: css
+        value: 'h1.product-title'
+      price:
+        by: css
+        value: '.product__section-content .price-item--sale[data-sale-price]'
+      gallery:
+        by: css
+        value: '.js-product-gallery'
+      color:
+        by: css
+        value: '.product_form .product__variants-swatches .swatches__container'
+      add_to_cart:
+        by: css
+        value: '#addToCart'
+
+  cart:
+    url: /cart
+    selectors:
+      drawer:
+        by: css
+        value: '#slideout-ajax-cart'
+      drawer_open:
+        by: css
+        value: '#slideout-ajax-cart:popover-open'
+      cart_item:
+        by: css
+        value: '.ajax-cart__cart-item:visible'
+      item_title:
+        by: css
+        value: '.ajax-cart__title > a'
+      variant_properties:
+        by: css
+        value: '.ajax-cart__cart-variants'
+      remove:
+        by: css
+        value: 'li.ajax-cart__item-remove.js-cart-remove'
+      quantity_input:
+        by: css
+        value: '.ajax-cart__qty-input'
+      quantity_plus:
+        by: css
+        value: '.ajax-cart__qty-control--up'
+      quantity_minus:
+        by: css
+        value: '.ajax-cart__qty-control--down'
+      subtotal:
+        by: css
+        value: '#slideout-ajax-cart .ajax-cart__final-details .subtotal'
+      checkout_button:
+        by: css
+        value: '#checkout'
+
+  checkout:
+    selectors:
+      root:
+        by: css
+        value: '#checkout-main'
+      contact:
+        by: css
+        value: '#contact'
+      delivery:
+        by: css
+        value: '#deliveryAddress'
+      email:
+        by: css
+        value: '#email'
+      express:
+        by: css
+        value: '#express-checkout-heading'

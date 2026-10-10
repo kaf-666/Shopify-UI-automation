@@ -32,6 +32,14 @@ class NavigationStrategyError(RuntimeError):
     """Raised when a page object receives an unsupported navigation strategy."""
 
 
+class NavigationCollectionError(TimeoutError):
+    """A clicked collection link reached the wrong page; retain that page for evidence."""
+
+    def __init__(self, message: str, *, actual_page=None):
+        super().__init__(message)
+        self.actual_page = actual_page
+
+
 class NavigationStrategy:
     """Small behavior contract implemented by each supported interaction model."""
 
@@ -369,6 +377,10 @@ class NavigationPage(BasePage):
             trigger.click()
             self._wait_open_state()
 
+    def open_drawer_shell(self) -> None:
+        """Open only the configured navigation drawer, without expanding its menu."""
+        self._ensure_drawer_open()
+
     def _open_drawer_accordion_menu(self) -> None:
         """Open a drawer and expand its configured accordion parent when needed."""
         self._ensure_drawer_open()
@@ -449,21 +461,42 @@ class NavigationPage(BasePage):
             raise RuntimeError("drawer navigation requires a mobile menu trigger")
         expect(trigger).to_be_visible(timeout=timeout_ms)
 
-    def _wait_url_path(self, path: str, timeout_ms: int = 15_000) -> None:
-        # A fast same-page navigation may finish before Playwright subscribes
-        # to the URL event. The current URL is authoritative once the click
-        # has returned, so avoid turning that race into a false failure.
-        if urlparse(str(self.page.url)).path == path:
-            return
-        try:
-            self.page.wait_for_url(
-                lambda url: urlparse(str(url)).path == path,
-                timeout=timeout_ms,
-            )
-        except PlaywrightTimeoutError as exc:
-            if urlparse(str(self.page.url)).path == path:
-                return
-            raise TimeoutError(f"navigation to {path} not observed (url={self.page.url[:100]})") from exc
+    def _resolve_clicked_page(self, source_page, created_pages, path: str, source_url: str, timeout_ms: int = 15_000):
+        """Resolve the business Page produced by a real click on either navigation model."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            if created_pages:
+                actual = created_pages[-1]
+                self.page = actual
+                try:
+                    remaining = max(1, int((deadline - time.monotonic()) * 1000))
+                    actual.wait_for_url(
+                        lambda url: urlparse(str(url)).scheme in {"http", "https"},
+                        wait_until="commit",
+                        timeout=remaining,
+                    )
+                except PlaywrightTimeoutError:
+                    pass
+                if urlparse(str(actual.url)).path == path:
+                    return actual
+                raise NavigationCollectionError(
+                    f"navigation reached wrong page (url={actual.url[:120]} expected_path={path})",
+                    actual_page=actual,
+                )
+            if urlparse(str(source_page.url)).path == path:
+                return source_page
+            if source_page.url != source_url and urlparse(str(source_page.url)).path not in {"", path}:
+                raise NavigationCollectionError(
+                    f"navigation reached wrong page (url={source_page.url[:120]} expected_path={path})",
+                    actual_page=source_page,
+                )
+            source_page.wait_for_timeout(100)
+        actual = created_pages[-1] if created_pages else source_page
+        self.page = actual
+        raise NavigationCollectionError(
+            f"navigation to {path} not observed (url={actual.url[:120]})",
+            actual_page=actual,
+        )
 
     def open_collection(self) -> str:
         """真实 UI 导航到目标 Collection 并返回最终 URL。
@@ -483,6 +516,26 @@ class NavigationPage(BasePage):
             target = self.target_link().filter(visible=True).first
         if not (target.count() and target.is_visible()):
             raise RuntimeError(f"target collection link not visible: {path}")
-        target.click()
-        self._wait_url_path(path)
+        source_page = self.page
+        source_url = source_page.url
+        created_pages = []
+
+        def capture_page(page) -> None:
+            if page is not source_page:
+                created_pages.append(page)
+
+        source_page.context.on("page", capture_page)
+        try:
+            target.click()
+            self._resolve_clicked_page(source_page, created_pages, path, source_url)
+        except Exception as exc:
+            if created_pages and not isinstance(exc, NavigationCollectionError):
+                self.page = created_pages[-1]
+                raise NavigationCollectionError(
+                    f"navigation click did not settle (url={self.page.url[:120]})",
+                    actual_page=self.page,
+                ) from exc
+            raise
+        finally:
+            source_page.context.remove_listener("page", capture_page)
         return self.page.url

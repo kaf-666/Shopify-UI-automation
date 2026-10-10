@@ -11,7 +11,9 @@ ShoppingFlow.run()（完整链入口）与 Smoke Cases 调用同一批步骤方�
 
 from __future__ import annotations
 
-from typing import Optional
+import re
+from typing import Mapping, Optional
+from urllib.parse import parse_qs, urlsplit
 
 from pages.cart_drawer import CartDrawer
 from pages.collection_page import CollectionPage
@@ -40,6 +42,66 @@ def titles_match(pdp_title, cart_title) -> bool:
     """站点展示差异规范化：PDP 标题带 "SKU MONDRESSY 商品名" 前缀，抽屉只显示商品名；要求抽屉商品名是 PDP 标题的精确后缀。"""
     p, c = normalize(pdp_title), normalize(cart_title)
     return p == c or p.endswith(c)
+
+
+def product_match_basis(
+    pdp_title,
+    cart_title,
+    *,
+    pdp_url: str = "",
+    cart_identity: Optional[Mapping[str, object]] = None,
+    pdp_title_stored: str = "",
+) -> Optional[str]:
+    """Return the evidence that identifies a displayed product with its PDP.
+
+    Titles remain the fallback when another page cannot expose a product path.
+    When both PDP and cart paths are available, exact path equality is stronger
+    than display-title formatting; any variant IDs available on both sides must
+    also agree. A trailing parenthetical title identifier is accepted only
+    when the PDP handle ends with the same identifier.
+    """
+
+    identity = cart_identity if isinstance(cart_identity, Mapping) else {}
+    pdp_parts = urlsplit(str(pdp_url or ""))
+    cart_path = str(identity.get("product_path") or "").strip()
+    pdp_path = pdp_parts.path.rstrip("/")
+    cart_path = urlsplit(cart_path).path.rstrip("/")
+    if pdp_path.startswith("/products/") and cart_path.startswith("/products/"):
+        if pdp_path != cart_path:
+            return None
+        pdp_variant = (parse_qs(pdp_parts.query).get("variant") or [""])[0].strip()
+        cart_variant = str(
+            identity.get("product_url_variant_id")
+            or identity.get("row_data_variant_id")
+            or identity.get("input_data_variant_id")
+            or ""
+        ).strip()
+        if pdp_variant and cart_variant and pdp_variant != cart_variant:
+            return None
+        return "PRODUCT_PATH"
+
+    if titles_match(pdp_title, cart_title):
+        return "RENDERED_TITLE"
+    if pdp_title_stored and titles_match(pdp_title_stored, cart_title):
+        return "STORED_TITLE"
+
+    # Some checkout summaries omit a parenthetical product identifier that
+    # the PDP includes. Accept that presentation difference only when the
+    # identifier is also the exact trailing token in the PDP product handle.
+    pdp_slug = pdp_parts.path.rstrip("/").rsplit("/", 1)[-1].casefold()
+    for title in (pdp_title, pdp_title_stored):
+        normalized_title = normalize(title)
+        match = re.search(r"\s*\(([^()]*)\)$", normalized_title)
+        if not match:
+            continue
+        identifier = match.group(1).strip()
+        identifier_slug = re.sub(r"[^a-z0-9]+", "-", identifier.casefold()).strip("-")
+        if not identifier_slug or not pdp_slug.endswith(f"-{identifier_slug}"):
+            continue
+        title_without_identifier = normalized_title[: match.start()].rstrip()
+        if title_without_identifier == normalize(cart_title):
+            return "PATH_CONFIRMED_TITLE_SUFFIX"
+    return None
 
 
 def sanitized_cart_line(item: object) -> dict:
@@ -256,6 +318,7 @@ class ShoppingFlow:
         state = {
             "pdp_title": prod.get_title(),
             "pdp_url": self.page.url,
+            "pdp_path": urlsplit(self.page.url).path,
         }
         self.state.update(state)
         return state
@@ -301,6 +364,7 @@ class ShoppingFlow:
             "cart_color": drawer.get_item_color(0),
             "cart_size": drawer.get_item_size(0),
             "cart_qty": drawer.get_item_quantity(0),
+            "cart_identity": drawer.get_item_identity(0),
         }
         self.state.update(state)
         self.state["drawer"] = drawer
@@ -308,8 +372,15 @@ class ShoppingFlow:
 
     def validate_variant(self) -> dict:
         """校验 PDP 与抽屉的变体一致性（商品/颜色/尺码/数量）。"""
+        product_basis = product_match_basis(
+            self.state.get("pdp_title"),
+            self.state.get("cart_title"),
+            pdp_url=self.state.get("pdp_url", ""),
+            cart_identity=self.state.get("cart_identity"),
+        )
+        self.state["product_match_basis"] = product_basis
         checks = {
-            "product": titles_match(self.state["pdp_title"], self.state["cart_title"]),
+            "product": product_basis is not None,
             "color": normalize(self.state["color"]) == normalize(self.state["cart_color"]),
             "size": normalize(self.state["size"]) == normalize(self.state["cart_size"]),
             "quantity": int(self.state["cart_qty"] or 0) == 1,

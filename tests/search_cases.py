@@ -31,7 +31,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from flows.shopping_flow import FlowError
-from pages.home_page import HomePage
 from pages.product_page import ProductPage
 from pages.search_page import SearchPage
 from utils.result import CaseResult, iso_now
@@ -41,9 +40,7 @@ STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
-# 正式 Positive Search 查询词：Mondressy 主营 dresses，命中率高且不绑定固定商品。
-# 查询词位于 Runner（Suite 配置），不硬编码在 Page Object。
-POSITIVE_QUERY = "dress"
+# Positive Search 查询词由站点 profile 提供。
 
 SEARCH_MODE = "HYBRID_SEARCH"
 
@@ -57,6 +54,7 @@ class SearchCaseRunner:
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.page = runtime.page
         self.site_config = site_config
+        self.positive_query = str(((site_config.get("pages") or {}).get("search") or {}).get("smoke_query") or "")
         self.state: dict = {}
         self.results: Dict[str, CaseResult] = {}
 
@@ -178,18 +176,18 @@ class SearchCaseRunner:
         search = self._search()
         if not search.is_open():
             search.open_from_home()  # 防御：依赖链中断时重建会话
-        search.fill_query(POSITIVE_QUERY)
+        search.fill_query(self.positive_query)
         search.wait_predictive_ready()
-        predictive_count = search.predictive_product_cards().count()
+        predictive_count = search.predictive_product_count()
         try:
             recovered = search.submit_query()
         except TimeoutError as exc:
             raise FlowError("SEARCH_SUBMIT_FAILURE", str(exc)) from exc
         query = search.current_query()
-        if query != POSITIVE_QUERY:
+        if query != self.positive_query:
             raise FlowError(
                 "SEARCH_QUERY_STATE_MISMATCH",
-                f"url_q={query} expected={POSITIVE_QUERY}",
+                f"url_q={query} expected={self.positive_query}",
             )
         count = search.result_count()
         if count <= 0:
@@ -277,16 +275,14 @@ class SearchCaseRunner:
         各端重置语义作为观察如实记录在 Detail。
         """
         search = self._open_home_search()
-        home = HomePage(self.page, self.site_config, self.viewport)
-
         # 1) 关闭按钮路径：输入 -> 关闭 -> 重开
-        search.fill_query(POSITIVE_QUERY)
+        search.fill_query(self.positive_query)
         try:
             search.close_button().click()
             search.wait_closed()
         except Exception as exc:
             raise FlowError("SEARCH_RESET_FAILURE", f"close button: {exc}") from exc
-        home.open_search()
+        search.reopen()
         try:
             search.wait_open()
         except Exception as exc:
@@ -294,7 +290,7 @@ class SearchCaseRunner:
         value_after_reopen = search.input_value()
 
         # 2) Escape 路径：输入 -> Escape -> 检查容器关闭与输入值
-        search.fill_query(POSITIVE_QUERY)
+        search.fill_query(self.positive_query)
         try:
             search.input().press("Escape")
             search.wait_closed()
@@ -303,14 +299,14 @@ class SearchCaseRunner:
         value_after_escape = search.input_value()
 
         # 3) 最终重开：输入框必须可见可用
-        home.open_search()
+        search.reopen()
         try:
             search.wait_open()
             search.validate_input_usable()
         except Exception as exc:
             raise FlowError("SEARCH_RESET_FAILURE", f"final reopen: {exc}") from exc
 
-        retained = value_after_escape == POSITIVE_QUERY
+        retained = value_after_escape == self.positive_query
         return (
             f"close_button=ok escape=ok reopen_input_usable=True "
             f"value_after_reopen={value_after_reopen!r} "
