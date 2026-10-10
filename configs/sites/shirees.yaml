@@ -49,6 +49,9 @@ pages:
 
   search:
     url: /search
+    # Readonly Build #1 observed a ready mobile Home at the configured root
+    # with a query string before Search entry; keep the main URL checks strict.
+    home_query_policy: configured_root_with_home_controls
     smoke_query: SHI22501284
     submit_strategy: enter
     entry_strategy:

@@ -122,3 +122,31 @@ def test_other_sites_keep_strict_matching(page):
     current.site_config = BasePage.load_site_config(site_name="mondressy")
     with pytest.raises(RuntimeError, match="^Search session can only be opened from Home$"):
         current.ensure_search_session_open()
+
+
+def test_shirees_allows_only_observed_root_home_query_with_visible_mobile_controls(page):
+    page.set_content('''<header class="header__wrapper">
+      <div id="logo"><a href="/">Shirees</a></div>
+      <button aria-label="Open navigation">Menu</button>
+    </header>''')
+    config = BasePage.load_site_config(site_name="shirees")
+    current = SearchPage(page, config, "mobile")
+    home = HomePage(page, config, "mobile")
+    configured_url = home.base_url()
+
+    assert current._home_url_matches(
+        "https://www.shirees.com/?opaque=value", configured_url, home
+    )
+    assert not current._home_url_matches(
+        "https://www.shirees.com/search?q=opaque", configured_url, home
+    )
+    assert not current._home_url_matches(
+        "https://www.shirees.com.attacker.test/?opaque=value", configured_url, home
+    )
+
+    page.locator('button[aria-label="Open navigation"]').evaluate(
+        "element => element.style.display = 'none'"
+    )
+    assert not current._home_url_matches(
+        "https://www.shirees.com/?opaque=value", configured_url, home
+    )
