@@ -65,6 +65,9 @@ pages:
 
   search:
     url: /search
+    # Readonly #158: the ready configured root Home acquired a query before
+    # Search entry. This policy keeps authority/path and Home controls strict.
+    home_query_policy: configured_root_with_home_controls
 
     selectors:
       container:

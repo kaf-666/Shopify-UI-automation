@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import time
 from typing import Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect
@@ -225,7 +225,7 @@ class SearchPage(BasePage):
         home = home or HomePage(self.page, self.site_config, self.viewport)
         actual_url = self.page.url
         configured_url = home.base_url()
-        if actual_url.rstrip("/") != configured_url.rstrip("/"):
+        if not self._home_url_matches(actual_url, configured_url, home):
             error = RuntimeError("Search session can only be opened from Home")
             try:
                 diagnostic = build_search_home_url_diagnostic(
@@ -260,6 +260,46 @@ class SearchPage(BasePage):
         expect(inp).to_be_enabled(timeout=timeout_ms)
         expect(inp).to_be_editable(timeout=timeout_ms)
 
+    def _home_url_matches(self, actual_url: str, configured_url: str, home: HomePage) -> bool:
+        """Keep strict matching by default; opt in to an observed root-Home query.
+
+        The exception applies only to the exact configured HTTPS authority and
+        root route, with visible configured Home controls. It permits no alias,
+        locale path, fragment, credentials or redirect to a different endpoint.
+        Raw URL values remain private and are never used as diagnostic output.
+        """
+        if actual_url.rstrip("/") == configured_url.rstrip("/"):
+            return True
+        config = (self.site_config.get("pages") or {}).get("search") or {}
+        if config.get("home_query_policy") != "configured_root_with_home_controls":
+            return False
+        try:
+            if (any(ord(character) <= 32 for character in actual_url)
+                    or "\\" in actual_url or "#" in actual_url
+                    or "?" in configured_url or "#" in configured_url):
+                return False
+            actual, configured = urlsplit(actual_url), urlsplit(configured_url)
+            if not (
+                actual.scheme == configured.scheme == "https"
+                and actual.netloc == configured.netloc
+                and actual.hostname and configured.hostname
+                and actual.username is None and actual.password is None
+                and actual.path in {"", "/"} and configured.path in {"", "/"}
+                and bool(actual.query)
+            ):
+                return False
+            from pages.navigation import NavigationPage
+
+            return bool(
+                home.logo().is_visible()
+                and home.search_trigger().is_visible()
+                and NavigationPage(self.page, self.site_config, self.viewport).header().is_visible()
+            )
+        except Exception:
+            # A failed observation cannot admit a non-Home page or mask the
+            # original Home assertion/its existing sanitized evidence chain.
+            return False
+
     def _browser_name(self) -> str | None:
         """Read the browser engine name without touching browser state."""
         try:
@@ -287,7 +327,7 @@ class SearchPage(BasePage):
             attempt_number += 1
             try:
                 self.page.evaluate("document.readyState")
-                if self.page.url.rstrip("/") != base:
+                if not self._home_url_matches(self.page.url, base, home):
                     home.open()
                 self.ensure_search_session_open(home, case_id=case_id, browser=browser)
                 return
