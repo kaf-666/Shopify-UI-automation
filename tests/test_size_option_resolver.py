@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import json
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -197,3 +198,54 @@ def test_disabled_aria_disabled_and_custom_size_are_not_selected(page) -> None:
         resolver.select("Custom Size")
     with pytest.raises(LookupError, match="L"):
         resolver.select("L")
+
+
+def test_intercepted_click_has_safe_action_evidence_and_still_fails(page):
+    page.set_content(_size_markup(mode="none", hidden=True) +
+                     '<div style="position:fixed;inset:0;z-index:999">private@example.com</div>')
+    page.set_default_timeout(200)
+    resolver = _resolver(page)
+    with pytest.raises(RuntimeError, match="Size selection did not converge") as caught:
+        resolver.select("M")
+    message = str(caught.value)
+    actions = json.loads(message.split("action_diagnostics=", 1)[1])
+    assert len(actions) == 2
+    for action in actions:
+        assert action["started"] is True
+        assert action["completed"] is False
+        assert action["error_category"] == "POINTER_INTERCEPTED"
+        assert action["control_kind"] == "LABEL"
+        assert action["label_association_matches"] is True
+        assert action["associated_label_count"] == 1
+        assert action["radio_id_unique"] is True
+        assert action["control_count"] == action["radio_count"] == 1
+    assert "private@example.com" not in message
+    assert "<div" not in message
+    assert "selected_current_dom=NONE" in message
+    assert resolver.selected_value() is None
+
+
+def test_completed_click_state_loss_is_distinct_from_action_error(page, monkeypatch):
+    page.set_content(_size_markup(mode="persistent-loss", hidden=True))
+    monkeypatch.setattr(resolver_module, "SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS", 150)
+    with pytest.raises(RuntimeError) as caught:
+        _resolver(page).select("M")
+    actions = json.loads(str(caught.value).split("action_diagnostics=", 1)[1])
+    assert len(actions) == 2
+    assert all(action["completed"] and action["error_category"] is None for action in actions)
+    assert "selected_current_dom=NONE" in str(caught.value)
+
+
+def test_metadata_failure_never_replaces_business_failure(page, monkeypatch):
+    page.set_content(_size_markup(mode="persistent-loss", hidden=True))
+    monkeypatch.setattr(resolver_module, "SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS", 150)
+    monkeypatch.setattr(SizeOptionResolver, "_control_diagnostic",
+                        staticmethod(lambda option: {"metadata_status": "UNAVAILABLE"}))
+    with pytest.raises(RuntimeError, match="Size selection did not converge") as caught:
+        _resolver(page).select("M")
+    assert "UNAVAILABLE" in str(caught.value)
+
+
+@pytest.mark.parametrize("raw", ["Signature secret", "Cookie token", "王小明 /account/private", "private@example.com"])
+def test_uncontrolled_action_exception_is_only_a_category(raw):
+    assert SizeOptionResolver._action_error_category(RuntimeError(raw)) == "ACTION_ERROR"

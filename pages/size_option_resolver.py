@@ -8,6 +8,7 @@ ElementHandle/JSHandle，因而可安全处理 Theme/SPB rerender 与模型切�
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -705,8 +706,56 @@ class SizeOptionResolver:
             f"{diagnostics.get('target_option_available_current_dom', False)} "
             f"elapsed_ms={diagnostics.get('elapsed_ms', 0)} "
             f"rerender_observed={diagnostics.get('rerender_observed', False)} "
-            f"attempts={diagnostics.get('attempts', 0)}"
+            f"attempts={diagnostics.get('attempts', 0)} "
+            f"action_diagnostics={json.dumps(diagnostics.get('action_diagnostics', []), separators=(',', ':'))}"
         )
+
+    @staticmethod
+    def _action_error_category(error: Exception) -> str:
+        """Classify a Playwright action without exporting its DOM/URL call log."""
+        try:
+            message = str(error).lower()
+        except Exception:
+            return "ACTION_ERROR"
+        for marker, category in (
+            ("intercepts pointer events", "POINTER_INTERCEPTED"),
+            ("outside of the viewport", "OUTSIDE_VIEWPORT"),
+            ("not attached", "DETACHED"),
+            ("not visible", "NOT_VISIBLE"),
+            ("not stable", "NOT_STABLE"),
+            ("strict mode violation", "NON_UNIQUE"),
+        ):
+            if marker in message:
+                return category
+        return "TIMEOUT" if isinstance(error, PlaywrightTimeoutError) else "ACTION_ERROR"
+
+    @staticmethod
+    def _control_diagnostic(option: SizeOption) -> dict[str, Any]:
+        """Read only bounded booleans/counts; never retain ids, text or markup."""
+        result: dict[str, Any] = {"metadata_status": "UNAVAILABLE"}
+        try:
+            result["control_count"] = option.control_locator.count()
+            result["radio_count"] = option.locator.count()
+            result.update(option.locator.evaluate("""radio => ({
+                associated_label_count: radio.labels ? radio.labels.length : 0,
+                radio_id_unique: !!radio.id && Array.from(document.querySelectorAll('[id]'))
+                    .filter(element => element.id === radio.id).length === 1,
+                radio_enabled: !radio.disabled
+            })""", timeout=SIZE_READINESS_PROBE_TIMEOUT_MS))
+            radio_id = option.locator.get_attribute("id", timeout=SIZE_READINESS_PROBE_TIMEOUT_MS) or ""
+            result.update(option.control_locator.evaluate("""(control, radioId) => ({
+                control_kind: control.tagName === 'LABEL' ? 'LABEL' :
+                    control.tagName === 'INPUT' ? 'INPUT' : 'OTHER',
+                label_association_matches: control.tagName === 'LABEL' &&
+                    !!control.control && control.control.id === radioId,
+                control_visible: !!(control.getClientRects().length &&
+                    getComputedStyle(control).visibility !== 'hidden'),
+                control_enabled: !control.disabled
+            })""", radio_id, timeout=SIZE_READINESS_PROBE_TIMEOUT_MS))
+            result["metadata_status"] = "COLLECTED"
+        except Exception:
+            pass
+        return result
 
     def select(self, value: str) -> str:
         selection_started = time.monotonic()
@@ -745,6 +794,7 @@ class SizeOptionResolver:
             "elapsed_ms": 0,
             "rerender_observed": False,
             "attempts": 0,
+            "action_diagnostics": [],
         }
 
         for attempt in range(1, SIZE_SELECTION_MAX_ATTEMPTS + 1):
@@ -757,9 +807,15 @@ class SizeOptionResolver:
 
             diagnostics["attempts"] = attempt
             diagnostics["model"] = option.model
+            action = self._control_diagnostic(option)
+            action.update({"attempt": attempt, "started": True, "completed": False,
+                           "error_category": None})
+            diagnostics["action_diagnostics"].append(action)
             try:
                 option.control_locator.click()
-            except Exception:
+                action["completed"] = True
+            except Exception as action_error:
+                action["error_category"] = self._action_error_category(action_error)
                 # A detached control is handled like any other non-converging
                 # current-DOM state; the next attempt must re-detect it.
                 if attempt >= SIZE_SELECTION_MAX_ATTEMPTS:
