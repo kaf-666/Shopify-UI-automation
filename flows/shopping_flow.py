@@ -133,7 +133,11 @@ class ShoppingFlow:
 
     def _session_api(self):
         # The context's API session remains usable when its page is closed.
-        return self.api_request if self.api_request is not None else self.page.request
+        api = self.api_request if self.api_request is not None else self.page.request
+        context = getattr(self.page, "context", None)
+        if context is not None and context.request is not api:
+            raise FlowError("CART_PRECONDITION_UNVERIFIED", "API_SESSION_MISMATCH")
+        return api
 
     def pre_clean_cart(self) -> None:
         self.cleanup_cart(journey="pre_clean")
@@ -272,7 +276,7 @@ class ShoppingFlow:
                 return index, candidate
         raise FlowError("PRODUCT_NOT_SUITABLE", "前 N 个商品均不满足颜色/尺码/加购条件")
 
-    def validate_purchase_area(self) -> dict:
+    def validate_purchase_area(self, *, phase="legacy") -> dict:
         """验证购买区域可用（标题/价格/颜色/尺码/加购按钮）。"""
         prod = self.state["prod"]
         title = prod.get_title()
@@ -288,7 +292,7 @@ class ShoppingFlow:
             and colors > 0
             and sizes > 0
             and atc_visible
-            and atc_enabled
+            and (phase == "pre_selection" or atc_enabled)
         )
         if not ok:
             raise FlowError(
@@ -326,6 +330,13 @@ class ShoppingFlow:
     def add_to_cart(self) -> None:
         """真实 UI 加购，等待实际的购物车变更响应。"""
         prod = self.state["prod"]
+        try:
+            prod.wait_purchase_ready(
+                phase="post_selection", expected_color=self.state.get("color"),
+                expected_size=self.state.get("size"),
+            )
+        except Exception as exc:
+            raise FlowError("ADD_TO_CART_FAILURE", "POST_SELECTION_NOT_READY") from exc
         try:
             with self.page.expect_response(
                 lambda r: "/cart/add" in r.url and r.request.method == "POST",

@@ -48,10 +48,11 @@ def _run_one(site: str, journey: str, iteration: int) -> dict:
         )
         readiness_diagnostics = []
 
-        def capture_readiness(prod, phase):
+        def capture_readiness(prod, phase, expected_color=None, expected_size=None):
             timeline = []
             try:
-                return prod.wait_purchase_ready(diagnostics_hook=timeline.append)
+                return prod.wait_purchase_ready(diagnostics_hook=timeline.append, phase=phase,
+                                                expected_color=expected_color, expected_size=expected_size)
             finally:
                 readiness_diagnostics.append({"phase": phase, "samples": timeline})
 

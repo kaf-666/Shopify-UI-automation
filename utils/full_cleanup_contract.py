@@ -5,6 +5,69 @@ STAGES = ("pre_clean", "direct", "search", "browse")
 _ID = re.compile(r"[0-9a-f]{32}")
 
 
+def validate_cleanup_diagnostics(report):
+    """Optional additive v1 evidence; older valid cleanup reports stay valid."""
+    if "diagnostics" not in report:
+        return True
+    if not {"clear_requested", "cart_item_count", "status", "precheck_status", "postcheck_status", "clear_response_category", "safe_error_code"} <= set(report):
+        return False
+    d = report["diagnostics"]
+    keys = {"version", "api_session_id", "session_binding", "precheck_item_count",
+            "precheck_items_length", "clear_request_attempted", "clear_http_status",
+            "clear_target_match", "clear_response_structure_valid", "clear_response_item_count",
+            "clear_response_items_length", "postcheck_item_count", "postcheck_items_length",
+            "reads", "post_elapsed_ms", "known_cart_write_overlap", "known_cart_write_dispatch_delta"}
+    if not isinstance(d, dict) or set(d) != keys or type(d["version"]) is not int or d["version"] != 1:
+        return False
+    if d["api_session_id"] is not None and (not isinstance(d["api_session_id"], str)
+            or not re.fullmatch(r"api-[0-9a-f]+", d["api_session_id"])):
+        return False
+    if d["session_binding"] not in {"MATCH", "MISMATCH_OR_UNAVAILABLE", "UNVERIFIED"}:
+        return False
+    for key in keys - {"version", "api_session_id", "session_binding", "clear_request_attempted",
+                      "clear_target_match", "clear_response_structure_valid", "reads", "known_cart_write_overlap"}:
+        if d[key] is not None and (type(d[key]) is not int or d[key] < 0):
+            return False
+    if (type(d["clear_request_attempted"]) is not bool or type(d["clear_response_structure_valid"]) is not bool
+            or d["clear_target_match"] is not None and type(d["clear_target_match"]) is not bool
+            or d["clear_request_attempted"] != report["clear_requested"]
+            or d["precheck_item_count"] != report["cart_item_count"]):
+        return False
+    if d["clear_response_structure_valid"] != (d["clear_response_item_count"] is not None
+                                                and d["clear_response_items_length"] is not None):
+        return False
+    if report["clear_response_category"] == "HTTP_200" and (d["clear_http_status"] != 200 or d["clear_target_match"] is not True):
+        return False
+    if d["session_binding"] != "MATCH" and (report["status"] != "BLOCKED" or report["clear_requested"] or d["reads"]):
+        return False
+    if d["known_cart_write_overlap"] not in {"OBSERVED", "NOT_OBSERVED", "UNAVAILABLE"}:
+        return False
+    delta = d["known_cart_write_dispatch_delta"]
+    if d["known_cart_write_overlap"] != ("UNAVAILABLE" if delta is None else "OBSERVED" if delta else "NOT_OBSERVED"):
+        return False
+    reads = d["reads"]
+    if not isinstance(reads, list) or len(reads) > 2:
+        return False
+    for i, r in enumerate(reads):
+        if (not isinstance(r, dict) or set(r) != {"stage", "fresh_request_attempted", "started_ms", "finished_ms", "item_count", "items_length"}
+                or r["stage"] != ("precheck" if i == 0 else "postcheck") or r["fresh_request_attempted"] is not True):
+            return False
+        if any(type(r[k]) is not int or r[k] < 0 for k in ("started_ms", "finished_ms")) or r["finished_ms"] < r["started_ms"]:
+            return False
+        if any(r[k] is not None and (type(r[k]) is not int or r[k] < 0) for k in ("item_count", "items_length")):
+            return False
+        prefix = r["stage"]
+        if r["item_count"] != d[prefix + "_item_count"] or r["items_length"] != d[prefix + "_items_length"]:
+            return False
+    if d["postcheck_item_count"] is not None and len(reads) != 2:
+        return False
+    if report["status"] == "PASS" and (d["session_binding"] != "MATCH" or not reads):
+        return False
+    if report["clear_requested"] and report["postcheck_status"] == "PASS":
+        return d["postcheck_item_count"] == 0 and d["postcheck_items_length"] == 0
+    return True
+
+
 def uses_v3(value, mutation):
     reports = value.get("journeys", [])
     api = mutation.get("api_cleanup") if isinstance(mutation, dict) else None
@@ -92,6 +155,8 @@ def validate_operations(value, mutation, viewport):
                 "precheck_status", "api_policy_decision", "postcheck_status",
                 "cart_item_count", "safe_error_code", "clear_response_category"}
     if not all(isinstance(r, dict) and required <= set(r) for r in reports):
+        return False
+    if not all(validate_cleanup_diagnostics(r) for r in reports):
         return False
     record_keys = {"operation_id", "attempt_id", "cleanup_stage", "viewport",
                    "authorization", "dispatch", "response", "http_status"}

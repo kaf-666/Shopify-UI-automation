@@ -173,7 +173,8 @@ def test_detached_policy_is_fail_closed():
     guard = policy(api)
     guard.detach()
     assert clean(api, guard)["status"] == "BLOCKED"
-    assert len(api.calls) == 1
+    assert len(api.calls) == 0
+    assert clean(api, guard)["safe_error_code"] == "API_SESSION_MISMATCH"
 
 
 def test_policy_classifier_denial_is_respected():

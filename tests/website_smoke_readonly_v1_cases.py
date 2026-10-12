@@ -369,12 +369,15 @@ class WebsiteSmokeReadonlyV1Runner:
         self,
         prod: ProductPage,
         phase: str,
+        expected_color=None,
+        expected_size=None,
     ) -> tuple[int, int, bool]:
         timeline: List[dict] = []
         try:
-            if not self._variant_diagnostics_enabled():
-                return prod.wait_purchase_ready()
-            return prod.wait_purchase_ready(diagnostics_hook=timeline.append)
+            return prod.wait_purchase_ready(
+                diagnostics_hook=timeline.append, phase=phase,
+                expected_color=expected_color, expected_size=expected_size,
+            )
         except PurchaseAreaReadinessError as exc:
             detail = f"phase={phase} {exc}"
             if timeline:
@@ -427,7 +430,7 @@ class WebsiteSmokeReadonlyV1Runner:
             )
         try:
             _colors, _sizes, atc_available = self._wait_purchase_ready(
-                prod, "post_selection"
+                prod, "post_selection", color, size
             )
         except PurchaseAreaReadinessError as exc:
             raise FlowError(category, str(exc)) from exc

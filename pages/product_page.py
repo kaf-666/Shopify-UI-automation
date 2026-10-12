@@ -9,6 +9,7 @@ MODEL_02 的不可用状态识别，不作为 selected state。提供加购按�
 from __future__ import annotations
 
 import time
+import json
 from typing import Callable, Optional
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -534,15 +535,16 @@ class ProductPage(BasePage):
         }
 
     @staticmethod
-    def _missing_readiness_conditions(snapshot: dict) -> list[str]:
+    def _missing_readiness_conditions(snapshot: dict, phase: str = "legacy") -> list[str]:
         """Return failed gates from the canonical purchase-readiness contract."""
         conditions = (
             ("purchase_area", bool(snapshot["purchase_area_attached"])),
             ("title", bool(snapshot["title_visible"])),
             ("color", snapshot["color_count"] > 0),
-            ("size", snapshot["size_count"] > 0),
+            ("size", snapshot["size_count"] > 0 and (phase != "pre_selection" or (
+                snapshot["size_group_detected"] and snapshot["normal_size_available"] > 0))),
             ("atc_visible", bool(snapshot["atc_visible"])),
-            ("atc_enabled", bool(snapshot["atc_enabled"])),
+            ("atc_enabled", phase == "pre_selection" or bool(snapshot["atc_enabled"])),
         )
         return [name for name, ready in conditions if not ready]
 
@@ -576,6 +578,10 @@ class ProductPage(BasePage):
             "normal_size_available": int(snapshot["normal_size_available"]),
             "candidate_group_count": int(snapshot.get("candidate_group_count", 0)),
             "selected_size": snapshot["selected_size"],
+            "size_model": snapshot.get("size_model") or "UNKNOWN",
+            "readiness_phase": snapshot.get("readiness_phase", "legacy"),
+            "slowest_component": max(snapshot.get("readiness_cost_ms") or {"NONE": 0},
+                                     key=(snapshot.get("readiness_cost_ms") or {"NONE": 0}).get),
             "atc_count": int(snapshot.get("atc_count", 0)),
             "atc_probe_skipped": bool(snapshot.get("atc_probe_skipped", False)),
             "atc_visible": bool(snapshot["atc_visible"]),
@@ -633,6 +639,10 @@ class ProductPage(BasePage):
         self,
         timeout_ms: int = 15_000,
         diagnostics_hook: Optional[Callable[[dict], None]] = None,
+        *,
+        phase: str = "legacy",
+        expected_color: Optional[str] = None,
+        expected_size: Optional[str] = None,
     ) -> tuple[int, int, bool]:
         """Wait for purchase readiness inside one hard wall-clock deadline.
 
@@ -640,12 +650,18 @@ class ProductPage(BasePage):
         poll quantum is deliberately independent of diagnostics so enabling
         structured logging cannot change production timeout semantics.
         """
+        if phase not in {"legacy", "pre_selection", "post_selection"}:
+            raise ValueError("Unsupported readiness phase")
+        if phase == "post_selection" and (not expected_color or not expected_size):
+            raise ValueError("Post-selection requires the requested variant")
         started = time.monotonic()
+        stable_since = None
         timeout_ms = max(0, int(timeout_ms))
         deadline = started + timeout_ms / 1000
         poll_count = 0
         last_poll_duration_ms = 0
         max_poll_duration_ms = 0
+        history = []
         initial = self._empty_readiness_snapshot()
         final = initial
         had_deadline = hasattr(self, "_readiness_deadline")
@@ -667,6 +683,12 @@ class ProductPage(BasePage):
                     max_poll_duration_ms, last_poll_duration_ms
                 )
                 snapshot = dict(snapshot)
+                snapshot["readiness_phase"] = phase
+                if phase == "post_selection":
+                    # Read actual checked state, not the resolver's early-exit
+                    # availability sample (which may precede the selected radio).
+                    snapshot["selected_size"] = self._safe_state(self.get_selected_size, None)
+                    snapshot["selected_color"] = self._safe_state(self.get_selected_color, None)
                 snapshot.update(
                     {
                         "poll_count": poll_count,
@@ -681,16 +703,36 @@ class ProductPage(BasePage):
                 if poll_count == 1:
                     initial = snapshot
                 final = snapshot
-                self._emit_readiness_diagnostic(
-                    snapshot, started, diagnostics_hook
-                )
+                self._emit_readiness_diagnostic(snapshot, started, history.append)
+                if len(history) > 12:
+                    del history[1]
+                self._emit_readiness_diagnostic(snapshot, started, diagnostics_hook)
 
                 # A poll that finishes after the deadline is not a legal PASS,
                 # even if its final DOM read happens to look ready.
                 if time.monotonic() >= deadline:
                     break
-                if self._snapshot_ready(snapshot):
-                    return snapshot["color_count"], snapshot["size_count"], True
+                ready = not self._missing_readiness_conditions(snapshot, phase)
+                if phase == "post_selection":
+                    ready = ready and all(
+                        str(snapshot.get(key) or "").strip().casefold() == str(value).strip().casefold()
+                        for key, value in (("selected_color", expected_color), ("selected_size", expected_size))
+                    )
+                if ready:
+                    if phase != "post_selection":
+                        return snapshot["color_count"], snapshot["size_count"], True
+                    if stable_since is None:
+                        stable_since = time.monotonic()
+                    if time.monotonic() - stable_since >= 0.2:
+                        return snapshot["color_count"], snapshot["size_count"], True
+                    # Sample the actual checked/enabled conditions throughout
+                    # the stability window; this is not a blind readiness delay.
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                    continue
+                stable_since = None
+                if phase == "post_selection" and not self._missing_readiness_conditions(snapshot, phase):
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                    continue
 
                 remaining_ms = int(
                     max(0, (deadline - time.monotonic()) * 1000)
@@ -713,8 +755,15 @@ class ProductPage(BasePage):
                 except AttributeError:
                     pass
 
-        failing_conditions = self._missing_readiness_conditions(final)
+        failing_conditions = self._missing_readiness_conditions(final, phase)
+        if phase == "post_selection":
+            for key, expected in (("selected_color", expected_color), ("selected_size", expected_size)):
+                if str(final.get(key) or "").strip().casefold() != str(expected).strip().casefold():
+                    failing_conditions.append(key)
+            if not failing_conditions:
+                failing_conditions.append("variant_stability")
         raise PurchaseAreaReadinessError(
+            f"phase={phase} "
             "purchase_area_attached="
             f"{final['purchase_area_attached']} "
             f"purchase_area_count={final.get('purchase_area_count', 0)} "
@@ -747,7 +796,8 @@ class ProductPage(BasePage):
             f"elapsed_ms={int(max(0, (time.monotonic() - started) * 1000))} "
             f"deadline_ms={timeout_ms} "
             f"last_poll_duration_ms={last_poll_duration_ms} "
-            f"max_poll_duration_ms={max_poll_duration_ms}"
+            f"max_poll_duration_ms={max_poll_duration_ms} "
+            f"readiness_timeline={json.dumps(history, separators=(',', ':'))}"
         )
 
     def _find_option(self, options, value: str, missing_msg: str):

@@ -582,7 +582,7 @@ class WebsiteSmokeV1Runner:
         if not title or not price:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", f"title={title[:40]!r} price={price!r}")
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready()
+            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
         except PurchaseAreaReadinessError as exc:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
@@ -591,14 +591,14 @@ class WebsiteSmokeV1Runner:
                 f"color_options={color_count} size_options={size_count} atc={atc_available}",
             )
         try:
-            self.flow.validate_purchase_area()
+            self.flow.validate_purchase_area(phase="pre_selection")
         except FlowError as exc:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         self.flow.capture_pdp_state()
         self.state["direct_stored_title"] = self._stored_title(prod, title)
         return (
             f"entry_mode=DIRECT product_path={self.state['direct_path']} title={title[:40]!r} "
-            f"price={price} color_options={color_count} size_options={size_count} atc_available=True"
+            f"price={price} color_options={color_count} size_options={size_count} pre_selection_ready=True"
         )
 
     def _c_direct02(self) -> str:
@@ -720,7 +720,7 @@ class WebsiteSmokeV1Runner:
         """Search Product Purchase：搜索结果商品完整进入购买链，随后 UI 移除。"""
         prod = self.state["search_prod"]
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready()
+            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
         except PurchaseAreaReadinessError as exc:
             raise FlowError("SEARCH_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
@@ -833,7 +833,7 @@ class WebsiteSmokeV1Runner:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""
         prod = self.state["browse_prod"]
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready()
+            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
         except PurchaseAreaReadinessError as exc:
             raise FlowError("PURCHASE_AREA_FAILURE", str(exc)) from exc
         if color_count == 0 or size_count == 0 or not atc_available:
@@ -842,10 +842,13 @@ class WebsiteSmokeV1Runner:
                 f"color_options={color_count} size_options={size_count} atc={atc_available}",
             )
         try:
-            self.flow.validate_purchase_area()
+            self.flow.validate_purchase_area(phase="pre_selection")
             self.flow.capture_pdp_state()
             color = self.flow.select_color()
             size = self.flow.select_size()
+            prod.wait_purchase_ready(phase="post_selection", expected_color=color, expected_size=size)
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("VARIANT_SELECTION_FAILURE", str(exc)) from exc
         except FlowError as exc:
             raise FlowError("VARIANT_SELECTION_FAILURE", str(exc)) from exc
         self._capture_selected_variant()

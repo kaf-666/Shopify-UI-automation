@@ -484,7 +484,11 @@ class SizeOptionResolver:
                 continue
             available_count = 1
             normal_available = 0 if is_custom else 1
-            break
+            if normal_available:
+                break
+            # A custom-measurement trigger is not a normal saleable size.
+            # Keep looking so a preceding custom trigger cannot hide the
+            # normal choices from the pre-selection readiness contract.
 
         custom_model = str(
             self._custom_measurement_config().get("id") or SIZE_MODEL_03

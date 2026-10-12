@@ -403,7 +403,7 @@ def test_diagnostic_failure_detail_reports_phase_first_gate_and_timeline(
 
     class _FailingProduct:
         @staticmethod
-        def wait_purchase_ready(diagnostics_hook=None):
+        def wait_purchase_ready(diagnostics_hook=None, *, phase="legacy", expected_color=None, expected_size=None):
             assert diagnostics_hook is not None
             for snapshot in timeline:
                 diagnostics_hook(snapshot)

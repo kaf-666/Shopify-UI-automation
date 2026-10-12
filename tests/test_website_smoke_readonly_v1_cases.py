@@ -105,7 +105,7 @@ class _FakeProduct:
     def get_price(self) -> str:
         return "$99"
 
-    def wait_purchase_ready(self):
+    def wait_purchase_ready(self, *, phase="legacy", diagnostics_hook=None, expected_color=None, expected_size=None):
         self.readiness_calls += 1
         return 2, 3, True
 

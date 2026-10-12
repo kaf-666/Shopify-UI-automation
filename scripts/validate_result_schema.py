@@ -479,7 +479,10 @@ def _validate_cleanup_audit(run_dir: Path, viewport: object, value: dict, *,
         expected_keys = set(cleanup_report("", ""))
         if not v3:
             expected_keys -= {"operation_id", "attempt_id"}
-        shape = isinstance(report, dict) and set(report) == expected_keys
+        from utils.full_cleanup_contract import validate_cleanup_diagnostics
+        shape = (isinstance(report, dict)
+                 and set(report) in (expected_keys, expected_keys | {"diagnostics"})
+                 and validate_cleanup_diagnostics(report))
         valid = shape and valid
         if not shape:
             continue

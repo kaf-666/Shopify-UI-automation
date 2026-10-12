@@ -27,6 +27,7 @@ from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.result import make_run_id, write_results_json
 from utils.suite_runner import guarded_main
+from utils.readonly_mutation_guard import ReadonlyMutationGuard
 
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "variant-diagnostics"
@@ -619,7 +620,9 @@ def run_viewport(
     """Run one independent browser session and close it unconditionally."""
 
     runtime = create_browser(viewport, site_name=site)
+    guard = ReadonlyMutationGuard()
     try:
+        guard.attach(runtime.context)
         product, used_query, navigated_url = _open_product(
             runtime,
             site_config,
@@ -628,7 +631,8 @@ def run_viewport(
             query,
             product_url,
         )
-        product.wait_purchase_ready()
+        readiness_timeline = []
+        product.wait_purchase_ready(phase="pre_selection", diagnostics_hook=readiness_timeline.append)
         title = _safe_text(product.get_title, default="") or ""
         selectors = _diagnostic_selectors(product)
         requested_color = product.first_available_color()
@@ -639,6 +643,8 @@ def run_viewport(
         # This is the final business action.  Once it returns, the remainder
         # of this function only reads state and waits for the observation window.
         product.select_size(requested_size)
+        product.wait_purchase_ready(phase="post_selection", expected_color=requested_color,
+                                    expected_size=requested_size, diagnostics_hook=readiness_timeline.append)
         selected_size_after_selection = product.get_selected_size()
         timeline, mutation = _observe_after_selection(
             product, requested_size, observe_ms, selectors
@@ -646,7 +652,11 @@ def run_viewport(
         classifications, reset, dom_events = classify_timeline(
             entry, requested_size, timeline
         )
+        if guard.violations():
+            raise RuntimeError("READONLY_MUTATION_BLOCKED")
         return {
+            "readonly_mutation_violation_count": 0,
+            "readiness_timeline": readiness_timeline[-12:],
             "entry": entry,
             "query": used_query,
             "product_url": navigated_url,
@@ -667,6 +677,7 @@ def run_viewport(
             "classifications": classifications,
         }
     finally:
+        guard.detach()
         close_browser(runtime)
 
 
