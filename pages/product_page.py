@@ -352,27 +352,81 @@ class ProductPage(BasePage):
         Full color enumeration remains available through ``available_options``
         for actual variant selection and post-readiness business behavior.
         """
-        options = self.color_options()
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        config = self._color_option_control_config()
+        # One read-only browser task replaces many sequential protocol reads.
+        # Return only a candidate index. The native disabled check remains
+        # authoritative (including inherited ARIA state and explicit roles).
+        # No HTML, values, headers or personal data leave the page.
         try:
-            total = options.count()
+            options = self.color_options()
+            excluded = []
+            for _ in range(options.count()):
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
+                candidate = options.evaluate_all(r"""(radios, config) => {
+                const norm = s => String(s || '').trim().toLowerCase();
+                const blocked = el => el && config.tokens.some(t =>
+                    norm(el.getAttribute('class')).split(/\s+/).includes(t));
+                const visible = el => {
+                    if (!el || !el.isConnected) return false;
+                    const style = getComputedStyle(el);
+                    if (style.display === 'none' || style.visibility !== 'visible') return false;
+                    if (style.display === 'contents') {
+                        return Array.from(el.childNodes).some(child => {
+                            if (child.nodeType === 1) return visible(child);
+                            if (child.nodeType !== 3) return false;
+                            const range = el.ownerDocument.createRange();
+                            range.selectNode(child);
+                            const rect = range.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        });
+                    }
+                    const rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+                const inheritedAriaDisabled = radio => {
+                    // Native radios have an implicit supported ARIA role.
+                    // Explicit role handling is left to Playwright below.
+                    if (radio.getAttribute('role')) return false;
+                    for (let el = radio; el; el = el.parentElement || el.getRootNode().host) {
+                        const value = (el.getAttribute('aria-disabled') || '').toLowerCase();
+                        if (value === 'true') return true;
+                        if (value === 'false') return false;
+                    }
+                    return false;
+                };
+                return radios.findIndex((radio, index) => {
+                    if (config.excluded.includes(index)) return false;
+                    if (!radio.isConnected || radio.matches(':disabled') ||
+                        inheritedAriaDisabled(radio) ||
+                        norm(radio.getAttribute('aria-disabled')) === 'true' ||
+                        blocked(radio) || blocked(radio.parentElement)) return false;
+                    const label = radio.closest('label') || (radio.id &&
+                        Array.from(radio.ownerDocument.querySelectorAll('label')).find(l => l.htmlFor === radio.id));
+                    const variant = radio.closest('.variant-input');
+                    let control;
+                    if (['radio','native'].includes(config.strategy)) control = visible(radio) ? radio : null;
+                    else if (['variant_input','variant-container'].includes(config.strategy)) control = visible(variant) ? variant : null;
+                    else if (['associated_label','label','label_for'].includes(config.strategy)) control = visible(label) ? label : visible(radio) ? radio : null;
+                    else control = visible(radio) ? visible(variant) ? variant : radio : visible(label) ? label : null;
+                    return !!control && norm(control.getAttribute('aria-disabled')) !== 'true' && !blocked(control);
+                });
+            }""", {"strategy": str(config.get("strategy") or config.get("control_strategy") or "").strip().lower(),
+                   "tokens": list(self._color_disabled_class_tokens()), "excluded": excluded})
+                if type(candidate) is not int or candidate < 0:
+                    return False
+                excluded.append(candidate)
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False
+                timeout = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS if deadline is None else max(
+                    1, min(READINESS_SNAPSHOT_PROBE_TIMEOUT_MS, int((deadline - time.monotonic()) * 1000)))
+                if not options.nth(candidate).is_disabled(timeout=timeout):
+                    return True
+            return False
         except Exception:
             return False
-        for index in range(total):
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            probe_timeout = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-            if deadline is not None:
-                probe_timeout = min(
-                    probe_timeout,
-                    max(1, int((deadline - time.monotonic()) * 1000)),
-                )
-            if self._color_option_available(
-                options.nth(index),
-                self._color_option_control_config(),
-                timeout_ms=probe_timeout,
-            ):
-                return True
-        return False
 
     def available_size_count(self) -> int:
         """返回可用尺码数；兼容计入 Free Custom Size 的历史语义。"""
@@ -482,6 +536,18 @@ class ProductPage(BasePage):
             lambda: self._size_resolver().readiness_snapshot(deadline=deadline),
             {},
         )
+        exhausted = deadline is not None and time.monotonic() >= deadline
+        if not size.get("size_option_available", 0) or exhausted:
+            # A missing size group cannot become purchasable by probing colors
+            # and ATC. Spend the remaining budget waiting for the missing size
+            # condition, then resolve all controls from the current DOM.
+            return {
+                **self._empty_readiness_snapshot(), **size,
+                "purchase_area_count": purchase_count, "purchase_area_attached": True,
+                "title_visible": title_visible, "size_count": int(size.get("size_option_available", 0)),
+                "color_probe_skipped": True, "atc_probe_skipped": True,
+                "probe_budget_exhausted": exhausted, "readiness_cost_ms": costs,
+            }
         color_ready = bool(
             timed(
                 "color_check_ms",
@@ -546,7 +612,12 @@ class ProductPage(BasePage):
             ("atc_visible", bool(snapshot["atc_visible"])),
             ("atc_enabled", phase == "pre_selection" or bool(snapshot["atc_enabled"])),
         )
-        return [name for name, ready in conditions if not ready]
+        missing = [name for name, ready in conditions if not ready]
+        if snapshot.get("color_probe_skipped") and snapshot["size_count"] == 0:
+            missing = [name for name in missing if name not in {"color", "atc_visible", "atc_enabled"}]
+        if snapshot.get("probe_budget_exhausted"):
+            missing.append("probe_budget_exhausted")
+        return missing
 
     @classmethod
     def _snapshot_ready(cls, snapshot: dict) -> bool:
@@ -584,6 +655,8 @@ class ProductPage(BasePage):
                                      key=(snapshot.get("readiness_cost_ms") or {"NONE": 0}).get),
             "atc_count": int(snapshot.get("atc_count", 0)),
             "atc_probe_skipped": bool(snapshot.get("atc_probe_skipped", False)),
+            "color_probe_skipped": bool(snapshot.get("color_probe_skipped", False)),
+            "probe_budget_exhausted": bool(snapshot.get("probe_budget_exhausted", False)),
             "atc_visible": bool(snapshot["atc_visible"]),
             "atc_enabled": bool(snapshot["atc_enabled"]),
             "readiness_cost_ms": dict(snapshot.get("readiness_cost_ms") or {}),
@@ -599,6 +672,8 @@ class ProductPage(BasePage):
             self.purchase_area().wait_for(state="attached", timeout=timeout_ms)
         elif not snapshot["title_visible"]:
             self.title().wait_for(state="visible", timeout=timeout_ms)
+        elif snapshot.get("color_probe_skipped") and snapshot["size_count"] == 0:
+            self._size_resolver().wait_for_available(timeout_ms)
         elif snapshot["color_count"] == 0:
             self._wait_for_color_available(timeout_ms)
         elif snapshot["size_count"] == 0:

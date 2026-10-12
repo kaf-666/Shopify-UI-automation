@@ -333,24 +333,22 @@ def test_root_absent_short_circuits_expensive_readiness_checks() -> None:
     assert snapshot["size_count"] == 0
 
 
-def test_readiness_color_check_stops_at_first_actionable_option() -> None:
+def test_readiness_color_check_uses_one_atomic_probe() -> None:
+    seen = []
     class _Options:
-        def count(self) -> int:
-            return 70
-
-        def nth(self, index: int) -> int:
-            return index
+        def count(self):
+            return 1
+        def evaluate_all(self, script, config):
+            seen.append("atomic_probe")
+            return 0
+        def nth(self, index):
+            return type("Radio", (), {"is_disabled": lambda s, **kw: False})()
 
     product = object.__new__(ProductPage)
     product.color_options = lambda: _Options()
     product._color_option_control_config = lambda: {}
-    seen = []
-    product._color_option_control_if_available = (
-        lambda radio, config, timeout_ms: seen.append(radio) or object()
-    )
-
     assert product.has_actionable_color() is True
-    assert seen == [0]
+    assert seen == ["atomic_probe"]
 
 
 def test_zero_timeout_does_not_start_a_readiness_poll() -> None:
