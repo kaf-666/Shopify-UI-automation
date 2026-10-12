@@ -217,6 +217,14 @@ def cleanup_cart_session(api, base, headers, policy, *, journey, viewport, opera
     diagnostic.update(postcheck_item_count=remaining["item_count"], postcheck_items_length=len(remaining["items"]))
     if remaining["item_count"] != 0:
         report.update(status="FAIL", postcheck_status="FAIL", safe_error_code="CART_RESIDUAL_ITEMS")
+        # One additional READ ONLY observation distinguishes persistent
+        # residual from a later empty read. It never retries the POST and
+        # never converts the original unverified cleanup into PASS.
+        time.sleep(0.2)
+        try:
+            observed_read("residual_confirmation")
+        except CartStateUnavailable:
+            pass
         return report
     report.update(status="PASS", postcheck_status="PASS", safe_error_code="NONE")
     return report

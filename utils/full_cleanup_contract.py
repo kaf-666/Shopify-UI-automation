@@ -46,20 +46,23 @@ def validate_cleanup_diagnostics(report):
     if d["known_cart_write_overlap"] != ("UNAVAILABLE" if delta is None else "OBSERVED" if delta else "NOT_OBSERVED"):
         return False
     reads = d["reads"]
-    if not isinstance(reads, list) or len(reads) > 2:
+    if not isinstance(reads, list) or len(reads) > 3:
         return False
     for i, r in enumerate(reads):
         if (not isinstance(r, dict) or set(r) != {"stage", "fresh_request_attempted", "started_ms", "finished_ms", "item_count", "items_length"}
-                or r["stage"] != ("precheck" if i == 0 else "postcheck") or r["fresh_request_attempted"] is not True):
+                or r["stage"] != ("precheck", "postcheck", "residual_confirmation")[i] or r["fresh_request_attempted"] is not True):
             return False
         if any(type(r[k]) is not int or r[k] < 0 for k in ("started_ms", "finished_ms")) or r["finished_ms"] < r["started_ms"]:
             return False
         if any(r[k] is not None and (type(r[k]) is not int or r[k] < 0) for k in ("item_count", "items_length")):
             return False
         prefix = r["stage"]
-        if r["item_count"] != d[prefix + "_item_count"] or r["items_length"] != d[prefix + "_items_length"]:
+        if i < 2 and (r["item_count"] != d[prefix + "_item_count"] or r["items_length"] != d[prefix + "_items_length"]):
             return False
-    if d["postcheck_item_count"] is not None and len(reads) != 2:
+    if d["postcheck_item_count"] is not None and len(reads) < 2:
+        return False
+    if len(reads) == 3 and (report["status"] != "FAIL" or report["safe_error_code"] != "CART_RESIDUAL_ITEMS"
+                            or not d["postcheck_item_count"]):
         return False
     if report["status"] == "PASS" and (d["session_binding"] != "MATCH" or not reads):
         return False

@@ -45,7 +45,7 @@ def test_clear_body_empty_but_readd_observed_is_fail():
     api = BodyAPI(cart(1)); guard = policy(api)
     original_get = api.get
     def get(url, **kwargs):
-        if any(c[0] == "POST" for c in api.calls):
+        if len(api.calls) == 2 and any(c[0] == "POST" for c in api.calls):
             api.cart = cart(1)
             guard._events.append({"allowed_to_send": True, "path": "/cart/add.js"})
         return original_get(url, **kwargs)
@@ -72,7 +72,23 @@ def test_residual_does_not_assume_unproven_propagation_delay_or_repeat_post():
     # Keep the observed failure; do not mask it with blind retries.
     api.cart = cart()
     assert report["status"] == "FAIL"
-    assert [c[0] for c in api.calls] == ["GET", "POST", "GET"]
+    assert [c[0] for c in api.calls] == ["GET", "POST", "GET", "GET"]
+
+
+def test_later_empty_read_is_observation_not_permission_to_hide_initial_residual():
+    api = BodyAPI(cart(1)); api.residual = True
+    original = api.get
+    def get(url, **kwargs):
+        if len(api.calls) == 3:
+            api.cart = cart()
+        return original(url, **kwargs)
+    api.get = get
+    report = clean(api)
+    assert report["status"] == "FAIL" and report["safe_error_code"] == "CART_RESIDUAL_ITEMS"
+    assert report["diagnostics"]["reads"][-1]["item_count"] == 0
+    assert report["diagnostics"]["reads"][-1]["stage"] == "residual_confirmation"
+    assert validate_cleanup_diagnostics(report)
+    assert sum(c[0] == "POST" for c in api.calls) == 1
 
 
 def test_wrong_api_context_blocks_before_any_request():
