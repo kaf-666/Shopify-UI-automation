@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 import re
+import time
 from typing import Iterable, List, Optional
 from urllib.parse import urlsplit
 
@@ -17,6 +18,7 @@ from utils.mutation_fingerprint import (
     REASONS,
     UNKNOWN,
     safe_endpoint_fingerprint,
+    safe_localization_query_structure,
     sanitize_pathname,
 )
 
@@ -94,6 +96,17 @@ LOCALIZATION_CONTEXT_PATH = "/localization"
 LOCALIZATION_CONTEXT_REASON = "FIRST_PARTY_LOCALIZATION_CONTEXT"
 WATI_ADD_TO_CART_EVENT_PATH = "/apps/wati/addtocartevent"
 WATI_ADD_TO_CART_EVENT_REASON = "FIRST_PARTY_WATI_ADD_TO_CART_EVENT"
+_SAFE_JOURNEYS = frozenset({"direct", "search", "browse", "infrastructure"})
+_SAFE_SCOPES = frozenset(
+    {
+        "CASE",
+        "PRE_CLEAN",
+        "DIRECT_JOURNEY_CLEANUP",
+        "SEARCH_JOURNEY_CLEANUP",
+        "BROWSE_JOURNEY_CLEANUP",
+    }
+)
+_SAFE_CASE_ID_RE = re.compile(r"^[RW]SMOKE-[A-Z0-9-]{1,48}$")
 
 
 class ReadonlyMutationGuard:
@@ -241,6 +254,7 @@ class TransactionalMutationPolicy:
         self._scope = {"viewport": None, "journey": None, "case_id": None, "scope_name": None}
         self._events: List[dict] = []
         self._api_cleanup_events: List[dict] = []
+        self._started_at = time.perf_counter()
         self._context = None
         self._attached = False
         self._handler = self._handle_route
@@ -329,6 +343,134 @@ class TransactionalMutationPolicy:
         if category == self.EXPECTED and self._is_localization_context(url, method, host, path):
             return LOCALIZATION_CONTEXT_REASON
         return None
+
+    @staticmethod
+    def _frame_path_category(frame_url: object, first_party_hosts: set[str]) -> str:
+        """Map a live frame URL to a fixed category without retaining its URL."""
+        try:
+            parsed = urlsplit(str(frame_url or ""))
+            hostname = str(parsed.hostname or "").lower()
+            if not hostname:
+                return UNKNOWN
+            path = ReadonlyMutationGuard.normalize_path(str(frame_url))
+        except (TypeError, ValueError):
+            return UNKNOWN
+        is_first_party = hostname in first_party_hosts
+        if not is_first_party:
+            return "OTHER_ORIGIN"
+        if path == "/":
+            return "HOME_ROOT"
+        if path == "/search" or path.startswith("/search/"):
+            return "SEARCH"
+        if path == "/cart" or path.startswith("/cart/"):
+            return "CART"
+        if path == "/checkout" or path.startswith("/checkout/") or path.startswith("/checkouts/"):
+            return "CHECKOUT"
+        if path == "/products" or path.startswith("/products/"):
+            return "PRODUCT"
+        if path == "/collections" or path.startswith("/collections/"):
+            return "COLLECTION"
+        return "OTHER_FIRST_PARTY"
+
+    @staticmethod
+    def _request_source_category(request) -> tuple[str, object]:
+        try:
+            navigation_method = getattr(request, "is_navigation_request", None)
+            navigation_value = navigation_method() if callable(navigation_method) else UNKNOWN
+            if not isinstance(navigation_value, bool):
+                navigation_value = UNKNOWN
+        except Exception:
+            navigation_value = UNKNOWN
+        if navigation_value is True:
+            return "NAVIGATION", navigation_value
+        try:
+            resource_type = str(getattr(request, "resource_type", "") or "").lower()
+        except Exception:
+            resource_type = ""
+        if resource_type in {"xhr", "fetch"}:
+            return resource_type.upper(), navigation_value
+        if resource_type == "document":
+            return "DOCUMENT", navigation_value
+        if resource_type in {
+            "stylesheet", "image", "media", "font", "script", "texttrack",
+            "manifest", "other",
+        }:
+            return "OTHER", navigation_value
+        return UNKNOWN, navigation_value
+
+    def _localization_query_diagnostic(
+        self,
+        request,
+        url: str,
+        method: str,
+        host: str,
+        path: str,
+        fingerprint: dict,
+        category: str,
+        reason: str,
+    ) -> Optional[dict]:
+        """Capture safe query structure for blocked first-party localization POSTs."""
+        if (
+            method != "POST"
+            or host not in self.first_party_hosts
+            or path != LOCALIZATION_CONTEXT_PATH
+            or fingerprint.get("query_present") is not True
+        ):
+            return None
+        try:
+            parsed = urlsplit(str(url or ""))
+            query_summary = safe_localization_query_structure(parsed.query)
+        except (TypeError, ValueError):
+            query_summary = safe_localization_query_structure(None)
+
+        viewport = self._scope.get("viewport")
+        if not isinstance(viewport, str) or viewport not in {"desktop", "mobile"}:
+            viewport = UNKNOWN
+        journey = self._scope.get("journey")
+        if not isinstance(journey, str) or journey not in _SAFE_JOURNEYS:
+            journey = UNKNOWN
+        case_id = self._scope.get("case_id")
+        if not isinstance(case_id, str) or not _SAFE_CASE_ID_RE.fullmatch(case_id):
+            case_id = UNKNOWN
+        scope_name = self._scope.get("scope_name")
+        if not isinstance(scope_name, str) or scope_name not in _SAFE_SCOPES:
+            scope_name = UNKNOWN
+
+        source_category, navigation_request = self._request_source_category(request)
+        frame_type = UNKNOWN
+        frame_path_category = UNKNOWN
+        try:
+            frame = request.frame
+            parent_frame = frame.parent_frame
+            frame_type = "MAIN_FRAME" if parent_frame is None else "CHILD_FRAME"
+            # Frame URLs are classified in memory and are never persisted.
+            frame_path_category = self._frame_path_category(
+                frame.url, self.first_party_hosts
+            )
+        except Exception:
+            # Detached frames and service-worker requests are expected to make
+            # frame metadata unavailable; this cannot affect routing or policy.
+            pass
+
+        same_origin = fingerprint.get("same_origin")
+        if not isinstance(same_origin, bool) and same_origin != UNKNOWN:
+            same_origin = UNKNOWN
+        return {
+            "viewport": viewport,
+            "journey": journey,
+            "case_id": case_id,
+            "scope_name": scope_name,
+            "origin_match": same_origin,
+            **query_summary,
+            "request_source_category": source_category,
+            "frame_type": frame_type,
+            "frame_path_category": frame_path_category,
+            "navigation_request": navigation_request,
+            "relative_elapsed_ms": max(0, int((time.perf_counter() - self._started_at) * 1000)),
+            "classification": category,
+            "reason": reason,
+            "blocked": category != self.EXPECTED,
+        }
 
     def _safe_reason(self, category: str, url: str, method: str, host: str, path: str) -> str:
         """Describe an existing classification with a fixed safe enum only."""
@@ -510,6 +652,23 @@ class TransactionalMutationPolicy:
             "allowed_to_send": category == self.EXPECTED,
             "gating_failure": category in {self.UNEXPECTED, self.HIGH_RISK},
         }
+        try:
+            localization_diagnostic = self._localization_query_diagnostic(
+                request,
+                url,
+                method,
+                host,
+                normalized_path,
+                fingerprint,
+                category,
+                reason,
+            )
+        except Exception:
+            # Diagnostics are observational only. If collection fails, the
+            # original classification and routing decision still take effect.
+            localization_diagnostic = None
+        if localization_diagnostic is not None:
+            event["localization_query_diagnostic"] = localization_diagnostic
         self._events.append(event)
         if category == self.EXPECTED:
             if callable(fallback):
@@ -596,7 +755,7 @@ class TransactionalMutationPolicy:
             paths.append(row)
         unexpected = counts[self.UNEXPECTED]
         high_risk = counts[self.HIGH_RISK]
-        return {
+        result = {
             "mode": "TRANSACTIONAL_SAFE",
             "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
             "expected_mutation": counts[self.EXPECTED],
@@ -607,6 +766,14 @@ class TransactionalMutationPolicy:
             "by_path": paths,
             "api_cleanup": self.api_cleanup_summary(),
         }
+        diagnostics = [
+            dict(event["localization_query_diagnostic"])
+            for event in self._events
+            if isinstance(event.get("localization_query_diagnostic"), dict)
+        ]
+        if diagnostics:
+            result["localization_query_diagnostics"] = diagnostics
+        return result
 
 
 def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
@@ -615,12 +782,18 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
     items = [summary for summary in summaries if isinstance(summary, dict)]
     by_fingerprint = {}
     expected = known_blocked = unexpected = high_risk = blocked = 0
+    localization_diagnostics = []
     for summary in items:
         expected += int(summary.get("expected_mutation", 0) or 0)
         known_blocked += int(summary.get("known_blocked_side_effect", 0) or 0)
         unexpected += int(summary.get("unexpected_mutation", 0) or 0)
         high_risk += int(summary.get("high_risk_mutation", 0) or 0)
         blocked += int(summary.get("blocked_mutation", 0) or 0)
+        diagnostics = summary.get("localization_query_diagnostics")
+        if isinstance(diagnostics, list):
+            localization_diagnostics.extend(
+                dict(item) for item in diagnostics if isinstance(item, dict)
+            )
         for row in summary.get("by_path", []) or []:
             if not isinstance(row, dict):
                 continue
@@ -723,7 +896,7 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
             row["desktop_count"] = UNKNOWN
             row["mobile_count"] = UNKNOWN
         paths.append(row)
-    return {
+    result = {
         "mode": "TRANSACTIONAL_SAFE",
         "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
         "expected_mutation": expected,
@@ -740,3 +913,6 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
                         for record in item.get("api_cleanup", {}).get("records", [])],
         },
     }
+    if localization_diagnostics:
+        result["localization_query_diagnostics"] = localization_diagnostics
+    return result

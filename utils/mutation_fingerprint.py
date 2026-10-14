@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 
 UNKNOWN = "UNKNOWN"
@@ -60,6 +60,18 @@ _CUSTOMER_STATIC_SEGMENTS = frozenset(
     {"account", "login", "logout", "register", "recover", "activate", "addresses", "orders"}
 )
 _SESSION_STATIC_SEGMENTS = frozenset({"new", "create", "refresh", "validate", "token"})
+LOCALIZATION_QUERY_KEY_ALLOWLIST = frozenset(
+    {
+        "country",
+        "country_code",
+        "currency",
+        "currency_code",
+        "language",
+        "language_code",
+        "locale",
+        "locale_code",
+    }
+)
 
 
 def _is_locale_segment(value: str) -> bool:
@@ -221,6 +233,63 @@ def safe_endpoint_fingerprint(
     }
 
 
+def safe_localization_query_structure(raw_query: object) -> dict:
+    """Summarize localization query keys without retaining raw keys or values.
+
+    Parameter names are data too, so only names from the fixed allowlist are
+    returned. Values are never decoded or copied. Unknown keys contribute
+    only to a count.
+    """
+    if not isinstance(raw_query, str) or not raw_query:
+        return {
+            "query_parameter_count": 0,
+            "recognized_query_key_names": [],
+            "unknown_query_key_count": 0,
+            "duplicate_query_key_present": False,
+            "empty_query_key_present": False,
+        }
+
+    components = raw_query.split("&")
+    recognized = set()
+    seen = set()
+    unknown_count = 0
+    duplicate_present = False
+    empty_present = False
+
+    for component in components:
+        raw_key = component.split("=", 1)[0]
+        decoded = raw_key
+        try:
+            for _ in range(8):
+                next_decoded = unquote_plus(decoded, errors="replace")
+                if next_decoded == decoded:
+                    break
+                decoded = next_decoded
+        except (UnicodeError, ValueError):
+            # An unparseable name is unknown; never include its contents in
+            # diagnostic output or an error message.
+            decoded = ""
+
+        normalized = decoded.casefold()
+        if not normalized:
+            empty_present = True
+        if normalized in seen:
+            duplicate_present = True
+        seen.add(normalized)
+        if normalized in LOCALIZATION_QUERY_KEY_ALLOWLIST:
+            recognized.add(normalized)
+        elif normalized:
+            unknown_count += 1
+
+    return {
+        "query_parameter_count": len(components),
+        "recognized_query_key_names": sorted(recognized),
+        "unknown_query_key_count": unknown_count,
+        "duplicate_query_key_present": duplicate_present,
+        "empty_query_key_present": empty_present,
+    }
+
+
 def _safe_count(value: object) -> str:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
         return str(value)
@@ -285,7 +354,90 @@ def format_mutation_fingerprint_report(summary: object) -> list[str]:
                 ]
             )
             emitted += 1
+    diagnostics = summary.get("localization_query_diagnostics")
+    if isinstance(diagnostics, list):
+        for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict):
+                continue
+            viewport = diagnostic.get("viewport")
+            if not isinstance(viewport, str) or viewport not in {"desktop", "mobile", UNKNOWN}:
+                viewport = UNKNOWN
+            journey = diagnostic.get("journey")
+            if not isinstance(journey, str) or journey not in {"direct", "search", "browse", "infrastructure", UNKNOWN}:
+                journey = UNKNOWN
+            case_id = diagnostic.get("case_id")
+            if not isinstance(case_id, str) or not re.fullmatch(r"[RW]SMOKE-[A-Z0-9-]{1,48}", case_id):
+                case_id = UNKNOWN
+            scope_name = diagnostic.get("scope_name")
+            if not isinstance(scope_name, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", scope_name):
+                scope_name = UNKNOWN
+            origin_match = diagnostic.get("origin_match")
+            if not isinstance(origin_match, bool) and origin_match != UNKNOWN:
+                origin_match = UNKNOWN
+            source = diagnostic.get("request_source_category")
+            if not isinstance(source, str) or source not in {"NAVIGATION", "XHR", "FETCH", "DOCUMENT", "OTHER", UNKNOWN}:
+                source = UNKNOWN
+            frame_type = diagnostic.get("frame_type")
+            if not isinstance(frame_type, str) or frame_type not in {"MAIN_FRAME", "CHILD_FRAME", UNKNOWN}:
+                frame_type = UNKNOWN
+            frame_path_category = diagnostic.get("frame_path_category")
+            if not isinstance(frame_path_category, str) or frame_path_category not in {
+                "HOME_ROOT", "PRODUCT", "COLLECTION", "SEARCH", "CART",
+                "CHECKOUT", "OTHER_FIRST_PARTY", "OTHER_ORIGIN", UNKNOWN,
+            }:
+                frame_path_category = UNKNOWN
+            navigation = diagnostic.get("navigation_request")
+            if not isinstance(navigation, bool) and navigation != UNKNOWN:
+                navigation = UNKNOWN
+            classification = diagnostic.get("classification")
+            if not isinstance(classification, str) or classification not in CLASSIFICATIONS:
+                classification = UNKNOWN
+            reason = diagnostic.get("reason")
+            if not isinstance(reason, str) or reason not in REASONS:
+                reason = "REDACTED"
+            blocked = diagnostic.get("blocked")
+            if not isinstance(blocked, bool):
+                blocked = True
+            elapsed = _safe_count(diagnostic.get("relative_elapsed_ms"))
+            query_count = _safe_count(diagnostic.get("query_parameter_count"))
+            unknown_count = _safe_count(diagnostic.get("unknown_query_key_count"))
+            recognized = diagnostic.get("recognized_query_key_names")
+            if not isinstance(recognized, list):
+                recognized = []
+            recognized = sorted(
+                {
+                    key for key in recognized
+                    if isinstance(key, str) and key in LOCALIZATION_QUERY_KEY_ALLOWLIST
+                }
+            )
+            duplicate = diagnostic.get("duplicate_query_key_present") is True
+            empty = diagnostic.get("empty_query_key_present") is True
+            lines.extend(
+                [
+                    "LOCALIZATION_QUERY_DIAGNOSTIC_BEGIN",
+                    f"viewport={viewport}",
+                    f"journey={journey}",
+                    f"case_id={case_id}",
+                    f"scope_name={scope_name}",
+                    f"origin_match={str(origin_match).lower() if isinstance(origin_match, bool) else origin_match}",
+                    f"query_parameter_count={query_count}",
+                    f"recognized_query_key_names={','.join(recognized) if recognized else 'NONE'}",
+                    f"unknown_query_key_count={unknown_count}",
+                    f"duplicate_query_key_present={str(duplicate).lower()}",
+                    f"empty_query_key_present={str(empty).lower()}",
+                    f"request_source_category={source}",
+                    f"frame_type={frame_type}",
+                    f"frame_path_category={frame_path_category}",
+                    f"navigation_request={str(navigation).lower() if isinstance(navigation, bool) else navigation}",
+                    f"relative_elapsed_ms={elapsed}",
+                    f"classification={classification}",
+                    f"reason={reason}",
+                    f"blocked={str(blocked).lower()}",
+                    "LOCALIZATION_QUERY_DIAGNOSTIC_END",
+                ]
+            )
     if emitted == 0:
-        lines.append("fingerprint=UNAVAILABLE")
+        if not diagnostics:
+            lines.append("fingerprint=UNAVAILABLE")
     lines.append("MUTATION_UNEXPECTED_FINGERPRINT_END")
     return lines

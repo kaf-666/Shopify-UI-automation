@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -205,6 +206,271 @@ def test_transactional_policy_blocks_localization_lookalikes_and_query_variants(
     assert policy.events()[0]["classification"] == policy.UNEXPECTED
     assert policy.events()[0]["blocked"] is True
     assert policy.summary()["status"] == "FAIL"
+
+
+def _attach_request_diagnostic_metadata(
+    route: _FakeRoute,
+    *,
+    resource_type="fetch",
+    navigation=False,
+    frame_url="https://www.mondressy.com/products/example",
+    frame_available=True,
+    child_frame=False,
+) -> None:
+    route.request.resource_type = resource_type
+    route.request.is_navigation_request = lambda: navigation
+    if not frame_available:
+        class _UnavailableFrameRequest(SimpleNamespace):
+            @property
+            def frame(self):
+                raise RuntimeError("synthetic frame secret")
+
+        route.request = _UnavailableFrameRequest(
+            url=route.request.url,
+            method=route.request.method,
+            resource_type=resource_type,
+            is_navigation_request=lambda: navigation,
+        )
+        return
+    frame = SimpleNamespace(url=frame_url, parent_frame=object() if child_frame else None)
+    route.request.frame = frame
+
+
+def test_localization_query_diagnostic_keeps_no_query_allow_and_query_block_contract() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com", "www.mondressy.com"),
+        canonical_origin="https://www.mondressy.com",
+    )
+    policy.attach(context)
+
+    no_query = _FakeRoute("https://www.mondressy.com/localization", "POST")
+    context.handler(no_query)
+    assert no_query.calls == ["fallback"]
+    assert policy.summary()["expected_mutation"] == 1
+    assert policy.summary().get("localization_query_diagnostics") is None
+
+    policy.set_scope("mobile", "browse", "WSMOKE-PDP-02", "CASE")
+    with_query = _FakeRoute(
+        "https://www.mondressy.com/localization?country_code=US&locale_code=en",
+        "POST",
+    )
+    _attach_request_diagnostic_metadata(with_query, navigation=True)
+    context.handler(with_query)
+
+    event = policy.events()[-1]
+    summary = policy.summary()
+    diagnostic = summary["localization_query_diagnostics"][0]
+    assert with_query.calls == ["abort"]
+    assert event["classification"] == policy.UNEXPECTED
+    assert event["reason"] == "PATH_NOT_ALLOWED"
+    assert event["blocked"] is True
+    assert event["allowed_to_send"] is False
+    assert summary["status"] == "FAIL"
+    assert summary["unexpected_mutation"] == 1
+    assert diagnostic["viewport"] == "mobile"
+    assert diagnostic["journey"] == "browse"
+    assert diagnostic["case_id"] == "WSMOKE-PDP-02"
+    assert diagnostic["scope_name"] == "CASE"
+    assert diagnostic["origin_match"] is True
+    assert diagnostic["query_parameter_count"] == 2
+    assert diagnostic["recognized_query_key_names"] == ["country_code", "locale_code"]
+    assert diagnostic["unknown_query_key_count"] == 0
+    assert diagnostic["duplicate_query_key_present"] is False
+    assert diagnostic["empty_query_key_present"] is False
+    assert diagnostic["request_source_category"] == "NAVIGATION"
+    assert diagnostic["frame_type"] == "MAIN_FRAME"
+    assert diagnostic["frame_path_category"] == "PRODUCT"
+    assert diagnostic["navigation_request"] is True
+    assert diagnostic["relative_elapsed_ms"] >= 0
+    assert diagnostic["classification"] == policy.UNEXPECTED
+    assert diagnostic["reason"] == "PATH_NOT_ALLOWED"
+    assert diagnostic["blocked"] is True
+
+
+def test_localization_query_diagnostic_redacts_unknown_keys_values_and_credentials() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://mondressy.com"
+    )
+    policy.attach(context)
+    policy.set_scope("desktop", "search", "WSMOKE-SEARCH-01", "CASE")
+    route = _FakeRoute(
+        "https://mondressy.com/localization?country=US"
+        "&synthetic-private-email%40example.test=private@example.test"
+        "&secret_token=synthetic-signature-secret"
+        "&Authorization=Bearer-synthetic-token",
+        "POST",
+    )
+    route.request.headers = {
+        "cookie": "synthetic-cookie-secret",
+        "Authorization": "synthetic-authorization-secret",
+        "Signature": "synthetic-signature-secret",
+        "Referer": "https://mondressy.com/private?token=referer-secret",
+    }
+    route.request.post_data = "synthetic-body-secret"
+    _attach_request_diagnostic_metadata(route)
+
+    context.handler(route)
+
+    diagnostic = policy.summary()["localization_query_diagnostics"][0]
+    serialized = json.dumps(
+        {"events": policy.events(), "mutation_summary": policy.summary()},
+        sort_keys=True,
+    ) + "\n" + "\n".join(format_mutation_fingerprint_report(policy.summary()))
+    assert route.calls == ["abort"]
+    assert diagnostic["recognized_query_key_names"] == ["country"]
+    assert diagnostic["query_parameter_count"] == 4
+    assert diagnostic["unknown_query_key_count"] == 3
+    assert diagnostic["origin_match"] is True
+    for sensitive in (
+        "US",
+        "private@example.test",
+        "synthetic-private-email",
+        "secret_token",
+        "synthetic-signature-secret",
+        "Authorization",
+        "Bearer-synthetic-token",
+        "synthetic-cookie-secret",
+        "synthetic-authorization-secret",
+        "private?token=referer-secret",
+        "synthetic-body-secret",
+        "https://mondressy.com",
+    ):
+        assert sensitive not in serialized
+
+
+@pytest.mark.parametrize(
+    ("query", "expected_count", "expected_unknown", "duplicate", "empty"),
+    [
+        ("locale=en&%6cocale=fr&=x&bad=%ZZ", 4, 1, True, True),
+        ("country=US&country=CA", 2, 0, True, False),
+        ("&&", 3, 0, True, True),
+        ("", 0, 0, False, False),
+    ],
+)
+def test_localization_query_key_parser_counts_duplicate_empty_and_invalid_safely(
+    query, expected_count, expected_unknown, duplicate, empty
+) -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com",))
+    policy.attach(context)
+    url = "https://mondressy.com/localization" + ("?" + query if query else "")
+    route = _FakeRoute(url, "POST")
+
+    context.handler(route)
+
+    assert route.calls == (["abort"] if query else ["fallback"])
+    summary = policy.summary()
+    assert summary["unexpected_mutation"] == (1 if query else 0)
+    diagnostic = summary.get("localization_query_diagnostics", [{}])[0]
+    if query:
+        assert diagnostic["query_parameter_count"] == expected_count
+        assert diagnostic["unknown_query_key_count"] == expected_unknown
+        assert diagnostic["duplicate_query_key_present"] is duplicate
+        assert diagnostic["empty_query_key_present"] is empty
+        assert "%ZZ" not in str(diagnostic)
+        assert "bad" not in str(diagnostic)
+
+
+def test_localization_query_diagnostic_attributes_scope_and_safe_frame_categories() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(
+        ("mondressy.com",), canonical_origin="https://shop.other.test"
+    )
+    policy.attach(context)
+    policy.set_scope("desktop", "direct", "WSMOKE-DIRECT-01", "CASE")
+    route = _FakeRoute(
+        "https://mondressy.com/localization?market=US", "POST"
+    )
+    _attach_request_diagnostic_metadata(
+        route,
+        resource_type="xhr",
+        frame_url="https://mondressy.com/private/customer@example.test?secret=x",
+        child_frame=True,
+    )
+
+    context.handler(route)
+
+    diagnostic = policy.summary()["localization_query_diagnostics"][0]
+    assert diagnostic["viewport"] == "desktop"
+    assert diagnostic["journey"] == "direct"
+    assert diagnostic["case_id"] == "WSMOKE-DIRECT-01"
+    assert diagnostic["scope_name"] == "CASE"
+    assert diagnostic["origin_match"] is False
+    assert diagnostic["request_source_category"] == "XHR"
+    assert diagnostic["navigation_request"] is False
+    assert diagnostic["frame_type"] == "CHILD_FRAME"
+    assert diagnostic["frame_path_category"] == "OTHER_FIRST_PARTY"
+    assert "customer@example.test" not in str(diagnostic)
+    assert "secret=x" not in str(diagnostic)
+
+
+def test_localization_query_frame_read_failure_does_not_change_guard_or_leak_error() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com",))
+    policy.attach(context)
+    route = _FakeRoute(
+        "https://mondressy.com/localization?locale=en", "POST"
+    )
+    _attach_request_diagnostic_metadata(route, frame_available=False)
+
+    context.handler(route)
+
+    diagnostic = policy.summary()["localization_query_diagnostics"][0]
+    assert route.calls == ["abort"]
+    assert diagnostic["frame_type"] == "UNKNOWN"
+    assert diagnostic["frame_path_category"] == "UNKNOWN"
+    assert diagnostic["request_source_category"] == "FETCH"
+    assert diagnostic["navigation_request"] is False
+    assert diagnostic["classification"] == policy.UNEXPECTED
+    assert diagnostic["blocked"] is True
+    assert "synthetic frame secret" not in str(policy.summary())
+
+
+def test_empty_query_marker_keeps_existing_policy_decision_and_is_structurally_safe() -> None:
+    context = _FakeContext()
+    policy = TransactionalMutationPolicy(("mondressy.com",))
+    policy.attach(context)
+    route = _FakeRoute("https://mondressy.com/localization?", "POST")
+
+    context.handler(route)
+
+    assert route.calls == ["fallback"]
+    assert policy.events()[0]["classification"] == policy.EXPECTED
+    diagnostic = policy.summary()["localization_query_diagnostics"][0]
+    assert diagnostic["query_parameter_count"] == 0
+    assert diagnostic["classification"] == policy.EXPECTED
+    assert diagnostic["blocked"] is False
+
+
+def test_merged_localization_diagnostics_keep_viewport_case_without_changing_gate_counts() -> None:
+    summaries = []
+    for viewport, journey, case_id in (
+        ("desktop", "direct", "WSMOKE-DIRECT-01"),
+        ("mobile", "browse", "WSMOKE-PDP-02"),
+    ):
+        context = _FakeContext()
+        policy = TransactionalMutationPolicy(("mondressy.com",))
+        policy.attach(context)
+        policy.set_scope(viewport, journey, case_id, "CASE")
+        context.handler(
+            _FakeRoute("https://mondressy.com/localization?locale=en", "POST")
+        )
+        summaries.append(policy.summary())
+
+    merged = merge_transactional_mutation_summaries(summaries)
+    diagnostics = merged["localization_query_diagnostics"]
+    assert merged["status"] == "FAIL"
+    assert merged["unexpected_mutation"] == 2
+    assert merged["blocked_mutation"] == 2
+    assert {(row["viewport"], row["journey"], row["case_id"]) for row in diagnostics} == {
+        ("desktop", "direct", "WSMOKE-DIRECT-01"),
+        ("mobile", "browse", "WSMOKE-PDP-02"),
+    }
+    from scripts.validate_result_schema import _validate_mutation_summary
+
+    assert _validate_mutation_summary(merged)
 
 
 def test_transactional_policy_localization_normalization_keeps_trailing_slash_safe() -> None:
