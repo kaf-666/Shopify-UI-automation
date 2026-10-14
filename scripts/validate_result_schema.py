@@ -219,6 +219,7 @@ def _validate_mutation_summary(value: object) -> bool:
                         "EXPECTED_TRANSACTIONAL_MUTATION",
                         "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
                         "FIRST_PARTY_LOCALIZATION_CONTEXT",
+                        "MONDRESSY_WEBREX_LOCALIZATION_CONTEXT",
                         "HIGH_RISK_PRECEDENCE",
                         "PATH_NOT_ALLOWED",
                         "REDACTED",

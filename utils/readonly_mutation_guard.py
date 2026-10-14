@@ -13,6 +13,10 @@ import time
 from typing import Iterable, List, Optional
 from urllib.parse import urlsplit
 
+from utils.localization_request_policy import (
+    WEBREX_LOCALIZATION_REASON,
+    is_verified_webrex_localization,
+)
 from utils.mutation_fingerprint import (
     HOST_CLASSES,
     REASONS,
@@ -304,7 +308,7 @@ class TransactionalMutationPolicy:
         return bool(text and ("mutation" in text or "operationname\\\":\\\"mutation" in text))
 
     def _is_localization_context(
-        self, url: str, method: str, host: str, path: str
+        self, url: str, method: str, host: str, path: str, request=None
     ) -> bool:
         """Match the verified first-party localization context request only."""
         if str(method or "").upper() != "POST" or host not in self.first_party_hosts:
@@ -313,7 +317,13 @@ class TransactionalMutationPolicy:
             parsed = urlsplit(str(url or ""))
         except ValueError:
             return False
-        return path == LOCALIZATION_CONTEXT_PATH and not parsed.query
+        if path != LOCALIZATION_CONTEXT_PATH:
+            return False
+        if not parsed.query:
+            return True
+        return is_verified_webrex_localization(
+            url, str(method or "").upper(), self.canonical_origin, request
+        )
 
     def _is_known_blocked_wati_event(
         self, url: str, method: str, host: str, path: str
@@ -338,10 +348,10 @@ class TransactionalMutationPolicy:
         )
 
     def _classification_reason(
-        self, url: str, method: str, host: str, path: str, category: str
+        self, url: str, method: str, host: str, path: str, category: str, request=None
     ) -> Optional[str]:
-        if category == self.EXPECTED and self._is_localization_context(url, method, host, path):
-            return LOCALIZATION_CONTEXT_REASON
+        if category == self.EXPECTED and self._is_localization_context(url, method, host, path, request):
+            return WEBREX_LOCALIZATION_REASON if urlsplit(url).query else LOCALIZATION_CONTEXT_REASON
         return None
 
     @staticmethod
@@ -409,7 +419,7 @@ class TransactionalMutationPolicy:
         category: str,
         reason: str,
     ) -> Optional[dict]:
-        """Capture safe query structure for blocked first-party localization POSTs."""
+        """Capture safe query structure for first-party localization POSTs."""
         if (
             method != "POST"
             or host not in self.first_party_hosts
@@ -472,9 +482,9 @@ class TransactionalMutationPolicy:
             "blocked": category != self.EXPECTED,
         }
 
-    def _safe_reason(self, category: str, url: str, method: str, host: str, path: str) -> str:
+    def _safe_reason(self, category: str, url: str, method: str, host: str, path: str, request=None) -> str:
         """Describe an existing classification with a fixed safe enum only."""
-        existing = self._classification_reason(url, method, host, path, category)
+        existing = self._classification_reason(url, method, host, path, category, request)
         if existing:
             return existing
         if category == self.KNOWN_BLOCKED_SIDE_EFFECT:
@@ -518,7 +528,7 @@ class TransactionalMutationPolicy:
             return self.KNOWN_BLOCKED_SIDE_EFFECT
         if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
             return self.EXPECTED
-        if self._is_localization_context(url, normalized_method, host, path):
+        if self._is_localization_context(url, normalized_method, host, path, request):
             return self.EXPECTED
         return self.UNEXPECTED
 
@@ -636,7 +646,7 @@ class TransactionalMutationPolicy:
         # Preserve the existing normalized path representation in results;
         # only the newly added hash uses the original query-stripped pathname.
         fingerprint["sanitized_path"] = sanitize_pathname(normalized_path)
-        reason = self._safe_reason(category, url, method, host, normalized_path)
+        reason = self._safe_reason(category, url, method, host, normalized_path, request)
         event = {
             "classification": category,
             **fingerprint,

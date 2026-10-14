@@ -31,6 +31,7 @@ REASONS = frozenset(
         "EXPECTED_TRANSACTIONAL_MUTATION",
         "FIRST_PARTY_WATI_ADD_TO_CART_EVENT",
         "FIRST_PARTY_LOCALIZATION_CONTEXT",
+        "MONDRESSY_WEBREX_LOCALIZATION_CONTEXT",
         "HIGH_RISK_PRECEDENCE",
         "PATH_NOT_ALLOWED",
         "REDACTED",
@@ -70,6 +71,7 @@ LOCALIZATION_QUERY_KEY_ALLOWLIST = frozenset(
         "language_code",
         "locale",
         "locale_code",
+        "iscallfromwb",
     }
 )
 
