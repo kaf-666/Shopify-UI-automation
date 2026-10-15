@@ -582,18 +582,10 @@ class WebsiteSmokeV1Runner:
         if not title or not price:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", f"title={title[:40]!r} price={price!r}")
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
-        except PurchaseAreaReadinessError as exc:
-            raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
-        if color_count == 0 or size_count == 0 or not atc_available:
-            raise FlowError(
-                "DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE",
-                f"color_options={color_count} size_options={size_count} atc={atc_available}",
-            )
-        try:
-            self.flow.validate_purchase_area(phase="pre_selection")
+            purchase = self.flow.validate_purchase_area(phase="pre_selection")
         except FlowError as exc:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
+        color_count, size_count = purchase["colors"], purchase["sizes"]
         self.flow.capture_pdp_state()
         self.state["direct_stored_title"] = self._stored_title(prod, title)
         return (
@@ -832,17 +824,8 @@ class WebsiteSmokeV1Runner:
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""
         prod = self.state["browse_prod"]
+        self.flow.validate_purchase_area(phase="pre_selection")
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
-        except PurchaseAreaReadinessError as exc:
-            raise FlowError("PURCHASE_AREA_FAILURE", str(exc)) from exc
-        if color_count == 0 or size_count == 0 or not atc_available:
-            raise FlowError(
-                "PURCHASE_AREA_FAILURE",
-                f"color_options={color_count} size_options={size_count} atc={atc_available}",
-            )
-        try:
-            self.flow.validate_purchase_area(phase="pre_selection")
             self.flow.capture_pdp_state()
             color = self.flow.select_color()
             size = self.flow.select_size()

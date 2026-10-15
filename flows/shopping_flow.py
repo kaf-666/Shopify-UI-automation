@@ -12,12 +12,15 @@ ShoppingFlow.run()（完整链入口）与 Smoke Cases 调用同一批步骤方�
 from __future__ import annotations
 
 import re
+import time
 from typing import Mapping, Optional
 from urllib.parse import parse_qs, urlsplit
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from pages.cart_drawer import CartDrawer
 from pages.collection_page import CollectionPage
-from pages.product_page import ProductPage
+from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from utils.cart_cleanup import (CartStateUnavailable, cleanup_cart_session, read_cart, storefront_origin)
 from utils.config import resolve_url
 from utils.errors import sanitize_message
@@ -276,8 +279,10 @@ class ShoppingFlow:
                 return index, candidate
         raise FlowError("PRODUCT_NOT_SUITABLE", "前 N 个商品均不满足颜色/尺码/加购条件")
 
-    def validate_purchase_area(self, *, phase="legacy") -> dict:
+    def validate_purchase_area(self, *, phase="legacy", timeout_ms=15_000) -> dict:
         """验证购买区域可用（标题/价格/颜色/尺码/加购按钮）。"""
+        if phase == "pre_selection":
+            return self._wait_purchase_area(timeout_ms)
         prod = self.state["prod"]
         title = prod.get_title()
         price = prod.get_price()
@@ -301,6 +306,58 @@ class ShoppingFlow:
                 f"atc_visible={atc_visible} atc_enabled={atc_enabled}",
             )
         info = {"colors": colors, "sizes": sizes, "atc_enabled": atc_enabled}
+        self.state["purchase_area"] = info
+        return info
+
+    def _wait_purchase_area(self, timeout_ms: int) -> dict:
+        """Confirm live readiness under one budget, including a theme rerender.
+
+        The initial ready sample permits reading title/price. Confirmation must
+        resolve the current DOM again and wait out transient loss. Availability
+        counts are lower bounds from that final sample, not a second, expensive
+        enumeration that can fail immediately outside the readiness loop.
+        """
+        prod = self.state["prod"]
+        timeout_ms = max(0, int(timeout_ms))
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
+        stage = "initial"
+
+        def remaining_ms():
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                # Playwright interprets a locator timeout of zero as unbounded.
+                raise PurchaseAreaReadinessError("failing_conditions=validation_deadline")
+            return remaining
+
+        try:
+            prod.wait_purchase_ready(timeout_ms=remaining_ms(), phase="pre_selection")
+            stage = "title_price"
+            title = prod.title().inner_text(timeout=remaining_ms()).strip()
+            price = prod.price().inner_text(timeout=remaining_ms()).strip()
+            if not title or not price:
+                raise PurchaseAreaReadinessError(
+                    f"title={bool(title)} price={bool(price)}"
+                )
+            stage = "confirmation"
+            snapshot = {}
+            colors, sizes, atc_visible = prod.wait_purchase_ready(
+                timeout_ms=remaining_ms(), phase="pre_selection",
+                diagnostics_hook=snapshot.update,
+            )
+            remaining_ms()
+            if colors <= 0 or sizes <= 0 or not atc_visible:
+                raise PurchaseAreaReadinessError(
+                    f"color_options={colors} size_options={sizes} atc_visible={atc_visible}"
+                )
+        except (PurchaseAreaReadinessError, PlaywrightTimeoutError) as exc:
+            raise FlowError(
+                "PURCHASE_AREA_FAILURE",
+                f"validation_stage={stage} validation_timeout_ms={timeout_ms} "
+                f"validation_elapsed_ms={int((time.monotonic() - started) * 1000)} {exc}",
+            ) from exc
+
+        info = {"colors": colors, "sizes": sizes, "atc_enabled": snapshot["atc_enabled"]}
         self.state["purchase_area"] = info
         return info
 
