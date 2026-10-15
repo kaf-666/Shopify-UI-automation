@@ -46,3 +46,29 @@ python scripts/run_framework_ci.py --report-dir artifacts/framework-ci/local-uni
 Never reuse a report directory. Jenkins compilation/test logs remain tied to the
 checked-out commit and build through the summary and build page. Storefront
 smoke schedules and Full stability histories are independent of this job.
+
+## Integration validation (2026-10-15)
+
+Push and pull_request webhook deliveries were confirmed with HTTP 200 and
+automatically created branch and PR jobs. A superseded PR build logged
+`Superseded by #2` and stopped its subprocess. PR-2 build #2 ran a temporary
+intentional failing test, remained FAILURE, and exposed that test in Jenkins
+JUnit while archiving all six scanned report files. The temporary test is
+removed from the implementation before merge.
+
+The initial Linux run also caught a pre-existing mock test using a real 1 ms
+deadline. That contract test now uses the existing deterministic clock fixture;
+the production deadline behavior is unchanged. Local regression has 806 passed
+and 3 existing Windows symlink-permission skips. Linux skips two Windows-only
+filesystem tests instead.
+
+**GitHub status/required-check activation is pending credential permission.**
+The existing `github-kaf-666` SCM credential can read/checkout the repository but
+GitHub rejects commit-status updates with HTTP 403 (`Resource not accessible by
+personal access token`). The token owner must grant this repository's Commit
+statuses read/write permission, or select an existing appropriately scoped
+credential in the branch source. Never place the token in source or test env.
+After that change, verify pending → failure/success status on the PR, then add
+the observed Jenkins PR status context to main's required checks. Do not claim
+the GitHub merge gate is enabled until this round trip and protection settings
+are verified.
