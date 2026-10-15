@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +34,7 @@ def iso_now() -> str:
 
 
 def make_run_id() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
+    return datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -129,9 +130,11 @@ class RunResult:
     schema_version: str = SCHEMA_VERSION
     mutation_summary: Optional[dict] = None
     fatal_error: Optional[dict] = None
+    execution_context: Optional[dict] = None
 
     def to_dict(self) -> dict:
         return {
+            **({"execution_context": dict(self.execution_context)} if self.execution_context else {}),
             "schema_version": self.schema_version,
             "run_id": self.run_id,
             "site": self.site,

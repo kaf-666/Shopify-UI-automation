@@ -45,6 +45,7 @@ from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.safe_artifact_write import write_run_json
+from utils.run_context import load_context, claim_context
 from utils.result import (
     ResultWriteError,
     RunResult,
@@ -293,6 +294,7 @@ def _write_run_result(
     runtime: Optional[dict] = None,
     mutation_summary: Optional[dict] = None,
     fatal_error: Optional[dict] = None,
+    execution_context: Optional[dict] = None,
 ) -> bool:
     """统一写正常 / partial / fatal results.json。"""
     counts = {
@@ -314,6 +316,7 @@ def _write_run_result(
         viewports=viewports,
         mutation_summary=mutation_summary,
         fatal_error=fatal_error,
+        execution_context=execution_context,
     )
     try:
         write_run_json(result.to_dict(), artifact_dir, "results.json")
@@ -370,6 +373,8 @@ def _write_traffic_reduction(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Website Smoke V1")
+    parser.add_argument("--run-id", help="explicit unique invocation ID")
+    parser.add_argument("--run-context", help="prepared CI run_context.json (project-relative)")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
     parser.add_argument(
         "--site",
@@ -391,7 +396,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.traffic_reduction and not args.traffic_inventory:
         parser.error("--traffic-reduction requires --traffic-inventory")
 
-    run_id = make_run_id()
+    run_id = args.run_id or make_run_id()
+    context = None
     started_at = iso_now()
     started = time.perf_counter()
     site = ""
@@ -402,6 +408,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     mutation_summaries: List[dict] = []
 
     try:
+        if args.run_context:
+            context = load_context(args.run_context, workspace=PROJECT_ROOT)
+            run_id = args.run_id or context["identity"]["run_id"]
         settings = load_settings()
         requested_site = args.site if args.site is not None else str(settings.get("default_site") or "")
         site = canonical_site_name(requested_site)
@@ -414,8 +423,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return exit_code
 
     try:
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
+        if context is not None:
+            artifact_dir = claim_context(context, suite=WEBSITE_SMOKE_V1, site=site,
+                                         viewport=args.viewport, run_id=run_id, workspace=PROJECT_ROOT)
+        else:
+            artifact_dir.mkdir(parents=True, exist_ok=False)
+    except (OSError, CliConfigError, ResultWriteError) as exc:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
 
@@ -475,6 +488,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             started,
             vp_results,
             runtime={"viewports": runtime_by_viewport},
+            execution_context=context["identity"] if context else None,
             mutation_summary=partial_mutation_summary,
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
@@ -506,6 +520,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         started,
         vp_results,
         runtime={"viewports": runtime_by_viewport},
+        execution_context=context["identity"] if context else None,
         mutation_summary=mutation_summary,
     ):
         print_mutation_fingerprints(mutation_summary)

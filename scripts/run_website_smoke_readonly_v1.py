@@ -48,6 +48,8 @@ from utils.result import (
     write_results_json,
 )
 from utils.site_config_validator import WEBSITE_SMOKE_READONLY_V1, validate_site_config
+from utils.run_context import load_context, claim_context
+from utils.safe_artifact_write import write_run_json
 from utils.suite_runner import guarded_main
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-readonly-v1"
@@ -130,6 +132,7 @@ def _write_run_result(
     viewports: List[ViewportResult],
     runtime: Optional[dict] = None,
     fatal_error: Optional[dict] = None,
+    execution_context: Optional[dict] = None,
 ) -> bool:
     counts = {
         "pass": sum(viewport.summary.get("pass", 0) for viewport in viewports),
@@ -153,9 +156,13 @@ def _write_run_result(
         summary={**counts, "total": total},
         viewports=viewports,
         fatal_error=fatal_error,
+        execution_context=execution_context,
     )
     try:
-        write_results_json(result.to_dict(), artifact_dir / "results.json")
+        if execution_context:
+            write_run_json(result.to_dict(), artifact_dir, "results.json")
+        else:
+            write_results_json(result.to_dict(), artifact_dir / "results.json")
         return True
     except ResultWriteError as exc:
         print(f"RESULT_WRITE_FAILURE: {sanitize_message(exc)}")
@@ -170,6 +177,8 @@ def _fatal_classification(exc: BaseException) -> tuple[str, int]:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Website Smoke Readonly V1")
+    parser.add_argument("--run-id", help="explicit unique invocation ID")
+    parser.add_argument("--run-context", help="prepared CI run_context.json (project-relative)")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"], default="both")
     parser.add_argument(
         "--site",
@@ -178,7 +187,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    run_id = make_run_id()
+    run_id = args.run_id or make_run_id()
+    context = None
     started_at = iso_now()
     started = time.perf_counter()
     site = ""
@@ -190,6 +200,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     mutation_violation_total = 0
 
     try:
+        if args.run_context:
+            context = load_context(args.run_context, workspace=PROJECT_ROOT)
+            run_id = args.run_id or context["identity"]["run_id"]
         settings = load_settings()
         requested_site = args.site if args.site is not None else str(settings.get("default_site") or "")
         site = canonical_site_name(requested_site)
@@ -202,8 +215,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         return exit_code
 
     try:
-        artifact_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
+        if context is not None:
+            artifact_dir = claim_context(context, suite=WEBSITE_SMOKE_READONLY_V1, site=site,
+                                         viewport=args.viewport, run_id=run_id, workspace=PROJECT_ROOT)
+        else:
+            artifact_dir.mkdir(parents=True, exist_ok=False)
+    except (OSError, CliConfigError, ResultWriteError) as exc:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
 
@@ -278,6 +295,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             started,
             viewport_results,
             runtime={"viewports": runtime_by_viewport},
+            execution_context=context["identity"] if context else None,
             fatal_error={"classification": classification, "message": sanitize_message(exc)},
         )
         print(f"FATAL_ERROR [{classification}]: {sanitize_message(exc)}")
@@ -304,6 +322,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         started,
         viewport_results,
         runtime={"viewports": runtime_by_viewport},
+        execution_context=context["identity"] if context else None,
         fatal_error=mutation_fatal,
     ):
         return 1

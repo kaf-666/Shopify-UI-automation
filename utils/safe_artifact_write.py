@@ -56,7 +56,8 @@ def write_run_json(data, run_root, relative):
         if (not isinstance(relative, str) or rel.is_absolute() or win.is_absolute()
                 or win.drive or "\\" in relative or ".." in rel.parts
                 or relative not in {"results.json", "desktop/cart-cleanup.json",
-                                    "mobile/cart-cleanup.json"}):
+                                    "mobile/cart-cleanup.json", "run_context.json",
+                                    "stability_record.json", "publication.json"}):
             raise ValueError
         root = Path(run_root).absolute()
         with ExitStack() as stack:

@@ -21,6 +21,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.artifacts import canonical_site_name, site_scoped_artifact_root
 from utils.errors import CliConfigError
+from utils.run_context import load_context, validate_context_results
+from utils.safe_artifact_write import write_run_json
 from utils.stability import (
     HISTORY_FILENAME,
     WEBSITE_ARTIFACT_ROOT,
@@ -53,6 +55,8 @@ def _load_results(path: Path) -> dict:
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Record Website Smoke V1 stability data")
     parser.add_argument("--results", help="explicit results.json path")
+    parser.add_argument("--run-context", help="strict current CI invocation context")
+    parser.add_argument("--defer-history", action="store_true", help="write history only after publication scan")
     parser.add_argument("--artifacts-root", default=str(WEBSITE_ARTIFACT_ROOT))
     parser.add_argument("--history", help="JSONL history path")
     parser.add_argument("--viewport", choices=["desktop", "mobile", "both"])
@@ -62,14 +66,35 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     artifacts_root = Path(args.artifacts_root)
+    context = None
+    if args.run_context:
+        try:
+            if not args.results:
+                raise ValueError("CURRENT_RESULTS_REQUIRED")
+            context = load_context(args.run_context, workspace=PROJECT_ROOT)
+            validate_context_results(context, args.results, suite="website_smoke_v1", workspace=PROJECT_ROOT)
+            if args.commit_sha and args.commit_sha != context["identity"]["commit_sha"]:
+                raise ValueError("RUN_COMMIT_MISMATCH")
+            if args.viewport and args.viewport != context["identity"]["viewport"]:
+                raise ValueError("RUN_VIEWPORT_MISMATCH")
+        except Exception:
+            print("Stability Record: CURRENT_RUN_VALIDATION_FAILED")
+            return 1
     result_path = Path(args.results) if args.results else _latest_results(artifacts_root)
-    requested_viewport = args.viewport or os.environ.get("SMOKE_VIEWPORT") or ""
+    if context:
+        result_path = PROJECT_ROOT / context["results_path"]
+        artifacts_root = result_path.parent.parent.parent
+    requested_viewport = (context["identity"]["viewport"] if context else
+                          args.viewport or os.environ.get("SMOKE_VIEWPORT") or "")
     if result_path is None or not result_path.exists():
         print("Stability Record: no Website Smoke V1 results.json found")
         print("STABILITY_STATUS=COLLECTING")
         return 0
 
     record_env = dict(os.environ)
+    if context:
+        record_env.update({"GIT_COMMIT_SHA": context["identity"]["commit_sha"],
+                           "BUILD_NUMBER": str(context["identity"]["build_number"])})
     if args.commit_sha is not None:
         record_env["GIT_COMMIT_SHA"] = args.commit_sha
     if args.schema_gate is not None:
@@ -85,10 +110,13 @@ def main(argv: Optional[list[str]] = None) -> int:
             requested_viewport=requested_viewport,
             environ=record_env,
         )
+        if context:
+            record["execution_context"] = dict(context["identity"])
+            record["source_results"] = context["results_path"]
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"Stability Record: unable to read results ({type(exc).__name__})")
         print("STABILITY_STATUS=COLLECTING")
-        return 0
+        return 1 if context else 0
 
     if record.get("viewport") != "both":
         print(f"Stability Record: skipped non-both viewport ({record.get('viewport')})")
@@ -115,14 +143,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         else default_history_root / HISTORY_FILENAME
     )
     try:
-        atomic_write_json(record_path, record)
-        write_history_record(history_path, record)
+        if context:
+            write_run_json(record, result_path.parent, "stability_record.json")
+        else:
+            atomic_write_json(record_path, record)
+        if not args.defer_history and context is None:
+            write_history_record(history_path, record)
     except OSError as exc:
         print(f"Stability Record: write failed ({type(exc).__name__})")
         return 1
 
     history_records, history_errors = load_history(history_path)
-    archived_records = load_archived_records(artifacts_root)
+    archived_records = [] if context else load_archived_records(artifacts_root)
     summary = summarize_records(
         merge_records(history_records, archived_records), last=10, site=site
     )

@@ -31,6 +31,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.screenshots import capture_case_failure
 from utils.full_cleanup_contract import uses_v3, validate_progress, validate_operations
+from utils.run_context import load_context, validate_context_results, identity_valid
 
 ARTIFACT_ROOTS = {
     "legacy": PROJECT_ROOT / "artifacts" / "smoke",
@@ -558,6 +559,17 @@ def validate_json(run_dir: Path, suite: str) -> bool:
     for field in RUN_REQUIRED:
         ok_all = check(field in data, f"run field present: {field}") and ok_all
 
+    identity = data.get("execution_context")
+    if identity is not None:
+        valid_identity = identity_valid(identity)
+        ok_all = check(valid_identity, "execution context identity") and ok_all
+        if valid_identity:
+            ok_all = check(
+                identity["suite"] == suite and identity["site"] == data.get("site")
+                and identity["run_id"] == data.get("run_id") == run_dir.name,
+                "result identity matches suite/site/run directory",
+            ) and ok_all
+
     ok_all = _summary_ok(data.get("summary", {}), "run") and ok_all
     ok_all = check(data.get("overall_status") in ("PASS", "FAIL"), "overall_status value") and ok_all
     ok_all = _validate_mutation_summary(data.get("mutation_summary")) and ok_all
@@ -706,17 +718,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Result schema validation")
     parser.add_argument("--suite", choices=sorted(ARTIFACT_ROOTS), default="legacy")
     parser.add_argument("--results", help="explicit results.json path")
+    parser.add_argument("--run-context", help="strict current CI invocation context")
     args = parser.parse_args(argv)
 
     print("=== Result Schema Validation ===")
     print()
     try:
+        if args.run_context:
+            if not args.results:
+                raise ValueError("CURRENT_RESULTS_REQUIRED")
+            context = load_context(args.run_context, workspace=PROJECT_ROOT)
+            validate_context_results(context, args.results, suite=args.suite, workspace=PROJECT_ROOT)
         result_path = Path(args.results) if args.results else latest_run_dir(ARTIFACT_ROOTS[args.suite]) / "results.json"
+        if args.run_context:
+            result_path = PROJECT_ROOT / args.results
         run_dir = result_path.parent
         if not result_path.exists():
             raise FileNotFoundError(result_path)
-    except FileNotFoundError as exc:
-        print(f"  FAIL  {exc}")
+    except Exception as exc:
+        print(f"  FAIL  {str(exc) if not args.run_context else 'CURRENT_RUN_VALIDATION_FAILED'}")
         return 1
 
     print(f"[{run_dir.name}] suite={args.suite}")
