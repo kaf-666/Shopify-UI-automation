@@ -62,13 +62,17 @@ the production deadline behavior is unchanged. Local regression has 806 passed
 and 3 existing Windows symlink-permission skips. Linux skips two Windows-only
 filesystem tests instead.
 
-**GitHub status/required-check activation is pending credential permission.**
-The existing `github-kaf-666` SCM credential can read/checkout the repository but
-GitHub rejects commit-status updates with HTTP 403 (`Resource not accessible by
-personal access token`). The token owner must grant this repository's Commit
-statuses read/write permission, or select an existing appropriately scoped
-credential in the branch source. Never place the token in source or test env.
-After that change, verify pending → failure/success status on the PR, then add
-the observed Jenkins PR status context to main's required checks. Do not claim
-the GitHub merge gate is enabled until this round trip and protection settings
-are verified.
+GitHub notifications use the existing `github-kaf-666` SCM credential. Its owner
+enabled this repository's Commit statuses read/write permission on 2026-10-15;
+no token is stored in source or passed to the test environment. Status round
+trip was verified after the initial HTTP 403 was resolved: PR-2 build #5
+reported pending, then a non-success status for an intentional failing test,
+and GitHub showed the PR as BLOCKED. The failure probe was removed afterward.
+
+The observed context `continuous-integration/jenkins/pr-merge` is required on
+`main`. Strict checking requires the PR branch to be up to date; administrators
+are also subject to the check. Force pushes and deletion of main are disabled.
+Normal changes should use a repository branch and PR, wait for this check to
+succeed, then merge. A successful Jenkins page alone does not satisfy the gate
+unless GitHub also receives the successful status. If notifications later fail,
+repair the credential/status integration before merging.
