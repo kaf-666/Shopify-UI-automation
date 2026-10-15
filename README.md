@@ -243,8 +243,30 @@ artifacts/website-smoke-readonly-v1/<site>/<run_id>/
 or `lavetir`), not a value encoded into `run_id`. Each run contains `results.json`. Failed cases may also contain a
 viewport-scoped failure screenshot or diagnostics. Full `both` runs may
 additionally contain `stability_record.json`; Readonly does not generate a
-Stability record. Jenkins archives `artifacts/**` after the pipeline stages
-complete.
+Stability record. Local run IDs include a random suffix; an existing run
+directory is never reused.
+
+The six formal Jenkins pipelines reserve `artifacts/ci/<run_id>/run_context.json`
+before site access. Results carry the same `execution_context` identity: suite,
+site, run ID, checked-out commit, Jenkins job/build, and requested viewport.
+Schema validation and CI stability collection require that exact result path;
+historical/manual result readers remain compatible with older files.
+
+CI publishes only `artifacts/ci/<run_id>/publish/**`. This snapshot contains
+`<run_id>/results.json`, the current evidence, `run_context.json`, and
+`publication.json` with its explicit file list. All candidate files are scanned
+after the final writes, including JSONL/NDJSON and unknown suffixes. A missing
+result, failed/unused gate, unreadable file, link, or failed final scan publishes
+only a fixed `publication-failure.json`; historical workspace output is excluded.
+Ordinary business failures retain their current evidence when validation and
+scanning pass. Full `both` stability history is updated only after Jenkins
+successfully archives the snapshot; repeating acknowledgement is idempotent.
+
+CI protocol entry points are `scripts/prepare_run_context.py`, the appropriate
+smoke CLI with `--run-id` / `--run-context`, explicit schema validation with
+`--results` / `--run-context`, and `scripts/finalize_ci_run.py`. The finalizer's
+`--acknowledge` step runs after successful archival. A failed build without a
+current result is recorded as infrastructure failure, never as a previous PASS.
 
 ## Specialized suites
 

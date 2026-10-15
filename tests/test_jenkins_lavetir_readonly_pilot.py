@@ -79,4 +79,5 @@ def test_lavetir_pipeline_preserves_readonly_gates_and_boundaries() -> None:
     assert "scripts/validate_result_schema.py --suite website_smoke_readonly_v1" in content
     assert "scripts/record_stability.py" not in content
     assert "STABILITY_" not in content
-    assert "archiveArtifacts artifacts: 'artifacts/**'" in content
+    from tests.test_jenkins_pipeline_split import assert_scoped_publication
+    assert_scoped_publication(content)

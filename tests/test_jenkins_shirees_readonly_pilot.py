@@ -59,7 +59,13 @@ def test_shirees_pipeline_binds_only_matching_credential_ids() -> None:
     assert "MONDRESSY_US_SHOPIFY_SIGNATURE" not in content
     assert "LAVETIR_US_SHOPIFY_SIGNATURE" not in content
     assert all(f"${{env.{name}}}" not in content for name in credential_names)
-    assert "writeFile" not in content
+    writes = [line.strip() for line in content.splitlines() if "writeFile" in line]
+    assert len(writes) == 1
+    assert writes[0].startswith("writeFile file: 'publication-failure.json', text:")
+    assert "failureCode" in writes[0]
+    assert "'CURRENT_RESULTS_MISSING'" in content
+    assert "'CURRENT_SECRET_SCAN_NOT_PASSED'" in content
+    assert "'CURRENT_SCHEMA_NOT_PASSED'" in content
 
 
 def test_shirees_credential_names_are_covered_by_dynamic_error_redaction(monkeypatch) -> None:
@@ -114,12 +120,13 @@ def test_shirees_pipeline_runs_ordered_readonly_gates_and_archives_evidence() ->
     assert "scripts/validate_ci_safe_outputs.py" in content
     assert "scripts/validate_result_schema.py --suite website_smoke_readonly_v1" in content
     assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in content
-    assert "archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false" in content
+    from tests.test_jenkins_pipeline_split import assert_scoped_publication
+    assert_scoped_publication(content)
     assert "output/**" not in content
 
     post_always = re.search(r"post\s*\{\s*always\s*\{(?P<body>.*?)\n\s*}\s*}", content, re.DOTALL)
     assert post_always is not None
-    assert "archiveArtifacts artifacts: 'artifacts/**'" in post_always.group("body")
+    assert "scripts/finalize_ci_run.py" in content[content.index("    post {"):]
 
 
 def test_shirees_pipeline_profile_matches_the_explicit_signed_request_contract() -> None:

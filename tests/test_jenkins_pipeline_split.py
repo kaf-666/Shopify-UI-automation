@@ -36,6 +36,19 @@ def _text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def assert_scoped_publication(content):
+    assert "archiveArtifacts artifacts: 'artifacts/**'" not in content
+    assert 'archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publish/**"' in content
+    assert "archiveArtifacts artifacts: failurePath" in content
+    assert "publication-failure.json" in content
+    assert "if (publishExit != 0)" in content
+    assert content.index("if (publishExit != 0)") < content.index("archiveArtifacts artifacts:")
+    assert content.index("archiveArtifacts artifacts:") < content.index("--acknowledge")
+    assert "scripts/prepare_run_context.py" in content
+    assert "--run-context ${env.CI_CONTEXT_PATH}" in content
+    assert "--results ${env.CI_RESULT_PATH}" in content
+
+
 def test_split_pipeline_files_exist() -> None:
     assert FULL_PIPELINE.exists()
     assert READONLY_PIPELINE.exists()
@@ -56,13 +69,13 @@ def test_shirees_full_pipeline_is_manual_site_scoped_and_keeps_safety_gates() ->
     assert "scripts/validate_runtime_contract.py" in content
     assert "scripts/validate_ci_safe_outputs.py" in content
     assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
-    assert "scripts/record_stability.py" in content
+    assert "scripts/finalize_ci_run.py" in content
     assert "artifacts/website-smoke-v1/shirees" in content
     assert "LAVETIR" not in content
     assert "MONDRESSY" not in content
     assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in content
     assert "returnStatus: true" in content
-    assert "archiveArtifacts artifacts: 'artifacts/**'" in content
+    assert_scoped_publication(content)
 
     for credential_id in (
         "SHIREES_US_SHOPIFY_SIGNATURE",
@@ -84,7 +97,7 @@ def test_lavetir_full_pipeline_is_manual_only_and_fixed_to_site() -> None:
     assert "scripts/run_website_smoke_v1.py --site lavetir" in content
     assert "scripts/validate_site_config.py --site lavetir --suite website_smoke_v1" in content
     assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
-    assert "scripts/record_stability.py" in content
+    assert "scripts/finalize_ci_run.py" in content
     assert "artifacts/website-smoke-v1/lavetir" in content
     assert "MONDRESSY" not in content
     for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\("):
@@ -117,8 +130,8 @@ def test_full_runner_schema_and_stability_mapping() -> None:
     assert "scripts/run_website_smoke_readonly_v1.py" not in content
     assert "--suite website_smoke_v1" in content
     assert "--suite website_smoke_readonly_v1" not in content
-    assert "scripts/record_stability.py" in content
-    assert "artifacts/**" in content
+    assert "scripts/finalize_ci_run.py" in content
+    assert_scoped_publication(content)
     assert "validate_ci_safe_outputs.py" in content
 
 
@@ -131,7 +144,7 @@ def test_readonly_runner_schema_and_stability_boundary() -> None:
     assert "--suite website_smoke_v1" not in content
     assert "scripts/record_stability.py" not in content
     assert "STABILITY_" not in content
-    assert "artifacts/**" in content
+    assert_scoped_publication(content)
     assert "validate_ci_safe_outputs.py" in content
 
 
@@ -151,7 +164,7 @@ def test_both_pipelines_keep_common_infrastructure_and_parameters() -> None:
         assert "buildDiscarder(" in content
         for credential_id in CREDENTIAL_IDS:
             assert f"credentials('{credential_id}')" in content
-        assert "archiveArtifacts artifacts: 'artifacts/**'" in content
+        assert_scoped_publication(content)
 
 
 def test_smoke_failure_is_caught_before_later_gates() -> None:

@@ -47,6 +47,13 @@ pipeline {
         stage('Checkout') {
             steps {
                 script {
+                    env.CI_RUN_ID = "build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
+                    env.CI_CONTEXT_PATH = "artifacts/ci/${env.CI_RUN_ID}/run_context.json"
+                    env.CI_RESULT_PATH = "artifacts/website-smoke-readonly-v1/lavetir/${env.CI_RUN_ID}/results.json"
+                    env.CI_PYTHON_EXIT_CODE = 'UNKNOWN'
+                    env.CI_SECRET_GATE = 'NOT_RUN'
+                    env.CI_SCHEMA_GATE = 'NOT_RUN'
+
                     def scmVars = checkout scm
                     def checkoutSha = "${scmVars?.GIT_COMMIT ?: ''}".trim()
                     if (!checkoutSha) {
@@ -114,6 +121,18 @@ pipeline {
                     } else {
                         bat 'python -m venv .venv'
                         bat '.venv\\Scripts\\python.exe -m pip install --no-input -r requirements.lock.txt'
+                    }
+                }
+            }
+        }
+
+        stage('Prepare Run') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh ".venv/bin/python scripts/prepare_run_context.py --site lavetir --suite website_smoke_readonly_v1 --viewport ${params.SMOKE_VIEWPORT}"
+                    } else {
+                        bat ".venv\\Scripts\\python.exe scripts\\prepare_run_context.py --site lavetir --suite website_smoke_readonly_v1 --viewport ${params.SMOKE_VIEWPORT}"
                     }
                 }
             }
@@ -198,15 +217,16 @@ pipeline {
                         if (isUnix()) {
                             readonlyExitCode = sh(
                                 returnStatus: true,
-                                script: ".venv/bin/python scripts/run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT}"
+                                script: ".venv/bin/python scripts/run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --run-id ${env.CI_RUN_ID} --run-context ${env.CI_CONTEXT_PATH}"
                             )
                         } else {
                             readonlyExitCode = bat(
                                 returnStatus: true,
-                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT}"
+                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --run-id ${env.CI_RUN_ID} --run-context ${env.CI_CONTEXT_PATH}"
                             )
                         }
                         env.READONLY_PYTHON_EXIT_CODE = "${readonlyExitCode}"
+                        env.CI_PYTHON_EXIT_CODE = "${readonlyExitCode}"
                         if (readonlyExitCode != 0) {
                             error("Website Smoke Readonly V1 exited with code ${readonlyExitCode}")
                         }
@@ -222,14 +242,15 @@ pipeline {
                     if (isUnix()) {
                         gateExitCode = sh(
                             returnStatus: true,
-                            script: '.venv/bin/python scripts/validate_ci_safe_outputs.py'
+                            script: ".venv/bin/python scripts/validate_ci_safe_outputs.py --run-context ${env.CI_CONTEXT_PATH}"
                         )
                     } else {
                         gateExitCode = bat(
                             returnStatus: true,
-                            script: '.venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py'
+                            script: ".venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py --run-context ${env.CI_CONTEXT_PATH}"
                         )
                     }
+                    env.CI_SECRET_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
                     if (gateExitCode != 0) {
                         error("Secret Leakage Check exited with code ${gateExitCode}")
                     }
@@ -244,14 +265,15 @@ pipeline {
                     if (isUnix()) {
                         gateExitCode = sh(
                             returnStatus: true,
-                            script: '.venv/bin/python scripts/validate_result_schema.py --suite website_smoke_readonly_v1'
+                            script: ".venv/bin/python scripts/validate_result_schema.py --suite website_smoke_readonly_v1 --run-context ${env.CI_CONTEXT_PATH} --results ${env.CI_RESULT_PATH}"
                         )
                     } else {
                         gateExitCode = bat(
                             returnStatus: true,
-                            script: '.venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_readonly_v1'
+                            script: ".venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_readonly_v1 --run-context ${env.CI_CONTEXT_PATH} --results ${env.CI_RESULT_PATH}"
                         )
                     }
+                    env.CI_SCHEMA_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
                     if (gateExitCode != 0) {
                         error("Result Validation exited with code ${gateExitCode}")
                     }
@@ -262,7 +284,56 @@ pipeline {
 
     post {
         always {
-            archiveArtifacts artifacts: 'artifacts/**', allowEmptyArchive: true, fingerprint: false
+            script {
+                if (!env.CI_RUN_ID) {
+                    env.CI_RUN_ID = "build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
+                }
+                try {
+                    def causes = "${currentBuild.getBuildCauses()}"
+                    env.CI_TRIGGER = causes.contains('TimerTriggerCause') ? 'TIMER' :
+                        causes.contains('SCMTriggerCause') ? 'SCM' :
+                        causes.contains('UserIdCause') ? 'MANUAL' : 'OTHER'
+                } catch (ignored) {
+                    env.CI_TRIGGER = 'UNKNOWN'
+                }
+                try {
+                    def contextPath = env.CI_CONTEXT_PATH ?: "artifacts/ci/${env.CI_RUN_ID}/run_context.json"
+                    def exitCode = env.CI_PYTHON_EXIT_CODE ?: 'UNKNOWN'
+                    def buildResult = currentBuild.currentResult ?: 'FAILURE'
+                    int publishExit
+                    if (isUnix()) {
+                        publishExit = sh(returnStatus: true, script: ".venv/bin/python scripts/finalize_ci_run.py --run-context ${contextPath} --python-exit-code ${exitCode} --jenkins-result ${buildResult}")
+                    } else {
+                        publishExit = bat(returnStatus: true, script: ".venv\\Scripts\\python.exe scripts\\finalize_ci_run.py --run-context ${contextPath} --python-exit-code ${exitCode} --jenkins-result ${buildResult}")
+                    }
+                    if (publishExit != 0) {
+                        error('Current invocation failed validation or publication scan')
+                    }
+                    // The finalizer has frozen and scanned every candidate file.
+                    archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publish/**", allowEmptyArchive: false, fingerprint: false
+                    int acknowledgeExit
+                    if (isUnix()) {
+                        acknowledgeExit = sh(returnStatus: true, script: ".venv/bin/python scripts/finalize_ci_run.py --run-context ${contextPath} --acknowledge")
+                    } else {
+                        acknowledgeExit = bat(returnStatus: true, script: ".venv\\Scripts\\python.exe scripts\\finalize_ci_run.py --run-context ${contextPath} --acknowledge")
+                    }
+                    if (acknowledgeExit != 0) {
+                        error('Current invocation archive acknowledgement failed')
+                    }
+                } catch (ignored) {
+                    currentBuild.result = 'FAILURE'
+                    // Available even when dependencies/site access failed. No raw output.
+                    def failureCode = !env.CI_RESULT_PATH || !fileExists(env.CI_RESULT_PATH) ?
+                        'CURRENT_RESULTS_MISSING' : env.CI_SECRET_GATE != 'PASS' ?
+                        'CURRENT_SECRET_SCAN_NOT_PASSED' : env.CI_SCHEMA_GATE != 'PASS' ?
+                        'CURRENT_SCHEMA_NOT_PASSED' : 'CURRENT_RUN_PUBLICATION_FAILED'
+                    def failurePath = "artifacts/ci/${env.CI_RUN_ID}/publication-failure.json"
+                    dir("artifacts/ci/${env.CI_RUN_ID}") {
+                        writeFile file: 'publication-failure.json', text: '{"status":"FAIL","classification":"' + failureCode + '"}\n'
+                    }
+                    archiveArtifacts artifacts: failurePath, allowEmptyArchive: false, fingerprint: false
+                }
+            }
         }
     }
 }
