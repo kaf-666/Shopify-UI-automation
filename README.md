@@ -483,6 +483,7 @@ The formal pipelines use the following stages:
 Checkout
 Environment
 Install Dependencies
+Prepare Run
 Install Playwright Browsers
 Static Validation
 Runtime Contract
@@ -490,7 +491,7 @@ Signed Request / Site Access
 Smoke
 Secret Leakage Check
 Result Validation
-Artifact Archive
+Current Run Snapshot / Final Scan / Artifact Archive / Acknowledge
 ```
 
 The Full pipeline also records Stability after the build. Readonly does not
@@ -510,10 +511,11 @@ Stability belongs only to Website Smoke V1 / Full. The Full Job uses the UI
 schedule `H H * * *` (daily). Readonly runs are not included in Full Stability
 history.
 
-The Full collector consumes the existing `results.json` after a build. Only a
-complete `both` run is eligible for a formal stability sample. It writes a safe
+The Full CI finalizer consumes the exact current-context `results.json` after a
+build. Only a complete `both` run is eligible for a formal stability sample. It writes a safe
 `artifacts/website-smoke-v1/<site>/<run_id>/stability_record.json` and atomically
-updates the ignored runtime cache
+updates the ignored runtime cache only after the scanned snapshot is archived
+and acknowledged:
 `artifacts/website-smoke-v1/<site>/stability-history.jsonl`. The per-build
 `results.json` and `stability_record.json` archives remain the source of truth;
 the JSONL file is only a workspace cache and may be absent after cleanup.
@@ -522,8 +524,9 @@ Lavetir never enter the same baseline or streak.
 
 The stability metadata contract uses the actual checked-out workspace HEAD:
 Jenkins captures `checkout scm`'s `GIT_COMMIT` (with `git rev-parse HEAD` as a
-workspace-only fallback) into `GIT_COMMIT_SHA` and passes it explicitly to the
-collector. A record with no commit SHA is retained for diagnosis but is not
+workspace-only fallback) into `GIT_COMMIT_SHA` and binds it to the run context.
+Strict CI rejects a missing or mismatched commit. For legacy/manual collection,
+a record with no commit SHA is retained for diagnosis but is not
 eligible for a formal baseline. Schema and secret gates are initialized as
 `NOT_RUN`, then set to `PASS` or `FAIL` from their real process exit status;
 the collector never promotes `NOT_RUN` or overwrites `FAIL`.
