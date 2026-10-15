@@ -206,7 +206,11 @@ def test_deadline_with_not_ready_snapshot_fails_without_extra_snapshot(
     assert "failing_conditions=size" in str(captured.value)
 
 
-def test_selected_size_is_diagnostic_not_readiness_gate() -> None:
+def test_selected_size_is_diagnostic_not_readiness_gate(monkeypatch) -> None:
+    # This tests the selected-size contract, not the machine's timer precision.
+    # On Linux an int-truncated 1 ms real deadline can expire before the first
+    # mocked snapshot. Keep deadline behavior covered by the explicit clock tests.
+    monkeypatch.setattr("pages.product_page.time.monotonic", _Clock())
     calls = []
 
     def read_snapshot() -> dict:
