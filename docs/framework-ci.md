@@ -1,0 +1,48 @@
+# Offline framework CI
+
+Pipeline: `Jenkinsfile.framework-ci`.
+
+Job: [Framework - Offline Regression](https://testing.lightingrid.com/job/Monitoring/job/Shopify/job/UI%20automation/job/Framework%20-%20Offline%20Regression/).
+
+The GitHub Branch Source discovers repository branches without open PRs, and
+origin PRs merged with their target branch. Fork discovery is disabled. Jenkins
+deduplicates SCM revisions; each child job aborts its previous running build
+when a new build starts. Test execution has no storefront credentials.
+
+The repository webhook sends push and pull_request events to
+`https://testing.lightingrid.com/github-webhook/` with TLS verification enabled.
+Its initial ping was confirmed with HTTP 200 on 2026-10-15. Events drive GitHub
+Branch Source discovery; there is no duplicate per-branch polling schedule.
+
+Every build checks out a clean workspace, creates `.venv-ci`, installs the
+version-pinned runtime/test lock and Chromium/WebKit, then invokes
+`scripts/run_framework_ci.py` with a unique build report directory. Browser
+system libraries must already be available on the agent, as for the existing
+smoke jobs. The validated targets are Windows Python 3.10 and Jenkins Linux
+Python 3.13. Network is needed to install dependencies and browser binaries;
+checks use synthetic HTML, mocks and loopback HTTP servers.
+
+The runner executes compilation, all pytest tests, Runtime Contract and
+stability validation even when an earlier check fails. It preserves their exit
+codes in `summary.json`. JUnit and logs are sanitized and scanned before Jenkins
+publishes them. Only the current `artifacts/framework-ci/build-*/` directory is
+archived. Report/scan infrastructure errors publish a fixed error JSON instead.
+Missing or empty JUnit cannot produce a successful build. Jenkins exposes test
+failures through its native test report.
+
+The child environment excludes Shopify signatures, GitHub tokens, proxies,
+user pytest options and third-party pytest plugin auto-loading. OS/browser
+settings and Jenkins process-tree cookies are retained so cancellation also
+stops browser descendants. A timed-out check terminates its process tree.
+
+Local equivalent:
+
+```text
+python -m pip install -r requirements-test.lock.txt
+python -m playwright install chromium webkit
+python scripts/run_framework_ci.py --report-dir artifacts/framework-ci/local-unique-id
+```
+
+Never reuse a report directory. Jenkins compilation/test logs remain tied to the
+checked-out commit and build through the summary and build page. Storefront
+smoke schedules and Full stability histories are independent of this job.
