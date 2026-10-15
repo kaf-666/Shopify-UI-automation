@@ -371,55 +371,26 @@ def test_zero_timeout_does_not_start_a_readiness_poll() -> None:
     assert "poll_count=0" in str(captured.value)
 
 
-def test_diagnostic_failure_detail_reports_phase_first_gate_and_timeline(
-    monkeypatch,
-) -> None:
-    timeline = [
-        {
-            "elapsed_ms": 0,
-            "purchase_area_attached": True,
-            "title_visible": True,
-            "color_count": 2,
-            "size_count": 3,
-            "size_group_detected": True,
-            "size_option_total": 3,
-            "normal_size_available": 3,
-            "selected_size": "M",
-            "atc_visible": True,
-            "atc_enabled": True,
-        },
-        {
-            "elapsed_ms": 100,
-            "purchase_area_attached": True,
-            "title_visible": True,
-            "color_count": 2,
-            "size_count": 0,
-            "size_group_detected": True,
-            "size_option_total": 3,
-            "normal_size_available": 0,
-            "selected_size": None,
-            "atc_visible": True,
-            "atc_enabled": True,
-        },
-    ]
-
-    class _FailingProduct:
-        @staticmethod
-        def wait_purchase_ready(diagnostics_hook=None, *, phase="legacy", expected_color=None, expected_size=None):
-            assert diagnostics_hook is not None
-            for snapshot in timeline:
-                diagnostics_hook(snapshot)
-            raise PurchaseAreaReadinessError("failing_conditions=size")
-
-    monkeypatch.setenv("VARIANT_DIAGNOSTIC", "1")
+def test_diagnostic_failure_detail_reports_phase_first_gate_and_bounded_timeline(monkeypatch):
+    clock = _Clock()
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
+    def sample():
+        clock.advance(.01)
+        return _snapshot(size_count=0, normal_size_available=0, selected_size=None)
+    product = _product(sample, lambda *_args: clock.advance(.01))
     runner = object.__new__(WebsiteSmokeReadonlyV1Runner)
-
     with pytest.raises(PurchaseAreaReadinessError) as captured:
-        runner._wait_purchase_ready(_FailingProduct(), "post_selection")
-
+        original = product.wait_purchase_ready
+        product.wait_purchase_ready = lambda **kw: original(timeout_ms=1000, **kw)
+        runner._wait_purchase_ready(product, "pre_selection")
     detail = str(captured.value)
-    assert "phase=post_selection" in detail
+    assert "phase=pre_selection" in detail
     assert "first_failing_conditions=size" in detail
-    assert "first_failure_ms=100" in detail
-    assert '"selected_size":null' in detail
-    assert "readiness_timeline=" in detail
+    assert "first_failure_ms=10" in detail
+    assert '\"selected_size\":null' in detail
+    assert detail.count("readiness_timeline=") == 1
+    report = product.last_readiness_report
+    assert report["poll_count"] > 12
+    assert len(report["timeline"]) == 12
+    assert report["timeline"][0]["elapsed_ms"] == 10
+    assert report["timeline"][-1]["poll_count"] == report["poll_count"]

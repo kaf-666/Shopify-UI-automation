@@ -123,3 +123,67 @@ def test_custom_trigger_before_normal_size_does_not_hide_saleable_size(product):
         '<label for="custom">Custom Size</label><input hidden id="custom" type="radio" name="properties[Size]" value="Custom Size">')''')
     product.wait_purchase_ready(timeout_ms=1000, phase="pre_selection")
     assert product.first_available_size() == "M"
+
+
+def test_shared_validation_waits_for_empty_text_and_records_one_budget(product):
+    product.page.evaluate('''() => {
+      title.style.minHeight='20px'; title.textContent='';
+      price.style.display='block'; price.style.minHeight='20px'; price.textContent='';
+      setTimeout(()=>title.textContent='Hydrated Product',150);
+      setTimeout(()=>price.textContent='$12',350);
+    }''')
+    info = product.validate_purchase_area(timeout_ms=2000)
+    assert (info["title"], info["price"]) == ("Hydrated Product", "$12")
+    stages = info["readiness_stages"]
+    assert [s["stage"] for s in stages] == ["initial", "title_price", "confirmation"]
+    assert all(0 < s["budget_ms"] <= 2000 and s["elapsed_ms"] >= 0 for s in stages)
+    assert stages[-1]["budget_ms"] < stages[0]["budget_ms"]
+    assert product.page.evaluate("window.clicks") == 0
+
+
+@pytest.mark.parametrize("phase", ["pre_selection", "post_selection"])
+def test_custom_only_never_satisfies_normal_size_contract(product, phase):
+    product.page.evaluate('''() => {
+      m.value='Custom Size'; m.checked=true; atc.disabled=false;
+    }''')
+    with pytest.raises(PurchaseAreaReadinessError, match="failing_conditions=[^ ]*size"):
+        product.wait_purchase_ready(timeout_ms=400, phase=phase,
+                                    expected_color="Blue", expected_size="Custom Size")
+    assert product.page.evaluate("window.clicks") == 0
+
+
+def test_readonly_allows_checked_state_to_recover_before_shared_deadline(product):
+    guard = ReadonlyMutationGuard()
+    guard.attach(product.page.context)
+    select = product.select_size
+    def reset_then_recover():
+        size = select()
+        product.page.evaluate('''() => {m.checked=false; atc.disabled=true;
+          setTimeout(()=>{m.checked=true; atc.disabled=false;},250);}''')
+        return size
+    product.select_size = reset_then_recover
+    runner = object.__new__(WebsiteSmokeReadonlyV1Runner)
+    assert runner._select_legal_variant(product, "VARIANT_SELECTION_FAILURE") == ("Blue", "M")
+    assert product.get_selected_size() == "M"
+    assert guard.violations() == []
+    assert product.page.evaluate("window.clicks") == 0
+
+
+def test_current_dom_size_model_switch_is_observed_during_post_selection(product):
+    models = product.site_config["pages"]["product"]["size_resolver"]["models"]
+    models.append({**models[0], "id": "REPLACEMENT_MODEL", "group_selector": "#sizes2"})
+    color, size = choose(product)
+    timeline = []
+    def observe(snapshot):
+        timeline.append(snapshot)
+        if len(timeline) == 1:
+            product.page.evaluate('''() => {
+              const group=sizes.cloneNode(true); group.id='sizes2';
+              sizes.replaceWith(group);
+            }''')
+    product.wait_purchase_ready(timeout_ms=2000, phase="post_selection",
+                                expected_color=color, expected_size=size, diagnostics_hook=observe)
+    assert timeline[0]["size_model"] == models[0]["id"]
+    assert timeline[-1]["size_model"] == "REPLACEMENT_MODEL"
+    assert timeline[-1]["selected_size"] == "M"
+    assert product.page.evaluate("window.clicks") == 0

@@ -848,7 +848,19 @@ class SizeOptionResolver:
         )
         raise RuntimeError(self._selection_failure_message(diagnostics))
 
-    def selected_value(self) -> Optional[str]:
+    def selected_value(self, *, deadline: Optional[float] = None) -> Optional[str]:
+        if deadline is not None:
+            group = self.detect(deadline=deadline)
+            if group is None:
+                return None
+            radios = group.locator.locator(group.option_selector)
+            for index in range(radios.count()):
+                if self._deadline_exhausted(deadline):
+                    break
+                radio = radios.nth(index)
+                if radio.is_checked(timeout=self._probe_timeout_ms(deadline)):
+                    return str(radio.get_attribute("value", timeout=self._probe_timeout_ms(deadline)) or "").strip() or None
+            return None
         for option in self.options():
             if option.selected:
                 return option.value

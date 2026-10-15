@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import json
+from contextlib import contextmanager
 from typing import Callable, Optional
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -97,9 +98,9 @@ class ProductPage(BasePage):
         button.click()
 
     @staticmethod
-    def _radio_value(radio) -> str:
+    def _radio_value(radio, timeout_ms=None) -> str:
         """读取 radio 的选项值：优先 value 属性，空时回退关联 label / 父容器文本。"""
-        v = radio.get_attribute("value")
+        v = radio.get_attribute("value", timeout=timeout_ms)
         if v and v.strip():
             return v.strip()
         return (
@@ -109,7 +110,7 @@ class ProductPage(BasePage):
                     if (label && label.textContent) return label.textContent.trim();
                     const p = el.parentElement;
                     return p ? p.textContent.trim() : '';
-                }"""
+                }""", timeout=timeout_ms
             )
             or ""
         ).strip()
@@ -607,7 +608,7 @@ class ProductPage(BasePage):
             ("purchase_area", bool(snapshot["purchase_area_attached"])),
             ("title", bool(snapshot["title_visible"])),
             ("color", snapshot["color_count"] > 0),
-            ("size", snapshot["size_count"] > 0 and (phase != "pre_selection" or (
+            ("size", snapshot["size_count"] > 0 and (phase == "legacy" or (
                 snapshot["size_group_detected"] and snapshot["normal_size_available"] > 0))),
             ("atc_visible", bool(snapshot["atc_visible"])),
             ("atc_enabled", phase == "pre_selection" or bool(snapshot["atc_enabled"])),
@@ -649,6 +650,8 @@ class ProductPage(BasePage):
             "normal_size_available": int(snapshot["normal_size_available"]),
             "candidate_group_count": int(snapshot.get("candidate_group_count", 0)),
             "selected_size": snapshot["selected_size"],
+            "selected_color": snapshot.get("selected_color"),
+            "failing_conditions": list(snapshot.get("failing_conditions", [])),
             "size_model": snapshot.get("size_model") or "UNKNOWN",
             "readiness_phase": snapshot.get("readiness_phase", "legacy"),
             "slowest_component": max(snapshot.get("readiness_cost_ms") or {"NONE": 0},
@@ -737,6 +740,15 @@ class ProductPage(BasePage):
         last_poll_duration_ms = 0
         max_poll_duration_ms = 0
         history = []
+        first_failure = None
+
+        def record_result():
+            self.last_readiness_report = {
+                "stage": phase, "budget_ms": timeout_ms,
+                "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+                "poll_count": poll_count, "timeline": history,
+                "first_failure": first_failure,
+            }
         initial = self._empty_readiness_snapshot()
         final = initial
         had_deadline = hasattr(self, "_readiness_deadline")
@@ -751,19 +763,23 @@ class ProductPage(BasePage):
                 poll_started = time.monotonic()
                 snapshot = self._readiness_snapshot()
                 poll_count += 1
-                last_poll_duration_ms = int(
-                    max(0, (time.monotonic() - poll_started) * 1000)
-                )
-                max_poll_duration_ms = max(
-                    max_poll_duration_ms, last_poll_duration_ms
-                )
                 snapshot = dict(snapshot)
                 snapshot["readiness_phase"] = phase
                 if phase == "post_selection":
                     # Read actual checked state, not the resolver's early-exit
                     # availability sample (which may precede the selected radio).
-                    snapshot["selected_size"] = self._safe_state(self.get_selected_size, None)
-                    snapshot["selected_color"] = self._safe_state(self.get_selected_color, None)
+                    snapshot["selected_size"] = self._safe_state(
+                        lambda: self.get_selected_size(deadline=deadline), None)
+                    snapshot["selected_color"] = self._safe_state(
+                        lambda: self.get_selected_color(deadline=deadline), None)
+                failures = self._missing_readiness_conditions(snapshot, phase)
+                if phase == "post_selection":
+                    for key, expected in (("selected_color", expected_color), ("selected_size", expected_size)):
+                        if str(snapshot.get(key) or "").strip().casefold() != str(expected).strip().casefold():
+                            failures.append(key)
+                snapshot["failing_conditions"] = failures
+                last_poll_duration_ms = max(0, int((time.monotonic() - poll_started) * 1000))
+                max_poll_duration_ms = max(max_poll_duration_ms, last_poll_duration_ms)
                 snapshot.update(
                     {
                         "poll_count": poll_count,
@@ -778,6 +794,8 @@ class ProductPage(BasePage):
                 if poll_count == 1:
                     initial = snapshot
                 final = snapshot
+                if failures and first_failure is None:
+                    first_failure = {"elapsed_ms": snapshot["elapsed_ms"], "conditions": failures}
                 self._emit_readiness_diagnostic(snapshot, started, history.append)
                 if len(history) > 12:
                     del history[1]
@@ -787,18 +805,15 @@ class ProductPage(BasePage):
                 # even if its final DOM read happens to look ready.
                 if time.monotonic() >= deadline:
                     break
-                ready = not self._missing_readiness_conditions(snapshot, phase)
-                if phase == "post_selection":
-                    ready = ready and all(
-                        str(snapshot.get(key) or "").strip().casefold() == str(value).strip().casefold()
-                        for key, value in (("selected_color", expected_color), ("selected_size", expected_size))
-                    )
+                ready = not failures
                 if ready:
                     if phase != "post_selection":
+                        record_result()
                         return snapshot["color_count"], snapshot["size_count"], True
                     if stable_since is None:
                         stable_since = time.monotonic()
                     if time.monotonic() - stable_since >= 0.2:
+                        record_result()
                         return snapshot["color_count"], snapshot["size_count"], True
                     # Sample the actual checked/enabled conditions throughout
                     # the stability window; this is not a blind readiness delay.
@@ -837,6 +852,7 @@ class ProductPage(BasePage):
                     failing_conditions.append(key)
             if not failing_conditions:
                 failing_conditions.append("variant_stability")
+        record_result()
         raise PurchaseAreaReadinessError(
             f"phase={phase} "
             "purchase_area_attached="
@@ -872,8 +888,89 @@ class ProductPage(BasePage):
             f"deadline_ms={timeout_ms} "
             f"last_poll_duration_ms={last_poll_duration_ms} "
             f"max_poll_duration_ms={max_poll_duration_ms} "
+            f"first_failing_conditions={','.join(first_failure['conditions']) if first_failure else 'NONE'} "
+            f"first_failure_ms={first_failure['elapsed_ms'] if first_failure else 'NONE'} "
             f"readiness_timeline={json.dumps(history, separators=(',', ':'))}"
         )
+
+    def validate_purchase_area(self, timeout_ms: int = 15_000, *, phase="pre_selection") -> dict:
+        """Validate live purchase semantics and text under one shared deadline.
+
+        Callers own actions and error categories. This method owns all waiting,
+        including empty text during hydration and re-resolving a replaced form.
+        Counts are availability lower bounds, not full option inventories.
+        """
+        if phase not in {"legacy", "pre_selection"}:
+            raise ValueError("Purchase-area validation requires legacy or pre_selection")
+        timeout_ms = max(0, int(timeout_ms))
+        started = time.monotonic()
+        deadline = started + timeout_ms / 1000
+        stages = []
+        stage = "initial"
+
+        def remaining_ms():
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                raise PurchaseAreaReadinessError("failing_conditions=validation_deadline")
+            return remaining
+
+        @contextmanager
+        def timed_stage(name):
+            nonlocal stage
+            stage = name
+            stage_started = time.monotonic()
+            entry = {"stage": name, "budget_ms": max(0, int((deadline - stage_started) * 1000))}
+            stages.append(entry)
+            try:
+                yield
+            finally:
+                entry["elapsed_ms"] = max(0, int((time.monotonic() - stage_started) * 1000))
+
+        def read_text():
+            # Fresh locators and a bounded probe for each read; zero must never
+            # reach Playwright, where it means an unlimited timeout.
+            title = self.title().inner_text(timeout=min(READINESS_SNAPSHOT_PROBE_TIMEOUT_MS, remaining_ms())).strip()
+            price = self.price().inner_text(timeout=min(READINESS_SNAPSHOT_PROBE_TIMEOUT_MS, remaining_ms())).strip()
+            remaining_ms()
+            return title, price
+
+        try:
+            with timed_stage("initial"):
+                self.wait_purchase_ready(timeout_ms=remaining_ms(), phase=phase)
+            # A theme can replace its purchase form while title/price hydrate.
+            # Confirm availability again, then read text from that current DOM.
+            while True:
+                with timed_stage("title_price"):
+                    while True:
+                        try:
+                            title, price = read_text()
+                            if title and price:
+                                break
+                        except PlaywrightTimeoutError:
+                            pass
+                        time.sleep(min(0.05, remaining_ms() / 1000))
+                with timed_stage("confirmation"):
+                    snapshot = {}
+                    colors, sizes, _available = self.wait_purchase_ready(
+                        timeout_ms=remaining_ms(), phase=phase, diagnostics_hook=snapshot.update)
+                    remaining_ms()
+                    try:
+                        title, price = read_text()
+                    except PlaywrightTimeoutError:
+                        title = price = ""
+                if title and price:
+                    break
+                # Retry within the original budget, retaining bounded stages.
+                if len(stages) > 11:
+                    del stages[1:3]
+        except (PurchaseAreaReadinessError, PlaywrightTimeoutError) as exc:
+            raise PurchaseAreaReadinessError(
+                f"phase={phase} validation_stage={stage} validation_timeout_ms={timeout_ms} "
+                f"validation_elapsed_ms={int((time.monotonic() - started) * 1000)} "
+                f"readiness_stages={json.dumps(stages, separators=(',', ':'))} {exc}"
+            ) from exc
+        return {"title": title, "price": price, "colors": colors, "sizes": sizes,
+                "atc_enabled": snapshot["atc_enabled"], "readiness_stages": stages}
 
     def _find_option(self, options, value: str, missing_msg: str):
         """按值查找可用选项，找不到抛出明确异常。"""
@@ -938,17 +1035,20 @@ class ProductPage(BasePage):
             value = self.first_available_size()
         return self._size_resolver().select(value)
 
-    def get_selected_color(self) -> Optional[str]:
+    def get_selected_color(self, *, deadline: Optional[float] = None) -> Optional[str]:
         """返回当前选中的颜色值（基于 radio.checked 真实表单状态）。"""
         for i in range(self.color_options().count()):
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
             radio = self.color_options().nth(i)
-            if radio.is_checked():
-                return self._radio_value(radio)
+            timeout = None if deadline is None else max(1, min(250, int((deadline - time.monotonic()) * 1000)))
+            if radio.is_checked(timeout=timeout):
+                return self._radio_value(radio, timeout_ms=timeout) or None
         return None
 
-    def get_selected_size(self) -> Optional[str]:
+    def get_selected_size(self, *, deadline: Optional[float] = None) -> Optional[str]:
         """返回当前选中的尺码值（基于 radio.checked 真实表单状态）。"""
         try:
-            return self._size_resolver().selected_value()
+            return self._size_resolver().selected_value(deadline=deadline)
         except SizeGroupNotFoundError:
             return None
