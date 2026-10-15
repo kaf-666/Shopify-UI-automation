@@ -9,8 +9,6 @@ Direct / Search / Browse 各自从自己的入口开始，只读取页面能力�
 
 from __future__ import annotations
 
-import json
-import os
 import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
@@ -333,129 +331,30 @@ class WebsiteSmokeReadonlyV1Runner:
                 pass
         self._extra_pages = []
 
-    @staticmethod
-    def _same_value(left: Optional[str], right: Optional[str]) -> bool:
-        return bool(left and right and left.strip().casefold() == right.strip().casefold())
-
-    @staticmethod
-    def _variant_diagnostics_enabled() -> bool:
-        return os.environ.get("VARIANT_DIAGNOSTIC", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
-    @staticmethod
-    def _readiness_timeline_detail(timeline: List[dict]) -> str:
-        first_failure = next(
-            (
-                (snapshot["elapsed_ms"], ProductPage._missing_readiness_conditions(snapshot))
-                for snapshot in timeline
-                if ProductPage._missing_readiness_conditions(snapshot)
-            ),
-            None,
-        )
-        first_failure_ms = first_failure[0] if first_failure else "NONE"
-        first_conditions = ",".join(first_failure[1]) if first_failure else "NONE"
-        compact_timeline = json.dumps(timeline, ensure_ascii=True, separators=(",", ":"))
-        return (
-            f"first_failing_conditions={first_conditions} "
-            f"first_failure_ms={first_failure_ms} "
-            f"readiness_timeline={compact_timeline}"
-        )
-
     def _wait_purchase_ready(
-        self,
-        prod: ProductPage,
-        phase: str,
-        expected_color=None,
-        expected_size=None,
+        self, prod: ProductPage, phase: str, expected_color=None, expected_size=None,
     ) -> tuple[int, int, bool]:
-        timeline: List[dict] = []
-        try:
-            return prod.wait_purchase_ready(
-                diagnostics_hook=timeline.append, phase=phase,
-                expected_color=expected_color, expected_size=expected_size,
-            )
-        except PurchaseAreaReadinessError as exc:
-            detail = f"phase={phase} {exc}"
-            if timeline:
-                detail = f"{detail} {self._readiness_timeline_detail(timeline)}"
-            raise PurchaseAreaReadinessError(detail) from exc
+        return prod.wait_purchase_ready(
+            phase=phase, expected_color=expected_color, expected_size=expected_size)
 
     def _purchase_area_ready(self, prod: ProductPage, category: str) -> tuple[str, str, int, int]:
-        """等待并验证 PDP 标题、价格、购买区、选项和 ATC 状态。"""
         try:
-            title = prod.get_title().strip()
-            price = prod.get_price().strip()
-        except Exception as exc:
-            raise FlowError(
-                category,
-                f"phase=pre_selection title/price unreadable: {type(exc).__name__}",
-            ) from exc
-        if not title or not price:
-            raise FlowError(
-                category,
-                f"phase=pre_selection title={bool(title)} price={bool(price)}",
-            )
-        try:
-            color_count, size_count, atc_available = self._wait_purchase_ready(
-                prod, "pre_selection"
-            )
+            info = prod.validate_purchase_area()
         except PurchaseAreaReadinessError as exc:
             raise FlowError(category, str(exc)) from exc
-        if color_count <= 0 or size_count <= 0 or not atc_available:
-            raise FlowError(
-                category,
-                f"phase=pre_selection color_options={color_count} "
-                f"size_options={size_count} atc={atc_available}",
-            )
-        return title, price, color_count, size_count
+        return info["title"], info["price"], info["colors"], info["sizes"]
 
     def _select_legal_variant(self, prod: ProductPage, category: str) -> tuple[str, str]:
-        """选择合法 Color / Size，并在选择后重新确认 ATC 可用。"""
+        """Select through UI, then allow the shared checked-state wait to settle."""
         try:
-            color = prod.select_color()
-            size = prod.select_size()
-            selected_color = prod.get_selected_color()
-            selected_size = prod.get_selected_size()
+            color, size = prod.select_color(), prod.select_size()
         except Exception as exc:
             raise FlowError(category, f"variant selection: {type(exc).__name__}: {exc}") from exc
-        if not self._same_value(color, selected_color) or not self._same_value(size, selected_size):
-            raise FlowError(
-                category,
-                f"selected color={selected_color!r} size={selected_size!r} "
-                f"expected color={color!r} size={size!r}",
-            )
         try:
-            _colors, _sizes, atc_available = self._wait_purchase_ready(
-                prod, "post_selection", color, size
-            )
+            self._wait_purchase_ready(prod, "post_selection", color, size)
         except PurchaseAreaReadinessError as exc:
             raise FlowError(category, str(exc)) from exc
-        if not atc_available:
-            raise FlowError(
-                category,
-                "phase=post_selection Add To Cart is not enabled after legal variant selection",
-            )
-        self._assert_atc_available(prod, category)
         return color, size
-
-    def _assert_atc_available(self, prod: ProductPage, category: str) -> None:
-        """只读取 ATC locator 状态，绝不触发按钮交互。"""
-        try:
-            button = prod.add_to_cart_button()
-            located = bool(button.count())
-            visible = bool(located and button.is_visible())
-            enabled = bool(visible and button.is_enabled())
-        except Exception as exc:
-            raise FlowError(category, f"ATC locator unreadable: {type(exc).__name__}") from exc
-        if not located or not visible or not enabled:
-            raise FlowError(
-                category,
-                f"atc_locator={located} atc_visible={visible} atc_enabled={enabled}",
-            )
 
     # ------------------------------------------------------------ Journey Direct
     def _c_direct01(self) -> str:
@@ -684,14 +583,12 @@ class WebsiteSmokeReadonlyV1Runner:
         _title, _price, colors, sizes = self._purchase_area_ready(
             prod, "ATC_NOT_AVAILABLE"
         )
-        selected_color = prod.get_selected_color()
-        selected_size = prod.get_selected_size()
-        if not selected_color or not selected_size:
-            raise FlowError(
-                "ATC_NOT_AVAILABLE",
-                f"legal variant not selected: color={selected_color!r} size={selected_size!r}",
-            )
-        self._assert_atc_available(prod, "ATC_NOT_AVAILABLE")
+        variant = self.state["browse_variant"]
+        selected_color, selected_size = variant["color"], variant["size"]
+        try:
+            self._wait_purchase_ready(prod, "post_selection", selected_color, selected_size)
+        except PurchaseAreaReadinessError as exc:
+            raise FlowError("ATC_NOT_AVAILABLE", str(exc)) from exc
         return (
             f"color={selected_color} size={selected_size} color_options={colors} "
             f"size_options={sizes} purchase_area_ready=True atc_locator=True "

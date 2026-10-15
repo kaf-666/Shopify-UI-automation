@@ -99,11 +99,8 @@ class _FakeProduct:
         self.button = _FakeButton()
         self.readiness_calls = 0
 
-    def get_title(self) -> str:
-        return "Example Dress"
-
-    def get_price(self) -> str:
-        return "$99"
+    def validate_purchase_area(self):
+        return {"title": "Example Dress", "price": "$99", "colors": 2, "sizes": 3}
 
     def wait_purchase_ready(self, *, phase="legacy", diagnostics_hook=None, expected_color=None, expected_size=None):
         self.readiness_calls += 1
@@ -123,6 +120,7 @@ def test_pdp02_only_reads_atc_state_without_clicking() -> None:
     runner = _runner()
     product = _FakeProduct()
     runner.state["browse_prod"] = product
+    runner.state["browse_variant"] = {"color": "Black", "size": "M"}
 
     detail = runner._c_pdp02()
 

@@ -574,19 +574,13 @@ class WebsiteSmokeV1Runner:
                 ) from exc
             raise FlowError("DIRECT_PDP_LANDING_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         self.state["direct_path"] = urlparse(self.page.url).path
-        title = prod.get_title()
-        try:
-            price = prod.get_price()
-        except Exception:
-            price = ""
-        if not title or not price:
-            raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", f"title={title[:40]!r} price={price!r}")
         try:
             purchase = self.flow.validate_purchase_area(phase="pre_selection")
         except FlowError as exc:
             raise FlowError("DIRECT_PDP_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
+        title, price = purchase["title"], purchase["price"]
         color_count, size_count = purchase["colors"], purchase["sizes"]
-        self.flow.capture_pdp_state()
+        self.flow.capture_pdp_state(title=title)
         self.state["direct_stored_title"] = self._stored_title(prod, title)
         return (
             f"entry_mode=DIRECT product_path={self.state['direct_path']} title={title[:40]!r} "
@@ -712,16 +706,11 @@ class WebsiteSmokeV1Runner:
         """Search Product Purchase：搜索结果商品完整进入购买链，随后 UI 移除。"""
         prod = self.state["search_prod"]
         try:
-            color_count, size_count, atc_available = prod.wait_purchase_ready(phase="pre_selection")
-        except PurchaseAreaReadinessError as exc:
+            purchase = self.flow.validate_purchase_area(phase="pre_selection")
+        except FlowError as exc:
             raise FlowError("SEARCH_PURCHASE_AREA_NOT_AVAILABLE", str(exc)) from exc
-        if color_count == 0 or size_count == 0 or not atc_available:
-            raise FlowError(
-                "SEARCH_PURCHASE_AREA_NOT_AVAILABLE",
-                f"color_options={color_count} size_options={size_count} atc={atc_available}",
-            )
         try:
-            self.flow.capture_pdp_state()
+            self.flow.capture_pdp_state(title=purchase["title"])
             color = self.flow.select_color()
             size = self.flow.select_size()
             self.flow.add_to_cart()
@@ -824,9 +813,9 @@ class WebsiteSmokeV1Runner:
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""
         prod = self.state["browse_prod"]
-        self.flow.validate_purchase_area(phase="pre_selection")
+        purchase = self.flow.validate_purchase_area(phase="pre_selection")
         try:
-            self.flow.capture_pdp_state()
+            self.flow.capture_pdp_state(title=purchase["title"])
             color = self.flow.select_color()
             size = self.flow.select_size()
             prod.wait_purchase_ready(phase="post_selection", expected_color=color, expected_size=size)

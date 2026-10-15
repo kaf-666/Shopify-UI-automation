@@ -1,5 +1,8 @@
 # Shopify UI Automation
 
+The [shared purchase-readiness contract](docs/purchase-readiness.md) defines
+Full/Readonly phases, the common deadline and bounded diagnostics.
+
 Standalone Shopify / DTC UI Automation Framework for Mondressy and Lavetir.
 The repository provides two independent production smoke contracts:
 

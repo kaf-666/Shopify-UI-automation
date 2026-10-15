@@ -76,20 +76,30 @@ def change_after_first_ready(monkeypatch, runner, *, recover):
     return calls
 
 
-@pytest.mark.parametrize("entry", ["direct", "browse"])
+@pytest.mark.parametrize("entry", ["direct", "browse", "search"])
 def test_full_case_recovers_after_first_ready(monkeypatch, runner, entry):
     calls = change_after_first_ready(monkeypatch, runner, recover=True)
     if entry == "direct":
         detail = runner._c_direct01()
         assert "pre_selection_ready=True" in detail
         assert runner.flow.state["prod"].add_to_cart_button().is_enabled() is False
-    else:
+    elif entry == "browse":
         product = ProductPage(runner.page, runner.site_config, "desktop")
         runner.state["browse_prod"] = product
         runner.flow.state["prod"] = product
         detail = runner._c_pdp01()
         assert "color=Blue size=M" in detail
         assert product.get_selected_size() == "M"
+    else:
+        product = ProductPage(runner.page, runner.site_config, "desktop")
+        runner.state["search_prod"] = product
+        runner.flow.state["prod"] = product
+        monkeypatch.setattr(runner.flow, "add_to_cart", lambda: product.wait_purchase_ready(
+            phase="post_selection", expected_color="Blue", expected_size="M"))
+        monkeypatch.setattr(runner.flow, "capture_cart_state", lambda: None)
+        monkeypatch.setattr(runner.flow, "remove_and_wait_empty", lambda: None)
+        monkeypatch.setattr(runner, "_cart_consistency", lambda *_args: "consistent=True")
+        assert "color=Blue size=M" in runner._c_search04()
     assert calls.count("pre_selection") >= 2
     assert runner.page.locator("#sizes").is_visible()
     assert runner.page.locator("#atc").is_visible()
@@ -113,7 +123,7 @@ def test_persistent_loss_after_first_ready_still_fails(monkeypatch, runner):
 
 def test_confirmation_does_not_receive_a_fresh_timeout(monkeypatch):
     clock = _Clock()
-    monkeypatch.setattr("flows.shopping_flow.time.monotonic", clock)
+    monkeypatch.setattr("pages.product_page.time.monotonic", clock)
     product = object.__new__(ProductPage)
     snapshots = 0
 
