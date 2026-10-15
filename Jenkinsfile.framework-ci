@@ -1,0 +1,77 @@
+/* Offline framework regression. No storefront credentials or smoke execution. */
+pipeline {
+    agent any
+    options {
+        skipDefaultCheckout(true)
+        disableConcurrentBuilds(abortPrevious: true)
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30', artifactNumToKeepStr: '20'))
+    }
+    stages {
+        stage('Checkout') {
+            steps {
+                deleteDir()
+                script {
+                    def revision = checkout scm
+                    env.GIT_COMMIT_SHA = revision.GIT_COMMIT
+                    env.FRAMEWORK_REPORT_DIR = "artifacts/framework-ci/build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
+                    env.FRAMEWORK_EXIT = 'UNKNOWN'
+                }
+            }
+        }
+        stage('Install Locked Test Environment') {
+            steps {
+                script {
+                    if (isUnix()) {
+                        sh 'python3 -m venv .venv-ci'
+                        sh '.venv-ci/bin/python -m pip install -r requirements-test.lock.txt'
+                        sh '.venv-ci/bin/python -m pip check'
+                        sh '.venv-ci/bin/python -m playwright install chromium webkit'
+                    } else {
+                        bat 'python -m venv .venv-ci'
+                        bat '.venv-ci\\Scripts\\python.exe -m pip install -r requirements-test.lock.txt'
+                        bat '.venv-ci\\Scripts\\python.exe -m pip check'
+                        bat '.venv-ci\\Scripts\\python.exe -m playwright install chromium webkit'
+                    }
+                }
+            }
+        }
+        stage('Offline Framework Regression') {
+            steps {
+                script {
+                    int result
+                    if (isUnix()) {
+                        result = sh(returnStatus: true, script: ".venv-ci/bin/python scripts/run_framework_ci.py --report-dir ${env.FRAMEWORK_REPORT_DIR}")
+                    } else {
+                        result = bat(returnStatus: true, script: ".venv-ci\\Scripts\\python.exe scripts\\run_framework_ci.py --report-dir ${env.FRAMEWORK_REPORT_DIR}")
+                    }
+                    env.FRAMEWORK_EXIT = "${result}"
+                    if (result != 0) {
+                        error('Offline framework checks failed; see scanned JUnit and logs')
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            script {
+                // Both PASS and ordinary test FAIL have scanned reports.
+                // Infrastructure/scan errors never publish partial raw output.
+                if (env.FRAMEWORK_EXIT in ['0', '1']) {
+                    try {
+                        junit testResults: "${env.FRAMEWORK_REPORT_DIR}/pytest.xml", allowEmptyResults: false, skipPublishingChecks: true
+                    } finally {
+                        archiveArtifacts artifacts: "${env.FRAMEWORK_REPORT_DIR}/**", allowEmptyArchive: false, fingerprint: false
+                    }
+                } else {
+                    currentBuild.result = 'FAILURE'
+                    def safePath = "framework-failure-${env.BUILD_NUMBER}.json"
+                    writeFile file: safePath, text: '{"status":"FAIL","classification":"FRAMEWORK_REPORT_UNAVAILABLE"}\n'
+                    archiveArtifacts artifacts: safePath, allowEmptyArchive: false, fingerprint: false
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,10 @@
+# Verified test environment. Keep runtime dependencies in their existing lock.
+-r requirements.lock.txt
+pytest==9.1.1
+iniconfig==2.3.0
+packaging==26.3
+pluggy==1.6.0
+Pygments==2.21.0
+colorama==0.4.6; sys_platform == "win32"
+exceptiongroup==1.3.1; python_version < "3.11"
+tomli==2.4.1; python_version < "3.11"

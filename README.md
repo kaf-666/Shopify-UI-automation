@@ -452,6 +452,43 @@ build and does not include these manual builds.
 
 ## Jenkins
 
+### Offline framework regression
+
+`Jenkinsfile.framework-ci` is independent of the six storefront smoke pipelines.
+It installs `requirements-test.lock.txt` (including the existing runtime lock),
+Chromium and WebKit, then runs static compilation, the entire pytest suite,
+Runtime Contract and stability validation. Test subprocesses receive only OS and
+browser runtime settings; Shopify credentials, proxy settings, user pytest
+options and third-party pytest plugin auto-loading are excluded. The tests use
+mocks, synthetic DOM and local HTTP servers, without running storefront smoke.
+
+The Jenkins multibranch job is **Framework - Offline Regression** under
+`Monitoring / Shopify / UI automation`. Its GitHub source discovers branches
+without open PRs and tests repository-origin PRs merged with their target branch.
+Each branch/PR cancels its previous unfinished build when a new one starts.
+Fork discovery is disabled. Checkout uses the existing GitHub SCM credential;
+no storefront signing credentials are bound to test execution.
+
+Reports are isolated in `artifacts/framework-ci/build-<number>-<start-time>/`.
+`pytest.xml` is published through Jenkins JUnit, alongside `summary.json` and
+sanitized logs for each check. A failing test keeps a failing build while still
+publishing scanned diagnostics. Missing/invalid JUnit cannot pass the build.
+Scan/infrastructure failures publish only a fixed safe error JSON. Dependency
+and browser installation require network access; the regression checks
+themselves are offline.
+
+Run the same checks locally after installing the locked dependencies and browsers:
+
+```powershell
+python -m pip install -r requirements-test.lock.txt
+python -m playwright install chromium webkit
+python scripts/run_framework_ci.py --report-dir artifacts/framework-ci/local-unique-id
+```
+
+Use a new report directory for each invocation. GitHub trigger/status and main
+branch protection details are recorded in `docs/framework-ci.md` after live
+integration validation.
+
 The repository currently has two Mondressy formal Jenkins Jobs and one fixed
 site Lavetir Readonly pilot Job. Lavetir Full is locally validated and its
 manual-only pipeline definition is prepared separately; no new cron is enabled
