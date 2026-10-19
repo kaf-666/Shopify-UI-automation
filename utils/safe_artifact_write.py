@@ -1,4 +1,4 @@
-"""Confined Full results/audit writes, with fixed public error messages.
+"""Confined run results, audit and summary writes with fixed public errors.
 
 Windows holds no-delete directory handles through atomic replacement. POSIX
 uses no-follow directory descriptors. The artifact workspace and its ancestors
@@ -49,6 +49,16 @@ def _windows_directory(path):
 
 
 def write_run_json(data, run_root, relative):
+    _write_run(data, run_root, relative)
+
+
+def write_run_text(text, run_root, relative):
+    if relative not in {"summary.html", "summary.css"} or not isinstance(text, str):
+        raise ResultWriteError("ARTIFACT_WRITE_REJECTED")
+    _write_run(text, run_root, relative, text_mode=True)
+
+
+def _write_run(data, run_root, relative, *, text_mode=False):
     """Reject linked roots/parents/targets; update ordinary files atomically."""
     try:
         rel = Path(relative)
@@ -57,7 +67,9 @@ def write_run_json(data, run_root, relative):
                 or win.drive or "\\" in relative or ".." in rel.parts
                 or relative not in {"results.json", "desktop/cart-cleanup.json",
                                     "mobile/cart-cleanup.json", "run_context.json",
-                                    "stability_record.json", "publication.json"}):
+                                    "stability_record.json", "publication.json", "summary.json",
+                                    "summary.html", "summary.css"}
+                or (relative in {"summary.html", "summary.css"}) != text_mode):
             raise ValueError
         root = Path(run_root).absolute()
         with ExitStack() as stack:
@@ -84,7 +96,10 @@ def write_run_json(data, run_root, relative):
                 stack.callback(remove_temporary)
                 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump(data, stream, ensure_ascii=False, indent=2)
+                    if text_mode:
+                        stream.write(data)
+                    else:
+                        json.dump(data, stream, ensure_ascii=False, indent=2)
                     stream.flush()
                     os.fsync(stream.fileno())
                 if os.path.lexists(target):
@@ -116,7 +131,10 @@ def write_run_json(data, run_root, relative):
                              | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
                 try:
                     with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        json.dump(data, stream, ensure_ascii=False, indent=2)
+                        if text_mode:
+                            stream.write(data)
+                        else:
+                            json.dump(data, stream, ensure_ascii=False, indent=2)
                         stream.flush()
                         os.fsync(stream.fileno())
                     os.replace(temporary_name, name, src_dir_fd=directory_fd,

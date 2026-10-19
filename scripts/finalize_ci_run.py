@@ -19,6 +19,7 @@ from scripts.validate_result_schema import validate_json
 from utils.run_context import (load_context, validate_context_results, confined_path,
                                ordinary_files, save_context, RunContextError)
 from utils.safe_artifact_write import write_run_json
+from utils.run_summary import write_summary
 from utils.stability import build_stability_record, write_history_record, HISTORY_FILENAME
 
 
@@ -67,6 +68,11 @@ def stage_publication(context, *, python_exit_code, jenkins_result, workspace=No
     staged_results = json.loads((snapshot_root / "results.json").read_text(encoding="utf-8"))
     if staged_results != result or not validate_json(snapshot_root, identity["suite"]):
         raise RunContextError("RUN_CHANGED_DURING_SNAPSHOT")
+
+    # Rebuild from the validated frozen result, never trust a copied/local summary.
+    write_summary(staged_results, snapshot_root, suite=identity["suite"], context=context,
+                  environ={**env, "CI_PYTHON_EXIT_CODE": python_exit_code,
+                           "CI_JENKINS_RESULT": jenkins_result})
 
     context.update(state="FINALIZED", python_exit_code=int(python_exit_code))
     save_context(context, workspace=workspace)

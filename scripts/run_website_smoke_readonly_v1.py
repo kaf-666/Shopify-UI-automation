@@ -50,6 +50,7 @@ from utils.result import (
 from utils.site_config_validator import WEBSITE_SMOKE_READONLY_V1, validate_site_config
 from utils.run_context import load_context, claim_context
 from utils.safe_artifact_write import write_run_json
+from utils.run_summary import write_summary
 from utils.suite_runner import guarded_main
 
 ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-readonly-v1"
@@ -163,6 +164,7 @@ def _write_run_result(
             write_run_json(result.to_dict(), artifact_dir, "results.json")
         else:
             write_results_json(result.to_dict(), artifact_dir / "results.json")
+        write_summary(result.to_dict(), artifact_dir, suite="website_smoke_readonly_v1")
         return True
     except ResultWriteError as exc:
         print(f"RESULT_WRITE_FAILURE: {sanitize_message(exc)}")

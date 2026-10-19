@@ -59,6 +59,8 @@ def test_entry_keeps_parameters_schedule_stage_names_and_operational_options(sit
     # Bootstrap failures must still archive only a constant current-build failure.
     assert 'artifacts/ci/${env.CI_RUN_ID}/publication-failure.json' in text
     assert "CURRENT_RESULTS_MISSING" in text
+    assert "writeFile file: 'summary.html'" in text
+    assert 'artifacts/ci/${env.CI_RUN_ID}/summary.html' in text
     assert "artifacts/**" not in text and "output/**" not in text
 
 
@@ -74,6 +76,8 @@ def test_adapter_preserves_smoke_failure_status_and_archive_before_acknowledgeme
     for code in ["CURRENT_RESULTS_MISSING", "CURRENT_SECRET_SCAN_NOT_PASSED", "CURRENT_SCHEMA_NOT_PASSED", "CURRENT_RUN_PUBLICATION_FAILED"]:
         assert code in ADAPTER
     assert "artifacts/**" not in ADAPTER and "output/**" not in ADAPTER
+    assert "writeFile file: 'summary.html', text: failureSummary(failureCode)" in ADAPTER
+    assert "Business result: NOT_AVAILABLE" in ADAPTER
 
 
 def test_adapter_keeps_both_platforms_and_does_not_interpolate_user_parameters_into_shell():

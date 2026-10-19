@@ -101,7 +101,11 @@ pipeline {
                     dir("artifacts/ci/${env.CI_RUN_ID}") {
                         writeFile file: 'publication-failure.json', text: '{"status":"FAIL","classification":"CURRENT_RESULTS_MISSING"}\n'
                     }
+                    dir("artifacts/ci/${env.CI_RUN_ID}") {
+                        writeFile file: 'summary.html', text: '<!doctype html><html lang="en"><meta charset="utf-8"><title>Current build bootstrap failure</title><h1>Infrastructure failure: CURRENT_RESULTS_MISSING</h1><p>Phase: checkout / helper load / initialization. Business result: NOT_AVAILABLE. Run identity and gates: NOT_VALIDATED. See the surrounding Jenkins build for commit, job and build identity. No current results, evidence or history acknowledgement are available; historical output is never substituted.</p></html>'
+                    }
                     archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publication-failure.json", allowEmptyArchive: false, fingerprint: false
+                    archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/summary.html", allowEmptyArchive: false, fingerprint: false
                 }
             }
         }
