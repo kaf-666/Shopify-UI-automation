@@ -1,18 +1,11 @@
-/*
- * Jenkins orchestration for the Lavetir Website Smoke Readonly V1 pilot.
- *
- * This pipeline is intentionally fixed to site=lavetir. The Python runner
- * owns read-only business logic, mutation blocking, results.json and evidence;
- * this pipeline prepares the agent, binds Lavetir credentials, runs the gates,
- * and archives artifacts. It supports manual activation and the q4h
- * scheduled Readonly pilot for the fixed Lavetir site.
+/* Fixed lavetir/website_smoke_readonly_v1 entry. Credentials and schedule remain job-specific.
+ * Shared protocol: scripts/run_smoke_ci.py; Jenkins adapter: ci/smoke_pipeline.groovy.
  */
+def smokeCi
 pipeline {
     agent any
 
-    triggers {
-        cron('H H/4 * * *')
-    }
+    triggers { cron('H H/4 * * *') }
 
     options {
         skipDefaultCheckout(true)
@@ -36,8 +29,8 @@ pipeline {
     }
 
     environment {
-        // These IDs are Jenkins credential IDs, never credential values.
-        // The credentials are Secret Text entries in the global store.
+        CI_SITE = 'lavetir'
+        CI_SUITE = 'website_smoke_readonly_v1'
         LAVETIR_US_SHOPIFY_SIGNATURE = credentials('LAVETIR_US_SHOPIFY_SIGNATURE')
         LAVETIR_US_SHOPIFY_SIGNATURE_INPUT = credentials('LAVETIR_US_SHOPIFY_SIGNATURE_INPUT')
         LAVETIR_US_SHOPIFY_SIGNATURE_AGENT = credentials('LAVETIR_US_SHOPIFY_SIGNATURE_AGENT')
@@ -48,290 +41,67 @@ pipeline {
             steps {
                 script {
                     env.CI_RUN_ID = "build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
-                    env.CI_CONTEXT_PATH = "artifacts/ci/${env.CI_RUN_ID}/run_context.json"
-                    env.CI_RESULT_PATH = "artifacts/website-smoke-readonly-v1/lavetir/${env.CI_RUN_ID}/results.json"
-                    env.CI_PYTHON_EXIT_CODE = 'UNKNOWN'
-                    env.CI_SECRET_GATE = 'NOT_RUN'
-                    env.CI_SCHEMA_GATE = 'NOT_RUN'
-
                     def scmVars = checkout scm
-                    def checkoutSha = "${scmVars?.GIT_COMMIT ?: ''}".trim()
-                    if (!checkoutSha) {
-                        if (isUnix()) {
-                            checkoutSha = sh(
-                                returnStdout: true,
-                                script: 'git rev-parse HEAD'
-                            ).trim()
-                        } else {
-                            checkoutSha = bat(
-                                returnStdout: true,
-                                script: '@git rev-parse HEAD'
-                            ).trim()
-                        }
-                    }
-                    if (!checkoutSha) {
-                        error('Unable to determine the checked-out workspace HEAD SHA')
-                    }
-                    env.GIT_COMMIT_SHA = checkoutSha
-                    echo "Checkout SHA: ${checkoutSha}"
+                    smokeCi = load 'ci/smoke_pipeline.groovy'
+                    smokeCi.checkoutIdentity(scmVars)
+                    smokeCi.initialize()
                 }
             }
         }
-
         stage('Environment') {
-            steps {
-                script {
-                    echo 'Site: lavetir'
-                    echo 'Signed Request: configured by Jenkins Credentials Binding (values redacted)'
-                    echo env.SHOPIFY_PROXY_SERVER?.trim() ?
-                        'Proxy: configured' :
-                        'Proxy: direct mode'
-                    if (isUnix()) {
-                        env.SYSTEM_PYTHON = sh(
-                            returnStdout: true,
-                            script: '''
-                                if command -v python3 >/dev/null 2>&1; then
-                                    command -v python3
-                                elif command -v python >/dev/null 2>&1; then
-                                    command -v python
-                                else
-                                    echo "No Python interpreter found on this Jenkins Agent" >&2
-                                    exit 127
-                                fi
-                            '''
-                        ).trim()
-                        env.PYTHON_BIN = '.venv/bin/python'
-                        sh "${env.SYSTEM_PYTHON} --version"
-                    } else {
-                        env.SYSTEM_PYTHON = 'python'
-                        env.PYTHON_BIN = '.venv\\Scripts\\python.exe'
-                        bat 'where python'
-                        bat 'python --version'
-                    }
-                }
-            }
+            steps { script { smokeCi.environmentSetup() } }
         }
-
         stage('Install Dependencies') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh "${env.SYSTEM_PYTHON} -m venv .venv"
-                        sh '.venv/bin/python -m pip install --no-input -r requirements.lock.txt'
-                    } else {
-                        bat 'python -m venv .venv'
-                        bat '.venv\\Scripts\\python.exe -m pip install --no-input -r requirements.lock.txt'
-                    }
-                }
-            }
+            steps { script { smokeCi.installDependencies() } }
         }
-
         stage('Prepare Run') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh ".venv/bin/python scripts/prepare_run_context.py --site lavetir --suite website_smoke_readonly_v1 --viewport ${params.SMOKE_VIEWPORT}"
-                    } else {
-                        bat ".venv\\Scripts\\python.exe scripts\\prepare_run_context.py --site lavetir --suite website_smoke_readonly_v1 --viewport ${params.SMOKE_VIEWPORT}"
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('prepare') } }
         }
-
         stage('Install Playwright Browsers') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '.venv/bin/python -m playwright install chromium webkit'
-                    } else {
-                        bat '.venv\\Scripts\\python.exe -m playwright install chromium webkit'
-                    }
-                }
-            }
+            steps { script { smokeCi.installBrowsers() } }
         }
-
         stage('Static Validation') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '.venv/bin/python -m compileall .'
-                        sh '.venv/bin/python scripts/validate_site_config.py --site lavetir --suite website_smoke_readonly_v1'
-                    } else {
-                        bat '.venv\\Scripts\\python.exe -m compileall .'
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_site_config.py --site lavetir --suite website_smoke_readonly_v1'
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('static') } }
         }
-
         stage('Runtime Contract') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '.venv/bin/python scripts/validate_runtime_contract.py'
-                    } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_runtime_contract.py'
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('runtime') } }
         }
-
         stage('Site Access') {
-            steps {
-                script {
-                    if (isUnix()) {
-                        sh '.venv/bin/python scripts/validate_site_access.py --site lavetir --viewport both'
-                    } else {
-                        bat '.venv\\Scripts\\python.exe scripts\\validate_site_access.py --site lavetir --viewport both'
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('access') } }
         }
-
         stage('Variant Stability Diagnostic') {
-            when {
-                expression { params.VARIANT_DIAGNOSTIC == true }
-            }
+            when { expression { params.VARIANT_DIAGNOSTIC == true } }
             steps {
                 script {
-                    // Diagnostic evidence is independent of the formal smoke
-                    // result and must not prevent the formal mobile run.
                     catchError(buildResult: 'UNSTABLE', stageResult: 'UNSTABLE') {
-                        if (isUnix()) {
-                            sh '.venv/bin/python scripts/diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
-                        } else {
-                            bat '.venv\\Scripts\\python.exe scripts\\diagnose_variant_stability.py --site lavetir --viewport mobile --entry search --query dress --observe-ms 5000'
-                        }
+                        smokeCi.runStep('variant-diagnostic')
                     }
                 }
             }
         }
-
         stage('Website Smoke Readonly V1') {
-            steps {
-                script {
-                    // Preserve failure status while allowing later gates and
-                    // post(always) artifact archiving to run.
-                    catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                        int readonlyExitCode
-                        if (isUnix()) {
-                            readonlyExitCode = sh(
-                                returnStatus: true,
-                                script: ".venv/bin/python scripts/run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --run-id ${env.CI_RUN_ID} --run-context ${env.CI_CONTEXT_PATH}"
-                            )
-                        } else {
-                            readonlyExitCode = bat(
-                                returnStatus: true,
-                                script: ".venv\\Scripts\\python.exe scripts\\run_website_smoke_readonly_v1.py --site lavetir --viewport ${params.SMOKE_VIEWPORT} --run-id ${env.CI_RUN_ID} --run-context ${env.CI_CONTEXT_PATH}"
-                            )
-                        }
-                        env.READONLY_PYTHON_EXIT_CODE = "${readonlyExitCode}"
-                        env.CI_PYTHON_EXIT_CODE = "${readonlyExitCode}"
-                        if (readonlyExitCode != 0) {
-                            error("Website Smoke Readonly V1 exited with code ${readonlyExitCode}")
-                        }
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('smoke') } }
         }
-
         stage('Secret Leakage Check') {
-            steps {
-                script {
-                    int gateExitCode
-                    if (isUnix()) {
-                        gateExitCode = sh(
-                            returnStatus: true,
-                            script: ".venv/bin/python scripts/validate_ci_safe_outputs.py --run-context ${env.CI_CONTEXT_PATH}"
-                        )
-                    } else {
-                        gateExitCode = bat(
-                            returnStatus: true,
-                            script: ".venv\\Scripts\\python.exe scripts\\validate_ci_safe_outputs.py --run-context ${env.CI_CONTEXT_PATH}"
-                        )
-                    }
-                    env.CI_SECRET_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
-                    if (gateExitCode != 0) {
-                        error("Secret Leakage Check exited with code ${gateExitCode}")
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('secret') } }
         }
-
         stage('Result Validation') {
-            steps {
-                script {
-                    int gateExitCode
-                    if (isUnix()) {
-                        gateExitCode = sh(
-                            returnStatus: true,
-                            script: ".venv/bin/python scripts/validate_result_schema.py --suite website_smoke_readonly_v1 --run-context ${env.CI_CONTEXT_PATH} --results ${env.CI_RESULT_PATH}"
-                        )
-                    } else {
-                        gateExitCode = bat(
-                            returnStatus: true,
-                            script: ".venv\\Scripts\\python.exe scripts\\validate_result_schema.py --suite website_smoke_readonly_v1 --run-context ${env.CI_CONTEXT_PATH} --results ${env.CI_RESULT_PATH}"
-                        )
-                    }
-                    env.CI_SCHEMA_GATE = gateExitCode == 0 ? 'PASS' : 'FAIL'
-                    if (gateExitCode != 0) {
-                        error("Result Validation exited with code ${gateExitCode}")
-                    }
-                }
-            }
+            steps { script { smokeCi.runStep('schema') } }
         }
     }
 
     post {
         always {
             script {
-                if (!env.CI_RUN_ID) {
-                    env.CI_RUN_ID = "build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
-                }
-                try {
-                    def causes = "${currentBuild.getBuildCauses()}"
-                    env.CI_TRIGGER = causes.contains('TimerTriggerCause') ? 'TIMER' :
-                        causes.contains('SCMTriggerCause') ? 'SCM' :
-                        causes.contains('UserIdCause') ? 'MANUAL' : 'OTHER'
-                } catch (ignored) {
-                    env.CI_TRIGGER = 'UNKNOWN'
-                }
-                try {
-                    def contextPath = env.CI_CONTEXT_PATH ?: "artifacts/ci/${env.CI_RUN_ID}/run_context.json"
-                    def exitCode = env.CI_PYTHON_EXIT_CODE ?: 'UNKNOWN'
-                    def buildResult = currentBuild.currentResult ?: 'FAILURE'
-                    int publishExit
-                    if (isUnix()) {
-                        publishExit = sh(returnStatus: true, script: ".venv/bin/python scripts/finalize_ci_run.py --run-context ${contextPath} --python-exit-code ${exitCode} --jenkins-result ${buildResult}")
-                    } else {
-                        publishExit = bat(returnStatus: true, script: ".venv\\Scripts\\python.exe scripts\\finalize_ci_run.py --run-context ${contextPath} --python-exit-code ${exitCode} --jenkins-result ${buildResult}")
-                    }
-                    if (publishExit != 0) {
-                        error('Current invocation failed validation or publication scan')
-                    }
-                    // The finalizer has frozen and scanned every candidate file.
-                    archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publish/**", allowEmptyArchive: false, fingerprint: false
-                    int acknowledgeExit
-                    if (isUnix()) {
-                        acknowledgeExit = sh(returnStatus: true, script: ".venv/bin/python scripts/finalize_ci_run.py --run-context ${contextPath} --acknowledge")
-                    } else {
-                        acknowledgeExit = bat(returnStatus: true, script: ".venv\\Scripts\\python.exe scripts\\finalize_ci_run.py --run-context ${contextPath} --acknowledge")
-                    }
-                    if (acknowledgeExit != 0) {
-                        error('Current invocation archive acknowledgement failed')
-                    }
-                } catch (ignored) {
+                if (smokeCi != null) { smokeCi.publish() }
+                else {
+                    // Checkout/load/credential failure: no dependency on Python.
                     currentBuild.result = 'FAILURE'
-                    // Available even when dependencies/site access failed. No raw output.
-                    def failureCode = !env.CI_RESULT_PATH || !fileExists(env.CI_RESULT_PATH) ?
-                        'CURRENT_RESULTS_MISSING' : env.CI_SECRET_GATE != 'PASS' ?
-                        'CURRENT_SECRET_SCAN_NOT_PASSED' : env.CI_SCHEMA_GATE != 'PASS' ?
-                        'CURRENT_SCHEMA_NOT_PASSED' : 'CURRENT_RUN_PUBLICATION_FAILED'
-                    def failurePath = "artifacts/ci/${env.CI_RUN_ID}/publication-failure.json"
+                    env.CI_RUN_ID = env.CI_RUN_ID ?: "build-${env.BUILD_NUMBER}-${currentBuild.startTimeInMillis}"
                     dir("artifacts/ci/${env.CI_RUN_ID}") {
-                        writeFile file: 'publication-failure.json', text: '{"status":"FAIL","classification":"' + failureCode + '"}\n'
+                        writeFile file: 'publication-failure.json', text: '{"status":"FAIL","classification":"CURRENT_RESULTS_MISSING"}\n'
                     }
-                    archiveArtifacts artifacts: failurePath, allowEmptyArchive: false, fingerprint: false
+                    archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publication-failure.json", allowEmptyArchive: false, fingerprint: false
                 }
             }
         }

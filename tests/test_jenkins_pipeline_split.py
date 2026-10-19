@@ -1,195 +1,99 @@
-"""Offline contract tests for the manual Full / Readonly Jenkins split."""
-
-from __future__ import annotations
-
+"""Fixed Jenkins entries and their shared adapter preserve production boundaries."""
+from pathlib import Path
 import re
 import subprocess
-from pathlib import Path
 
+import pytest
+from scripts.run_smoke_ci import Target
+from utils.site_config_validator import validate_site_config
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-ORIGINAL_PIPELINE = PROJECT_ROOT / "Jenkinsfile"
-FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full"
-READONLY_PIPELINE = PROJECT_ROOT / "Jenkinsfile.readonly"
-LAVETIR_FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full.lavetir"
-SHIREES_FULL_PIPELINE = PROJECT_ROOT / "Jenkinsfile.full.shirees"
-
-COMMON_STAGES = (
-    "Checkout",
-    "Environment",
-    "Install Dependencies",
-    "Install Playwright Browsers",
-    "Static Validation",
-    "Runtime Contract",
-    "Signed Request / Site Access",
-    "Secret Leakage Check",
-    "Result Validation",
-)
-CREDENTIAL_IDS = (
-    "MONDRESSY_US_SHOPIFY_SIGNATURE",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_INPUT",
-    "MONDRESSY_US_SHOPIFY_SIGNATURE_AGENT",
-)
+ADAPTER = (PROJECT_ROOT / "ci/smoke_pipeline.groovy").read_text(encoding="utf-8")
+ENTRIES = [(site, suite, f"Jenkinsfile.{mode}{suffix}")
+           for site, suffix in [("mondressy", ""), ("lavetir", ".lavetir"), ("shirees", ".shirees")]
+           for mode, suite in [("readonly", "website_smoke_readonly_v1"), ("full", "website_smoke_v1")]]
 
 
-def _text(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+def entry(path):
+    return (PROJECT_ROOT / path).read_text(encoding="utf-8")
 
 
-def assert_scoped_publication(content):
-    assert "archiveArtifacts artifacts: 'artifacts/**'" not in content
-    assert 'archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publish/**"' in content
-    assert "archiveArtifacts artifacts: failurePath" in content
-    assert "publication-failure.json" in content
-    assert "if (publishExit != 0)" in content
-    assert content.index("if (publishExit != 0)") < content.index("archiveArtifacts artifacts:")
-    assert content.index("archiveArtifacts artifacts:") < content.index("--acknowledge")
-    assert "scripts/prepare_run_context.py" in content
-    assert "--run-context ${env.CI_CONTEXT_PATH}" in content
-    assert "--results ${env.CI_RESULT_PATH}" in content
+def baseline(path):
+    return subprocess.check_output(["git", "show", f"39982f9:{path}"], cwd=PROJECT_ROOT).decode("utf-8")
 
 
-def test_split_pipeline_files_exist() -> None:
-    assert FULL_PIPELINE.exists()
-    assert READONLY_PIPELINE.exists()
-    assert LAVETIR_FULL_PIPELINE.exists()
-    assert SHIREES_FULL_PIPELINE.exists()
+@pytest.mark.parametrize("site,suite,path", ENTRIES)
+def test_fixed_entry_matches_profile_credentials_and_does_not_expose_site_parameter(site, suite, path):
+    text = entry(path)
+    bindings = dict(re.findall(r"(\w+) = credentials\('([^']+)'\)", text))
+    config = validate_site_config(site, suite=suite)
+    assert bindings == {name: name for name in config["access"]["env"].values()}
+    assert f"CI_SITE = '{site}'" in text
+    assert f"CI_SUITE = '{suite}'" in text
+    assert "params.SITE" not in text and "name: 'SITE'" not in text
+    assert "load 'ci/smoke_pipeline.groovy'" in text
+    assert "checkout scm" in text
+    assert "checkoutIdentity(scmVars)" in text
+    assert "git checkout" not in text
+    assert Target(site, suite, "both").credential_names == config["access"]["env"]
 
 
-def test_shirees_full_pipeline_is_manual_site_scoped_and_keeps_safety_gates() -> None:
-    content = _text(SHIREES_FULL_PIPELINE)
-    assert "agent any" in content
-    assert "name: 'SMOKE_VIEWPORT'" in content
-    assert "choices: ['both', 'desktop', 'mobile']" in content
-    assert "stage('Website Smoke V1')" in content
-    assert "scripts/run_website_smoke_v1.py --site shirees" in content
-    assert "scripts/run_website_smoke_readonly_v1.py" not in content
-    assert "scripts/validate_site_config.py --site shirees --suite website_smoke_v1" in content
-    assert "scripts/validate_site_access.py --site shirees --viewport both" in content
-    assert "scripts/validate_runtime_contract.py" in content
-    assert "scripts/validate_ci_safe_outputs.py" in content
-    assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
-    assert "scripts/finalize_ci_run.py" in content
-    assert "artifacts/website-smoke-v1/shirees" in content
-    assert "LAVETIR" not in content
-    assert "MONDRESSY" not in content
-    assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in content
-    assert "returnStatus: true" in content
-    assert_scoped_publication(content)
-
-    for credential_id in (
-        "SHIREES_US_SHOPIFY_SIGNATURE",
-        "SHIREES_US_SHOPIFY_SIGNATURE_INPUT",
-        "SHIREES_US_SHOPIFY_SIGNATURE_AGENT",
-    ):
-        assert f"credentials('{credential_id}')" in content
-
-    for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\("):
-        assert re.search(pattern, content, flags=re.IGNORECASE) is None
+@pytest.mark.parametrize("site,suite,path", ENTRIES)
+def test_entry_keeps_parameters_schedule_stage_names_and_operational_options(site, suite, path):
+    text, old = entry(path), baseline(path)
+    # Existing user/job controls are an interface, including Lavetir's optional diagnostic.
+    for source in [text, old]:
+        assert "choices: ['both', 'desktop', 'mobile']" in source
+        assert "Default target is both." in source
+    assert re.findall(r"name: '([^']+)'", text) == re.findall(r"name: '([^']+)'", old)
+    assert re.findall(r"cron\('([^']+)'\)", text) == re.findall(r"cron\('([^']+)'\)", old)
+    assert re.findall(r"stage\('([^']+)'\)", text) == re.findall(r"stage\('([^']+)'\)", old)
+    for option in ["agent any", "skipDefaultCheckout(true)", "disableConcurrentBuilds()",
+                   "timestamps()", "timeout(time: 60, unit: 'MINUTES')",
+                   "buildDiscarder(logRotator(numToKeepStr: '25', artifactNumToKeepStr: '25'))"]:
+        assert option in text
+    assert not re.search(r"pollSCM\s*\(|upstream\s*\(", text)
+    assert "smokeCi.runStep('smoke')" in text
+    assert text.index("runStep('smoke')") < text.index("runStep('secret')") < text.index("runStep('schema')")
+    assert "smokeCi.publish()" in text
+    # Bootstrap failures must still archive only a constant current-build failure.
+    assert 'artifacts/ci/${env.CI_RUN_ID}/publication-failure.json' in text
+    assert "CURRENT_RESULTS_MISSING" in text
+    assert "artifacts/**" not in text and "output/**" not in text
 
 
-def test_lavetir_full_pipeline_is_manual_only_and_fixed_to_site() -> None:
-    content = _text(LAVETIR_FULL_PIPELINE)
-    assert "agent any" in content
-    assert "name: 'SMOKE_VIEWPORT'" in content
-    assert "choices: ['both', 'desktop', 'mobile']" in content
-    assert "stage('Website Smoke V1')" in content
-    assert "scripts/run_website_smoke_v1.py --site lavetir" in content
-    assert "scripts/validate_site_config.py --site lavetir --suite website_smoke_v1" in content
-    assert "scripts/validate_result_schema.py --suite website_smoke_v1" in content
-    assert "scripts/finalize_ci_run.py" in content
-    assert "artifacts/website-smoke-v1/lavetir" in content
-    assert "MONDRESSY" not in content
-    for pattern in (r"triggers\s*\{", r"cron\s*\(", r"pollSCM\s*\("):
-        assert re.search(pattern, content, flags=re.IGNORECASE) is None
-    for credential_id in (
-        "LAVETIR_US_SHOPIFY_SIGNATURE",
-        "LAVETIR_US_SHOPIFY_SIGNATURE_INPUT",
-        "LAVETIR_US_SHOPIFY_SIGNATURE_AGENT",
-    ):
-        assert f"credentials('{credential_id}')" in content
+def test_adapter_preserves_smoke_failure_status_and_archive_before_acknowledgement():
+    assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in ADAPTER
+    assert 'env.CI_PYTHON_EXIT_CODE = "${code}"' in ADAPTER
+    assert "env.CI_SECRET_GATE = code == 0 ? 'PASS' : 'FAIL'" in ADAPTER
+    assert "env.CI_SCHEMA_GATE = code == 0 ? 'PASS' : 'FAIL'" in ADAPTER
+    assert ADAPTER.index("invoke('publish')") < ADAPTER.index('archiveArtifacts artifacts: "artifacts/ci/${env.CI_RUN_ID}/publish/**"') < ADAPTER.index("invoke('acknowledge')")
+    assert "if (publishExit != 0)" in ADAPTER
+    assert "if (acknowledgeExit != 0)" in ADAPTER
+    assert "fileExists(env.CI_RESULT_PATH)" in ADAPTER
+    for code in ["CURRENT_RESULTS_MISSING", "CURRENT_SECRET_SCAN_NOT_PASSED", "CURRENT_SCHEMA_NOT_PASSED", "CURRENT_RUN_PUBLICATION_FAILED"]:
+        assert code in ADAPTER
+    assert "artifacts/**" not in ADAPTER and "output/**" not in ADAPTER
 
 
-def test_new_pipelines_are_manual_only() -> None:
-    forbidden_trigger_patterns = (
-        r"triggers\s*\{",
-        r"cron\s*\(",
-        r"pollSCM\s*\(",
-    )
-    for path in (FULL_PIPELINE, READONLY_PIPELINE):
-        content = _text(path)
-        assert "parameters" in content
-        for pattern in forbidden_trigger_patterns:
-            assert re.search(pattern, content, flags=re.IGNORECASE) is None, (path, pattern)
+def test_adapter_keeps_both_platforms_and_does_not_interpolate_user_parameters_into_shell():
+    assert "isUnix()" in ADAPTER and "return sh(" in ADAPTER and "return bat(" in ADAPTER
+    assert ".venv/bin/python" in ADAPTER
+    assert r".venv\\Scripts\\python.exe" in ADAPTER
+    assert "returnStatus: status" in ADAPTER
+    assert 'env.CI_VIEWPORT = "${params.SMOKE_VIEWPORT}"' in ADAPTER
+    assert "${params." not in ADAPTER[ADAPTER.index("def pythonCommand"):]
+    assert "git rev-parse HEAD" in ADAPTER
+    assert "requirements.lock.txt" in ADAPTER and "playwright install chromium webkit" in ADAPTER
+    assert "pip install --upgrade" not in ADAPTER
 
 
-def test_full_runner_schema_and_stability_mapping() -> None:
-    content = _text(FULL_PIPELINE)
-    assert "stage('Website Smoke V1')" in content
-    assert "scripts/run_website_smoke_v1.py" in content
-    assert "scripts/run_website_smoke_readonly_v1.py" not in content
-    assert "--suite website_smoke_v1" in content
-    assert "--suite website_smoke_readonly_v1" not in content
-    assert "scripts/finalize_ci_run.py" in content
-    assert_scoped_publication(content)
-    assert "validate_ci_safe_outputs.py" in content
-
-
-def test_readonly_runner_schema_and_stability_boundary() -> None:
-    content = _text(READONLY_PIPELINE)
-    assert "stage('Website Smoke Readonly V1')" in content
-    assert "scripts/run_website_smoke_readonly_v1.py" in content
-    assert "scripts/run_website_smoke_v1.py" not in content
-    assert "--suite website_smoke_readonly_v1" in content
-    assert "--suite website_smoke_v1" not in content
-    assert "scripts/record_stability.py" not in content
-    assert "STABILITY_" not in content
-    assert_scoped_publication(content)
-    assert "validate_ci_safe_outputs.py" in content
-
-
-def test_both_pipelines_keep_common_infrastructure_and_parameters() -> None:
-    for path in (FULL_PIPELINE, READONLY_PIPELINE):
-        content = _text(path)
-        for stage in COMMON_STAGES:
-            assert f"stage('{stage}')" in content
-        assert "choices: ['both', 'desktop', 'mobile']" in content
-        assert "Default target is both." in content
-        assert "--viewport both" in content
-        assert "--viewport ${params.SMOKE_VIEWPORT}" in content
-        assert "skipDefaultCheckout(true)" in content
-        assert "disableConcurrentBuilds()" in content
-        assert "timestamps()" in content
-        assert "timeout(time: 60, unit: 'MINUTES')" in content
-        assert "buildDiscarder(" in content
-        for credential_id in CREDENTIAL_IDS:
-            assert f"credentials('{credential_id}')" in content
-        assert_scoped_publication(content)
-
-
-def test_smoke_failure_is_caught_before_later_gates() -> None:
-    for path, stage_name in (
-        (FULL_PIPELINE, "Website Smoke V1"),
-        (READONLY_PIPELINE, "Website Smoke Readonly V1"),
-    ):
-        content = _text(path)
-        smoke = content.index(f"stage('{stage_name}')")
-        secret = content.index("stage('Secret Leakage Check')")
-        result = content.index("stage('Result Validation')")
-        assert smoke < secret < result
-        assert "catchError(buildResult: 'FAILURE', stageResult: 'FAILURE')" in content
-        assert "returnStatus: true" in content
-
-
-def test_original_jenkinsfile_is_byte_for_byte_unchanged() -> None:
-    expected = subprocess.check_output(
-        ["git", "show", "HEAD:Jenkinsfile"],
-        cwd=PROJECT_ROOT,
-    )
-    assert ORIGINAL_PIPELINE.read_bytes() == expected
-
-
-def test_no_explicit_shared_workspace_configuration() -> None:
-    content = _text(ORIGINAL_PIPELINE)
-    assert "customWorkspace" not in content
-    assert re.search(r"(?<!\w)ws\s*\(", content) is None
+def test_original_jenkinsfile_and_manual_integration_are_unchanged():
+    for name in ["Jenkinsfile", "Jenkinsfile.smoke-integration-manual"]:
+        # Compare Git's canonical bytes, respecting checkout CRLF filters.
+        actual = subprocess.check_output(["git", "hash-object", "--path", name, name], cwd=PROJECT_ROOT)
+        expected = subprocess.check_output(["git", "rev-parse", f"HEAD:{name}"], cwd=PROJECT_ROOT)
+        assert actual == expected
+    text = entry("Jenkinsfile")
+    assert "customWorkspace" not in text
+    assert not re.search(r"(?<!\w)ws\s*\(", text)
