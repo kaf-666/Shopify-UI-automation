@@ -18,6 +18,21 @@ complete option inventories. Selection APIs still enumerate actual options.
 Locators and the size model are resolved from the current DOM on each sample;
 the readiness path does not cache element handles or models.
 
+Size readiness reads configured group attributes, accessible group names, form
+association, controls and all checked values in one read-only DOM task. It no
+longer chains per-attribute 50 ms protocol reads, whose timeouts could discard
+an otherwise usable group under mobile renderer load. Actual option selection
+still uses the existing resolver. Playwright's native disabled check remains
+authoritative (fieldset/ARIA/explicit roles), with at most 250 ms and only the
+remaining shared deadline; it does not grant another readiness budget. Polls
+that finish after the deadline cannot pass. Waiting for size availability no
+longer re-enters the serial metadata detector between samples.
+
+`size_probe_status` distinguishes a completed DOM observation (`OK`), a skipped
+probe, deadline exhaustion and DOM/native-probe errors. A probe error remains
+fail-closed and adds `size_probe_error` to failed gates; candidate counts from
+an unsuccessful read must not be interpreted as proof of an absent size group.
+
 `validate_purchase_area(timeout_ms=15000)` shares one deadline across `initial`,
 `title_price` and `confirmation`. Empty title/price text can hydrate within that
 budget. Confirmation re-resolves the form and reads current text again. The

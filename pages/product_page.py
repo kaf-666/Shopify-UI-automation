@@ -453,6 +453,7 @@ class ProductPage(BasePage):
             "color_ready": False,
             "size_count": 0,
             "size_model": None,
+            "size_probe_status": "NOT_PROBED",
             "size_group_detected": False,
             "size_option_total": 0,
             "normal_size_available": 0,
@@ -588,6 +589,7 @@ class ProductPage(BasePage):
             "color_ready": color_ready,
             "size_count": int(size.get("size_option_available", 0)),
             "size_model": size.get("size_model"),
+            "size_probe_status": size.get("size_probe_status", "NOT_RECORDED"),
             "size_group_detected": bool(size.get("size_group_detected", False)),
             "size_option_total": int(size.get("size_option_total", 0)),
             "normal_size_available": int(size.get("normal_size_available", 0)),
@@ -618,6 +620,8 @@ class ProductPage(BasePage):
             missing = [name for name in missing if name not in {"color", "atc_visible", "atc_enabled"}]
         if snapshot.get("probe_budget_exhausted"):
             missing.append("probe_budget_exhausted")
+        if snapshot.get("size_probe_status") in {"DOM_READ_ERROR", "NATIVE_PROBE_ERROR"}:
+            missing.append("size_probe_error")
         return missing
 
     @classmethod
@@ -653,6 +657,7 @@ class ProductPage(BasePage):
             "selected_color": snapshot.get("selected_color"),
             "failing_conditions": list(snapshot.get("failing_conditions", [])),
             "size_model": snapshot.get("size_model") or "UNKNOWN",
+            "size_probe_status": snapshot.get("size_probe_status", "NOT_RECORDED"),
             "readiness_phase": snapshot.get("readiness_phase", "legacy"),
             "slowest_component": max(snapshot.get("readiness_cost_ms") or {"NONE": 0},
                                      key=(snapshot.get("readiness_cost_ms") or {"NONE": 0}).get),
