@@ -14,6 +14,8 @@ from typing import Any, Callable, Optional
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
+from pages.size_readiness_probe import SIZE_READINESS_DOM
+
 
 SIZE_MODEL_01 = "SIZE_MODEL_01"
 SIZE_MODEL_02 = "SIZE_MODEL_02"
@@ -24,6 +26,7 @@ SIZE_SELECTION_POLL_INTERVAL_MS = 50
 SIZE_SELECTION_SETTLE_MS = 100
 SIZE_SELECTION_MAX_ATTEMPTS = 2
 SIZE_READINESS_PROBE_TIMEOUT_MS = 50
+SIZE_READINESS_NATIVE_TIMEOUT_MS = 250
 
 
 class SizeGroupNotFoundError(LookupError):
@@ -421,90 +424,71 @@ class SizeOptionResolver:
     def normal_available_options(self) -> list[SizeOption]:
         return [option for option in self.available_options() if not option.custom_size]
 
+    @staticmethod
+    def _empty_readiness(status):
+        return {"size_model": None, "size_group_detected": False,
+                "size_option_total": 0, "size_option_available": 0,
+                "normal_size_available": 0, "custom_size_present": False,
+                "custom_measurement_model": None, "selected_size": None,
+                "candidate_group_count": 0, "measurement_field_count": 0,
+                "size_probe_status": status}
+
+    def _readiness_models(self):
+        return [m for m in self._model_configs()
+                if m.get("id") and m.get("group_selector") and m.get("option_selector")]
+
+    def _readiness_dom(self):
+        browser = self.page.context.browser
+        return self.purchase_area_factory().evaluate_all(SIZE_READINESS_DOM, {
+            "models": self._readiness_models(),
+            "webkit": browser is not None and browser.browser_type.name == "webkit",
+            "custom_value": self._custom_measurement_config().get("trigger_value") or DEFAULT_FREE_SIZE_MARKER,
+            "custom_model": self._custom_measurement_config().get("id") or SIZE_MODEL_03})
+
     def readiness_snapshot(self, deadline: Optional[float] = None) -> dict:
-        """Return a bounded readiness view without full option enumeration.
+        """Read metadata in one DOM task, then verify native disabled semantics.
 
-        Readiness only needs to know whether one actionable option exists.  The
-        full ``options``/``available_options`` APIs remain unchanged for real
-        variant selection and diagnostics after the purchase area is ready.
-        ``form=`` association is still resolved by ``detect``; the group is
-        never narrowed to a purchase-form descendant.
+        No attributes/labels/forms are resolved through separate 50 ms RPCs.
+        Current locators are still used for Playwright's native disabled check
+        (including inherited ARIA and explicit roles). No node/model is cached.
+        Availability remains a lower bound; selected_size covers every radio.
         """
-        candidate_count = self.candidate_group_count(deadline=deadline)
-        group = self.detect(deadline=deadline)
-        if group is None:
-            return {
-                "size_model": None,
-                "size_group_detected": False,
-                "size_option_total": 0,
-                "size_option_available": 0,
-                "normal_size_available": 0,
-                "custom_size_present": False,
-                "custom_measurement_model": None,
-                "selected_size": None,
-                "candidate_group_count": candidate_count,
-                "measurement_field_count": 0,
-            }
-
-        radios = group.locator.locator(group.option_selector)
-        option_total = radios.count()
-        available_count = 0
-        normal_available = 0
-        custom_present = False
-        selected_size = None
-        custom_marker = self._normalized(group.custom_size_value)
-
-        for index in range(option_total):
+        if self._deadline_exhausted(deadline):
+            return self._empty_readiness("DEADLINE_EXHAUSTED")
+        try:
+            probe = self._readiness_dom()
+        except Exception:
+            return self._empty_readiness("DOM_READ_ERROR")
+        state = probe["state"]
+        errors = False
+        for candidate in probe["candidates"]:
             if self._deadline_exhausted(deadline):
+                state["size_probe_status"] = "DEADLINE_EXHAUSTED"
                 break
-            probe_timeout = self._probe_timeout_ms(deadline)
-            radio = radios.nth(index)
-            value = str(
-                radio.get_attribute("value", timeout=probe_timeout) or ""
-            ).strip()
-            if not value:
-                continue
-            is_custom = self._normalized(value) == custom_marker
-            custom_present = custom_present or is_custom
+            config = self._readiness_models()[probe["model_index"]]
+            radio = (self.page.locator(config["group_selector"]).nth(probe["group_index"])
+                     .locator(config["option_selector"]).nth(candidate["index"]))
+            # One bounded native check replaces the per-attribute timeout chain;
+            # it shares the existing global deadline, never receives a new one.
+            timeout = SIZE_READINESS_NATIVE_TIMEOUT_MS if deadline is None else max(
+                1, min(SIZE_READINESS_NATIVE_TIMEOUT_MS, int((deadline-time.monotonic())*1000)))
             try:
-                if radio.is_checked(timeout=probe_timeout):
-                    selected_size = value
+                disabled = radio.is_disabled(timeout=timeout)
             except Exception:
-                pass
-            control = self._option_control(
-                radio, group.config, timeout_ms=probe_timeout
-            )
-            if not self._is_available(
-                radio,
-                group,
-                value,
-                control=control,
-                timeout_ms=probe_timeout,
-            ):
+                errors = True
                 continue
-            available_count = 1
-            normal_available = 0 if is_custom else 1
-            if normal_available:
+            if self._deadline_exhausted(deadline):
+                state["size_probe_status"] = "DEADLINE_EXHAUSTED"
                 break
-            # A custom-measurement trigger is not a normal saleable size.
-            # Keep looking so a preceding custom trigger cannot hide the
-            # normal choices from the pre-selection readiness contract.
-
-        custom_model = str(
-            self._custom_measurement_config().get("id") or SIZE_MODEL_03
-        )
-        return {
-            "size_model": group.model,
-            "size_group_detected": True,
-            "size_option_total": option_total,
-            "size_option_available": available_count,
-            "normal_size_available": normal_available,
-            "custom_size_present": custom_present,
-            "custom_measurement_model": custom_model if custom_present else None,
-            "selected_size": selected_size,
-            "candidate_group_count": candidate_count,
-            "measurement_field_count": 0,
-        }
+            if disabled:
+                continue
+            state["size_option_available"] = 1
+            if not candidate["custom"]:
+                state["normal_size_available"] = 1
+                break
+        if errors and not state["normal_size_available"] and state["size_probe_status"] == "OK":
+            state["size_probe_status"] = "NATIVE_PROBE_ERROR"
+        return state
 
     def first_available_value(self) -> str:
         normal = self.normal_available_options()
@@ -850,17 +834,10 @@ class SizeOptionResolver:
 
     def selected_value(self, *, deadline: Optional[float] = None) -> Optional[str]:
         if deadline is not None:
-            group = self.detect(deadline=deadline)
-            if group is None:
+            if self._deadline_exhausted(deadline):
                 return None
-            radios = group.locator.locator(group.option_selector)
-            for index in range(radios.count()):
-                if self._deadline_exhausted(deadline):
-                    break
-                radio = radios.nth(index)
-                if radio.is_checked(timeout=self._probe_timeout_ms(deadline)):
-                    return str(radio.get_attribute("value", timeout=self._probe_timeout_ms(deadline)) or "").strip() or None
-            return None
+            probe = self._readiness_dom()
+            return None if self._deadline_exhausted(deadline) else probe["state"]["selected_size"]
         for option in self.options():
             if option.selected:
                 return option.value
@@ -932,39 +909,13 @@ class SizeOptionResolver:
 
     # --------------------------------------------------------------- 等待
     def wait_for_available(self, timeout_ms: int) -> None:
-        """Wait for an available option, including hidden-radio controls."""
-        deadline = time.monotonic() + timeout_ms / 1000
+        """Poll current semantic state without re-entering serial detection."""
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000
         while time.monotonic() < deadline:
-            # Reuse the bounded live readiness probe.  The old path called
-            # full ``available_options`` on every poll, which could repeat
-            # expensive semantic enumeration during a theme hydration gap.
             state = self.readiness_snapshot(deadline=deadline)
+            if time.monotonic() >= deadline:
+                break
             if state.get("size_option_available", 0) > 0:
                 return
-            remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
-            group = self.detect(deadline=deadline)
-            if group is not None:
-                wait_selector = str(
-                    group.config.get("wait_option_selector") or group.option_selector
-                )
-                try:
-                    group.locator.locator(wait_selector).first.wait_for(
-                        state="attached", timeout=min(remaining_ms, 250)
-                    )
-                except PlaywrightTimeoutError:
-                    pass
-            else:
-                selectors = [
-                    str(config.get("group_selector") or "")
-                    for config in self._model_configs()
-                    if config.get("group_selector")
-                ]
-                if not selectors:
-                    raise SizeGroupNotFoundError("No Size Group detectors configured")
-                try:
-                    self.page.locator(", ".join(selectors)).first.wait_for(
-                        state="attached", timeout=min(remaining_ms, 250)
-                    )
-                except PlaywrightTimeoutError:
-                    pass
-        raise PlaywrightTimeoutError("No actionable Size option became available")
+            time.sleep(min(0.05, max(0, deadline-time.monotonic())))
+        raise PlaywrightTimeoutError("No available Size option became ready")
