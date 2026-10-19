@@ -45,6 +45,7 @@ from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.safe_artifact_write import write_run_json
+from utils.run_summary import write_summary
 from utils.run_context import load_context, claim_context
 from utils.result import (
     ResultWriteError,
@@ -320,6 +321,7 @@ def _write_run_result(
     )
     try:
         write_run_json(result.to_dict(), artifact_dir, "results.json")
+        write_summary(result.to_dict(), artifact_dir, suite="website_smoke_v1")
         return True
     except ResultWriteError as exc:
         print(f"RESULT_WRITE_FAILURE: {sanitize_message(exc)}")

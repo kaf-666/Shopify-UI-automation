@@ -50,7 +50,11 @@ Only a validated, fully scanned current-run snapshot can be archived, followed
 by acknowledgement. Valid business FAIL results retain current evidence and
 eligible Full/both failure observations. Missing results, failed gates, failed
 scan or bootstrap/load errors publish only the constant current-build failure
-JSON; historical results and history are never substituted.
+JSON and safe HTML infrastructure summary; historical results and history are
+never substituted. The validated current-run summary and its stylesheet/model
+are generated inside the frozen snapshot before the final scan. See
+[summary fields and troubleshooting](run-summary.md) for pre-archive semantics,
+observed phases, relative evidence links and publication failure handling.
 
 `Jenkinsfile` and `Jenkinsfile.smoke-integration-manual` keep their prior
 implementations. Framework CI remains separate and does not bind storefront
@@ -65,4 +69,5 @@ identity/case count, CLI status, gate statuses, publication manifest and cleanup
 audit before merging. The formal job SCM script paths stay unchanged. A complete
 rollback reverts the phase's commit (entries and shared files together) to the
 previous main implementation, retaining job credentials/schedules and all
-build-specific archived evidence. Stage 5's new result presentation is separate.
+build-specific archived evidence. Current-run presentation reads no history and
+does not change the business, cleanup or stability contracts.

@@ -234,9 +234,14 @@ def test_real_cli_embeds_claimed_identity_and_rejects_duplicate_invocation(monke
     result_path = tmp_path / context["results_path"]
     before = result_path.read_bytes()
     assert json.loads(before)["execution_context"] == context["identity"]
+    local_summary = json.loads((result_path.parent / "summary.json").read_text(encoding="utf-8"))
+    assert local_summary["scope"] == "LOCAL"
+    assert (result_path.parent / "summary.html").is_file()
     assert cli.main(args) == 2
     assert result_path.read_bytes() == before
     assert publish(context) == 0
+    published_summary = tmp_path / context["publish_dir"] / context["identity"]["run_id"] / "summary.json"
+    assert json.loads(published_summary.read_text(encoding="utf-8"))["identity"] == context["identity"]
 
 
 def test_copy_failure_or_unreadable_publication_cannot_update_history(monkeypatch, tmp_path):
