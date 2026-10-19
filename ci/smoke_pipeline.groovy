@@ -74,11 +74,25 @@ def invoke(String action) {
     return pythonCommand("scripts/run_smoke_ci.py --step ${action}", true)
 }
 
+def recordStep(String action, String status) {
+    // Fixed env properties are supported by the existing Jenkins sandbox.
+    // Dynamic env[key] uses DefaultGroovyMethods.putAt and requires extra approval.
+    switch (action) {
+        case 'prepare': env.CI_STEP_PREPARE = status; break
+        case 'static': env.CI_STEP_STATIC = status; break
+        case 'runtime': env.CI_STEP_RUNTIME = status; break
+        case 'access': env.CI_STEP_ACCESS = status; break
+        case 'smoke': env.CI_STEP_SMOKE = status; break
+        case 'secret': env.CI_STEP_SECRET = status; break
+        case 'schema': env.CI_STEP_SCHEMA = status; break
+    }
+}
+
 def checkedStep(String action) {
     env.CI_LAST_STEP = action
-    env["CI_STEP_${action.toUpperCase().replace('-', '_')}"] = 'RUNNING'
+    recordStep(action, 'RUNNING')
     int code = invoke(action)
-    env["CI_STEP_${action.toUpperCase().replace('-', '_')}"] = code == 0 ? 'PASS' : 'FAIL'
+    recordStep(action, code == 0 ? 'PASS' : 'FAIL')
     if (action == 'smoke') {
         env.CI_PYTHON_EXIT_CODE = "${code}"
         if (env.CI_SUITE == 'website_smoke_readonly_v1') {

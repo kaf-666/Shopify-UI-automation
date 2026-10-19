@@ -78,6 +78,7 @@ def test_adapter_preserves_smoke_failure_status_and_archive_before_acknowledgeme
     assert "artifacts/**" not in ADAPTER and "output/**" not in ADAPTER
     assert "writeFile file: 'summary.html', text: failureSummary(failureCode)" in ADAPTER
     assert "Business result: NOT_AVAILABLE" in ADAPTER
+    assert 'env["CI_STEP_' not in ADAPTER
 
 
 def test_adapter_keeps_both_platforms_and_does_not_interpolate_user_parameters_into_shell():
