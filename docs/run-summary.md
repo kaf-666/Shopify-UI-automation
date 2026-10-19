@@ -4,7 +4,8 @@
 `summary.json` (version 1) and local `summary.css`. No scripts, external requests,
 history queries or latest-file discovery are used. Jenkins serves artifact HTML
 with restrictive CSP; the report is semantic HTML, with a same-directory stylesheet.
-Use the archived artifact **view** link if the default link downloads it.
+Open the normal **summary.html** artifact link to render it. Jenkins `view`
+(`/*view*/`) intentionally shows escaped source; do not use it for presentation.
 
 ## Paths and validity
 

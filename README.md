@@ -114,8 +114,9 @@ artifacts/ci/<run_id>/publish/
   publication.json                          # explicit file manifest
 ```
 
-Choose **the specific Jenkins build → archived artifacts → summary.html → view**.
-Default artifact links may download the HTML. The page uses no JavaScript,
+Choose **the specific Jenkins build → archived artifacts → summary.html**.
+The normal HTML artifact link renders the report; Jenkins `view` shows its source.
+The page uses no JavaScript,
 remote assets or external services; evidence links remain relative to this run.
 All candidate files, including the summary, JSONL/NDJSON and unknown suffixes,
 are scanned after final writes. Only a passing snapshot is archived, then
