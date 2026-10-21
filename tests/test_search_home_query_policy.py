@@ -117,11 +117,26 @@ def test_non_browser_normalized_unsafe_url_is_rejected(page, raw):
     assert not current._home_url_matches(raw, home.base_url(), home)
 
 
-def test_other_sites_keep_strict_matching(page):
-    current = search(page, "https://www.lavetir.com/?token=private-value")
+def test_profiles_without_policy_keep_strict_matching(page):
+    current = search(page, "https://mondressy.com/?token=private-value")
     current.site_config = BasePage.load_site_config(site_name="mondressy")
+    current.site_config["pages"]["search"].pop("home_query_policy", None)
     with pytest.raises(RuntimeError, match="^Search session can only be opened from Home$"):
         current.ensure_search_session_open()
+
+
+@pytest.mark.parametrize("viewport", ["desktop", "mobile"])
+def test_mondressy_root_query_opens_search_with_home_controls(page, viewport):
+    page.goto("https://mondressy.com/?opaque=private-value")
+    config = BasePage.load_site_config(site_name="mondressy")
+    current = SearchPage(page, config, viewport)
+    current.ensure_search_session_open()
+    assert current.is_open()
+    assert current.input().is_editable()
+    assert page.evaluate("window.clicks") == 1
+    home = HomePage(page, config, viewport)
+    assert not current._home_url_matches("https://mondressy.com/search?q=1", home.base_url(), home)
+    assert not current._home_url_matches("https://mondressy.com.attacker.test/?q=1", home.base_url(), home)
 
 
 def test_shirees_allows_only_observed_root_home_query_with_visible_mobile_controls(page):

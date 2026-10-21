@@ -65,6 +65,9 @@ pages:
 
   search:
     url: /search
+    # Mobile Home can acquire a query before Search. Keep origin, root route
+    # and visible Home controls strict, as for the other storefront profiles.
+    home_query_policy: configured_root_with_home_controls
     smoke_query: dress
     submit_strategy: enter
     entry_strategy: direct_trigger
