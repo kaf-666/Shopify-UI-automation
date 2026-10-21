@@ -247,6 +247,66 @@ class ProductPage(BasePage):
         config = self.page_config().get("color_option_control") or {}
         return config if isinstance(config, dict) else {}
 
+    def _variant_sync_snapshot(self, expected_color: str) -> dict:
+        """Check the theme's submitted variant, without modifying form state.
+
+        Opt-in profiles identify the main product's metadata and master select.
+        Read all of them in one browser task so recommendations and a theme
+        rerender cannot supply parts of a different product's variant.
+        """
+        config = (getattr(self, "site_config", {}).get("pages", {})
+                  .get(self.PAGE_NAME, {}).get("variant_sync"))
+        if not config:
+            return {}
+        try:
+            return self.purchase_area().evaluate(r"""(form, args) => {
+                const {config, expectedColor, colorSelector} = args;
+                const result = {variant_sync_status: 'INCOMPLETE',
+                    submitted_variant_id: null, expected_variant_id: null};
+                const root = form.closest(config.root_selector);
+                if (!root) return result;
+                const metadata = root.querySelectorAll(config.variants_selector);
+                const selects = form.querySelectorAll(config.select_selector);
+                const groups = root.querySelectorAll(colorSelector);
+                if (metadata.length !== 1 || selects.length !== 1 ||
+                    groups.length !== 1 || selects[0].disabled) return result;
+                let variants;
+                try { variants = JSON.parse(metadata[0].value || metadata[0].textContent); }
+                catch (_) { return result; }
+                if (!Array.isArray(variants)) return result;
+                const colors = [...groups[0].querySelectorAll('input[type="radio"]')]
+                    .filter(el => el.checked);
+                const norm = s => String(s || '').trim().toLowerCase();
+                if (colors.length !== 1 || norm(colors[0].value) !== norm(expectedColor))
+                    return result;
+                const options = [...root.querySelectorAll(
+                    'input[type="radio"][data-index]:checked, select[data-index]')];
+                if (!options.includes(colors[0])) return result;
+                // Every native option group must have one selected value.
+                const keys = new Set([...root.querySelectorAll(
+                    'input[type="radio"][data-index], select[data-index]')]
+                    .map(el => el.dataset.index));
+                if (!keys.size || [...keys].some(key =>
+                    options.filter(el => el.dataset.index === key).length !== 1) ||
+                    [...keys].some(key => !/^option[123]$/.test(key))) return result;
+                const matches = variants.filter(variant => options.every(el =>
+                    norm(variant[el.dataset.index]) === norm(el.value)));
+                if (matches.length !== 1 || matches[0].available !== true) return result;
+                result.expected_variant_id = String(matches[0].id);
+                result.submitted_variant_id = String(selects[0].value || '');
+                const labels = root.querySelectorAll(config.color_label_selector);
+                result.variant_sync_status =
+                    result.expected_variant_id === result.submitted_variant_id &&
+                    labels.length === 1 && norm(labels[0].textContent) === norm(expectedColor)
+                    ? 'MATCH' : 'MISMATCH';
+                return result;
+            }""", {"config": config, "expectedColor": expected_color,
+                   "colorSelector": self.resolve_selector("color")["value"]},
+                timeout=self._readiness_probe_timeout_ms())
+        except Exception:
+            return {"variant_sync_status": "DOM_READ_ERROR",
+                    "submitted_variant_id": None, "expected_variant_id": None}
+
     def _color_disabled_class_tokens(self) -> tuple[str, ...]:
         config = self._color_option_control_config()
         configured = config.get("disabled_class_tokens")
@@ -622,6 +682,8 @@ class ProductPage(BasePage):
             missing.append("probe_budget_exhausted")
         if snapshot.get("size_probe_status") in {"DOM_READ_ERROR", "NATIVE_PROBE_ERROR"}:
             missing.append("size_probe_error")
+        if phase == "post_selection" and snapshot.get("variant_sync_status", "MATCH") != "MATCH":
+            missing.append("variant_sync")
         return missing
 
     @classmethod
@@ -655,6 +717,9 @@ class ProductPage(BasePage):
             "candidate_group_count": int(snapshot.get("candidate_group_count", 0)),
             "selected_size": snapshot["selected_size"],
             "selected_color": snapshot.get("selected_color"),
+            "variant_sync_status": snapshot.get("variant_sync_status", "NOT_CONFIGURED"),
+            "submitted_variant_id": snapshot.get("submitted_variant_id"),
+            "expected_variant_id": snapshot.get("expected_variant_id"),
             "failing_conditions": list(snapshot.get("failing_conditions", [])),
             "size_model": snapshot.get("size_model") or "UNKNOWN",
             "size_probe_status": snapshot.get("size_probe_status", "NOT_RECORDED"),
@@ -777,6 +842,7 @@ class ProductPage(BasePage):
                         lambda: self.get_selected_size(deadline=deadline), None)
                     snapshot["selected_color"] = self._safe_state(
                         lambda: self.get_selected_color(deadline=deadline), None)
+                    snapshot.update(self._variant_sync_snapshot(expected_color))
                 failures = self._missing_readiness_conditions(snapshot, phase)
                 if phase == "post_selection":
                     for key, expected in (("selected_color", expected_color), ("selected_size", expected_size)):
@@ -825,7 +891,9 @@ class ProductPage(BasePage):
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                     continue
                 stable_since = None
-                if phase == "post_selection" and not self._missing_readiness_conditions(snapshot, phase):
+                if phase == "post_selection" and not [condition for condition in
+                        self._missing_readiness_conditions(snapshot, phase)
+                        if condition != "variant_sync"]:
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                     continue
 
@@ -877,6 +945,9 @@ class ProductPage(BasePage):
             f"normal_size_available={final['normal_size_available']} "
             f"custom_size_present={final['custom_size_present']} "
             f"selected_size={final['selected_size'] or 'NONE'} "
+            f"variant_sync_status={final.get('variant_sync_status', 'NOT_CONFIGURED')} "
+            f"submitted_variant_id={final.get('submitted_variant_id') or 'NONE'} "
+            f"expected_variant_id={final.get('expected_variant_id') or 'NONE'} "
             f"candidate_group_count={final['candidate_group_count']} "
             f"atc_visible_initial={initial['atc_visible']} "
             f"atc_visible_final={final['atc_visible']} "

@@ -56,6 +56,13 @@ def test_missing_schema_version_is_invalid() -> None:
     _assert_error(config, "INVALID_SITE_CONFIG")
 
 
+@pytest.mark.parametrize("field", ["root_selector", "variants_selector", "select_selector", "color_label_selector"])
+def test_variant_sync_requires_complete_selectors(field: str) -> None:
+    config = _profile()
+    del config["pages"]["product"]["variant_sync"][field]
+    _assert_error(config, "INVALID_SITE_CONFIG")
+
+
 def test_unsupported_schema_version_fails_with_a_stable_code() -> None:
     config = _profile()
     config["schema_version"] = 99

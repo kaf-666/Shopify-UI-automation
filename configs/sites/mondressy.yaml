@@ -65,6 +65,9 @@ pages:
 
   search:
     url: /search
+    # Mobile Home can acquire a query before Search. Keep origin, root route
+    # and visible Home controls strict, as for the other storefront profiles.
+    home_query_policy: configured_root_with_home_controls
     smoke_query: dress
     submit_strategy: enter
     entry_strategy: direct_trigger
@@ -291,6 +294,13 @@ pages:
 
   product:
     url: /products/a-line-princess-scoop-lace-embroidery-mother-of-the-bride-dresses-floral-ankle-length-short-sleeves-mon2313179
+
+    # Checked swatches can precede the theme's actual submitted variant.
+    variant_sync:
+      root_selector: "[data-product-id]"
+      variants_selector: "[data-variant-json]"
+      select_selector: "[data-product-select]"
+      color_label_selector: "[data-variant-color-label]"
 
     size_resolver:
       models:
