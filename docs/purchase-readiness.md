@@ -55,6 +55,16 @@ Full still performs a fresh post-selection check immediately before its real
 cart action, even when an earlier PDP case already verified the variant.
 Mutation auditing, variant identity verification and cleanup are unchanged.
 
+Mondressy's `product.variant_sync` profile also checks the theme's master
+`[data-product-select]` value against `[data-variant-json]` and the checked
+native options, plus the displayed color label. These are read together from
+the main product container, excluding recommendation widgets. The submitted
+variant must match continuously during the same 200 ms stability window;
+asynchronous updates use the existing deadline. Missing metadata, ambiguous
+options and stale variant IDs fail before ATC, with `variant_sync_status`,
+`submitted_variant_id` and `expected_variant_id` in the bounded diagnostics.
+The check only observes state; it never sets a variant ID or reselects a swatch.
+
 Offline regressions run against Chromium and WebKit synthetic DOMs: delayed
 text/size initialization, replaced groups and buttons, model changes, unavailable
 normal sizes, custom-only options, checked-state reset/recovery and persistently

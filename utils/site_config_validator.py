@@ -329,6 +329,12 @@ def _validate_readonly_requirements(config: Mapping[str, Any], groups: Mapping[s
 
     product = _page(config, "product")
     _require_page_url(product, "product")
+    if "variant_sync" in product:
+        sync = _as_mapping(product["variant_sync"], "product.variant_sync")
+        for field in ("root_selector", "variants_selector", "select_selector", "color_label_selector"):
+            _required_text(sync, field)
+        if product.get("selectors", {}).get("color", {}).get("by") != "css":
+            _fail("INVALID_SITE_CONFIG", "product.variant_sync requires a CSS color selector")
     _require_selectors(product, "product", ("purchase_area", "title", "price", "color", "add_to_cart"))
     resolver = product.get("size_resolver")
     if not isinstance(resolver, Mapping) or not isinstance(resolver.get("models"), list) or not resolver["models"]:
