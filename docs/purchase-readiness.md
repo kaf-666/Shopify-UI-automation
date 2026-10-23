@@ -65,6 +65,18 @@ options and stale variant IDs fail before ATC, with `variant_sync_status`,
 `submitted_variant_id` and `expected_variant_id` in the bounded diagnostics.
 The check only observes state; it never sets a variant ID or reselects a swatch.
 
+Mondressy also opts into `variant_sync.initialization: archetype_product`.
+Pre-selection waits for the theme's registered product/variant controller to
+own the current product root and form. Native radios can already be visible
+and enabled before the theme binds their change handlers; clicking in that
+window changes `checked` without updating the color label or submitted ID.
+The readiness gate shares the existing deadline, records `theme_ready_status`,
+and rejects stale instances after a form replacement. `select_color()` checks
+the same condition before its first click, including callers that do not use
+the full readiness flow. This automation change prevents premature test
+interaction; it does not change the published storefront theme or establish
+that initialization delay caused every observed production mismatch.
+
 Offline regressions run against Chromium and WebKit synthetic DOMs: delayed
 text/size initialization, replaced groups and buttons, model changes, unavailable
 normal sizes, custom-only options, checked-state reset/recovery and persistently

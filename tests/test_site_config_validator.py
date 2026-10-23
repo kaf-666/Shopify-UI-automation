@@ -63,6 +63,12 @@ def test_variant_sync_requires_complete_selectors(field: str) -> None:
     _assert_error(config, "INVALID_SITE_CONFIG")
 
 
+def test_variant_initialization_rejects_unknown_adapter() -> None:
+    config = _profile()
+    config["pages"]["product"]["variant_sync"]["initialization"] = "guess_loaded"
+    _assert_error(config, "INVALID_SITE_CONFIG")
+
+
 def test_unsupported_schema_version_fails_with_a_stable_code() -> None:
     config = _profile()
     config["schema_version"] = 99
