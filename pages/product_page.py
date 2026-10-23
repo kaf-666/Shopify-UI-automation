@@ -720,7 +720,7 @@ class ProductPage(BasePage):
             missing.append("size_probe_error")
         if phase == "post_selection" and snapshot.get("variant_sync_status", "MATCH") != "MATCH":
             missing.append("variant_sync")
-        if snapshot.get("theme_ready_status", "READY") != "READY":
+        if snapshot.get("theme_ready_status", "READY") not in {"READY", "NOT_CONFIGURED"}:
             missing.append("theme_ready")
         return missing
 
