@@ -92,3 +92,67 @@ def test_incomplete_or_inconsistent_theme_state_fails_closed(product, change):
         product.wait_purchase_ready(timeout_ms=400, phase="post_selection",
                                     expected_color="Pink", expected_size="M")
     assert product.page.evaluate("window.added") == []
+
+
+def enable_theme_gate(product):
+    product.site_config["pages"]["product"]["variant_sync"]["initialization"] = "archetype_product"
+
+
+def test_theme_binds_handlers_before_first_color_click(product):
+    enable_theme_gate(product)
+    product.page.evaluate('''() => {
+      window.changes=[];
+      setTimeout(()=>{
+        pink.onchange=()=>{
+          window.changes.push(pink.value);
+          document.querySelector('[name=id]').value='22';
+          document.querySelector('[data-variant-color-label]').textContent='Pink';
+        };
+        const form=document.querySelector('#purchase'), root=form.closest('[data-product-id]');
+        window.theme={sections:{instances:[{type:'product', container:root,
+          cache:{form}, variants:{container:root}}]}};
+      },700);
+    }''')
+    observations=[]
+    product.wait_purchase_ready(timeout_ms=2500, phase="pre_selection",
+                                diagnostics_hook=observations.append)
+    assert any(s["theme_ready_status"] == "INITIALIZING" for s in observations)
+    assert observations[-1]["theme_ready_status"] == "READY"
+    product.select_color("Pink")
+    product.wait_purchase_ready(timeout_ms=1500, phase="post_selection",
+                                expected_color="Pink", expected_size="M")
+    assert product.page.evaluate("window.changes") == ["Pink"]
+    assert product._variant_sync_snapshot("Pink")["submitted_variant_id"] == "22"
+    assert product.page.evaluate("window.added") == []
+
+
+def test_direct_selection_also_waits_for_theme(product):
+    enable_theme_gate(product)
+    product.page.evaluate('''() => {
+      window.earlyClicks=0;
+      pink.addEventListener('click',()=>{if(!window.theme) window.earlyClicks++});
+      setTimeout(()=>{
+        const form=document.querySelector('#purchase'), root=form.closest('[data-product-id]');
+        window.theme={sections:{instances:[{type:'product',container:root,
+          cache:{form},variants:{container:root}}]}};
+      },400);
+    }''')
+    product.select_color("Pink")
+    assert product.get_selected_color() == "Pink"
+    assert product.page.evaluate("window.earlyClicks") == 0
+
+
+@pytest.mark.parametrize("state", ["missing", "stale_form", "other_product"])
+def test_uninitialized_or_stale_theme_never_becomes_ready(product, state):
+    enable_theme_gate(product)
+    if state != "missing":
+        product.page.evaluate('''state => {
+          const form=document.querySelector('#purchase'), root=form.closest('[data-product-id]');
+          window.theme={sections:{instances:[{type:'product',container:root,
+            cache:{form:state==='stale_form'?form.cloneNode(true):form},
+            variants:{container:state==='other_product'?document.body:root}}]}};
+        }''', state)
+    with pytest.raises(PurchaseAreaReadinessError, match="theme_ready"):
+        product.wait_purchase_ready(timeout_ms=350, phase="pre_selection")
+    assert product.get_selected_color() == "Dark Green"
+    assert product.page.evaluate("window.added") == []

@@ -333,6 +333,8 @@ def _validate_readonly_requirements(config: Mapping[str, Any], groups: Mapping[s
         sync = _as_mapping(product["variant_sync"], "product.variant_sync")
         for field in ("root_selector", "variants_selector", "select_selector", "color_label_selector"):
             _required_text(sync, field)
+        if "initialization" in sync and sync["initialization"] != "archetype_product":
+            _fail("INVALID_SITE_CONFIG", "unsupported product.variant_sync.initialization")
         if product.get("selectors", {}).get("color", {}).get("by") != "css":
             _fail("INVALID_SITE_CONFIG", "product.variant_sync requires a CSS color selector")
     _require_selectors(product, "product", ("purchase_area", "title", "price", "color", "add_to_cart"))

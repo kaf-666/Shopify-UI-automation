@@ -297,6 +297,7 @@ pages:
 
     # Checked swatches can precede the theme's actual submitted variant.
     variant_sync:
+      initialization: archetype_product
       root_selector: "[data-product-id]"
       variants_selector: "[data-variant-json]"
       select_selector: "[data-product-select]"

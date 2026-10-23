@@ -247,6 +247,42 @@ class ProductPage(BasePage):
         config = self.page_config().get("color_option_control") or {}
         return config if isinstance(config, dict) else {}
 
+    def _theme_readiness_snapshot(self, timeout_ms: Optional[int] = None) -> dict:
+        """Observe the configured theme's instance for the current form.
+
+        HTML controls can be actionable before Archetype binds their change
+        handlers. A global loaded flag or an instance for a replaced form is
+        insufficient; the registered variant controller must own this root.
+        """
+        config = (getattr(self, "site_config", {}).get("pages", {})
+                  .get(self.PAGE_NAME, {}).get("variant_sync")) or {}
+        if config.get("initialization") != "archetype_product":
+            return {}
+        try:
+            ready = self.purchase_area().evaluate("""(form, config) => {
+                const root = form.closest(config.root_selector);
+                const instances = window.theme?.sections?.instances;
+                if (!root || !Array.isArray(instances)) return false;
+                const matches = instances.filter(instance =>
+                    instance.type === 'product' && instance.container === root &&
+                    instance.variants?.container === root &&
+                    instance.cache?.form === form);
+                return matches.length === 1;
+            }""", config, timeout=timeout_ms or self._readiness_probe_timeout_ms())
+            return {"theme_ready_status": "READY" if ready else "INITIALIZING"}
+        except Exception:
+            return {"theme_ready_status": "DOM_READ_ERROR"}
+
+    def _wait_theme_ready(self, timeout_ms: int = 15_000) -> None:
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            remaining_ms = max(1, min(250, int((deadline - time.monotonic()) * 1000)))
+            state = self._theme_readiness_snapshot(timeout_ms=remaining_ms)
+            if time.monotonic() < deadline and state.get("theme_ready_status", "READY") == "READY":
+                return
+            self.page.wait_for_timeout(min(50, max(1, int((deadline - time.monotonic()) * 1000))))
+        raise PurchaseAreaReadinessError("failing_conditions=theme_ready")
+
     def _variant_sync_snapshot(self, expected_color: str) -> dict:
         """Check the theme's submitted variant, without modifying form state.
 
@@ -684,6 +720,8 @@ class ProductPage(BasePage):
             missing.append("size_probe_error")
         if phase == "post_selection" and snapshot.get("variant_sync_status", "MATCH") != "MATCH":
             missing.append("variant_sync")
+        if snapshot.get("theme_ready_status", "READY") not in {"READY", "NOT_CONFIGURED"}:
+            missing.append("theme_ready")
         return missing
 
     @classmethod
@@ -718,6 +756,7 @@ class ProductPage(BasePage):
             "selected_size": snapshot["selected_size"],
             "selected_color": snapshot.get("selected_color"),
             "variant_sync_status": snapshot.get("variant_sync_status", "NOT_CONFIGURED"),
+            "theme_ready_status": snapshot.get("theme_ready_status", "NOT_CONFIGURED"),
             "submitted_variant_id": snapshot.get("submitted_variant_id"),
             "expected_variant_id": snapshot.get("expected_variant_id"),
             "failing_conditions": list(snapshot.get("failing_conditions", [])),
@@ -835,6 +874,7 @@ class ProductPage(BasePage):
                 poll_count += 1
                 snapshot = dict(snapshot)
                 snapshot["readiness_phase"] = phase
+                snapshot.update(self._theme_readiness_snapshot())
                 if phase == "post_selection":
                     # Read actual checked state, not the resolver's early-exit
                     # availability sample (which may precede the selected radio).
@@ -891,9 +931,9 @@ class ProductPage(BasePage):
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                     continue
                 stable_since = None
-                if phase == "post_selection" and not [condition for condition in
+                if not [condition for condition in
                         self._missing_readiness_conditions(snapshot, phase)
-                        if condition != "variant_sync"]:
+                        if condition not in {"variant_sync", "theme_ready"}]:
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                     continue
 
@@ -946,6 +986,7 @@ class ProductPage(BasePage):
             f"custom_size_present={final['custom_size_present']} "
             f"selected_size={final['selected_size'] or 'NONE'} "
             f"variant_sync_status={final.get('variant_sync_status', 'NOT_CONFIGURED')} "
+            f"theme_ready_status={final.get('theme_ready_status', 'NOT_CONFIGURED')} "
             f"submitted_variant_id={final.get('submitted_variant_id') or 'NONE'} "
             f"expected_variant_id={final.get('expected_variant_id') or 'NONE'} "
             f"candidate_group_count={final['candidate_group_count']} "
@@ -1086,6 +1127,7 @@ class ProductPage(BasePage):
         不直接执行 check/JS click，而是走真实用户控件点击，
         再用 radio.checked 验证选择生效。已选且可用时不重复点击。
         """
+        self._wait_theme_ready()
         if value is None:
             value = self.first_available_color()
         radio = self._find_option(
