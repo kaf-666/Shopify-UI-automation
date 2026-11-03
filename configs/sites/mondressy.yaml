@@ -294,6 +294,9 @@ pages:
 
   product:
     url: /products/a-line-princess-scoop-lace-embroidery-mother-of-the-bride-dresses-floral-ankle-length-short-sleeves-mon2313179
+    # The themed radio has a clipped 1px box; the label receives user clicks.
+    color_option_control:
+      strategy: associated_label
 
     # Checked swatches can precede the theme's actual submitted variant.
     variant_sync:

@@ -89,6 +89,8 @@ def page(request):
     ("associated_label", '<label for=c>Blue</label><input id=c hidden type=radio value=Blue>'),
     ("label", '<label>Blue<input hidden type=radio value=Blue></label>'),
     ("label", '<input hidden type=radio value=Blue>'),
+    ("label", '<input type=radio value=Blue>'),
+    ("associated_label", '<label for=c hidden>Blue</label><input id=c type=radio value=Blue>'),
     ("label", '<label for=c>Blue</label><input id=c hidden disabled type=radio value=Blue>'),
     ("label", '<fieldset disabled><label for=c>Blue</label><input id=c hidden type=radio value=Blue></fieldset>'),
     ("label", '<label for=c aria-disabled=true>Blue</label><input id=c hidden type=radio value=Blue>'),

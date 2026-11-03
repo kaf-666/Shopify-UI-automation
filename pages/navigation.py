@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import re
+import json
 from typing import List, Optional
 from urllib.parse import urlparse
 
@@ -26,6 +27,7 @@ MOBILE_MENU_ROOT_TIMEOUT_MS = 5_000
 MOBILE_MENU_RETRY_ATTEMPTS = 4
 MOBILE_MENU_RETRY_INTERVAL_MS = 250
 MOBILE_MENU_TARGET_WAIT_MS = 4_000
+MOBILE_MENU_CLICK_TIMEOUT_MS = 4_000
 
 
 class NavigationStrategyError(RuntimeError):
@@ -241,6 +243,40 @@ class NavigationPage(BasePage):
         except Exception:
             return False
 
+    def _mobile_parent_expanded(self, link) -> Optional[bool]:
+        """Read the toggle's (or its parent link's) state within this menu.
+
+        The configured control can be the toggle, its child, or its enclosing
+        link. Missing/ambiguous state is unknown, not proof that another click
+        would expand rather than collapse it.
+        """
+        if link is None:
+            return None
+        try:
+            value = link.evaluate("""(el, scope) => {
+                const root = el.closest(scope);
+                let owner = el.closest('[aria-expanded]');
+                if (!owner || !root?.contains(owner)) {
+                    const children = el.querySelectorAll('[aria-expanded]');
+                    owner = children.length === 1 ? children[0] : null;
+                }
+                return root && owner && root.contains(owner)
+                    ? owner.getAttribute('aria-expanded') : null;
+            }""", self._menu_scope(), timeout=250)
+            return {"true": True, "false": False}.get(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _mobile_error_type(error: Exception) -> str:
+        # Exception messages can contain URLs, headers or caller data. Keep
+        # the failed stage and a fixed type instead of copying that payload.
+        name = type(error).__name__
+        return name if name in {
+            "TimeoutError", "AssertionError", "TypeError", "ValueError",
+            "RuntimeError", "Error",
+        } else "OTHER"
+
     def _mobile_failure_detail(self, prefix: str, attempts: int) -> str:
         """生成不含凭证的移动导航状态诊断。"""
         try:
@@ -285,7 +321,8 @@ class NavigationPage(BasePage):
             f"drawer_open={drawer_open} menu_root_count={root_count} "
             f"menu_root_visible={root_visible} target_count={target_count} "
             f"target_visible_count={target_visible_count} parent_count={parent_count} "
-            f"parent_visible_count={parent_visible_count} attempts={attempts})"
+            f"parent_visible_count={parent_visible_count} attempts={attempts} "
+            f"attempt_log={json.dumps(getattr(self, '_mobile_open_attempts', []), separators=(',', ':'))})"
         )
 
     @staticmethod
@@ -382,31 +419,62 @@ class NavigationPage(BasePage):
         self._ensure_drawer_open()
 
     def _open_drawer_accordion_menu(self) -> None:
-        """Open a drawer and expand its configured accordion parent when needed."""
+        """Expand a live parent without toggling an already open accordion."""
+        self._mobile_open_attempts = []
         self._ensure_drawer_open()
         # Drawer open only marks the outer shell; wait for the mounted menu tree.
         self._wait_mobile_menu_root()
         attempts = 0
+        click_attempted = False
         for _attempt in range(MOBILE_MENU_RETRY_ATTEMPTS):
             attempts += 1
             if self._target_visible():
                 return
             link = self._target_top_link()
+            expanded = self._mobile_parent_expanded(link)
+            record = {
+                "attempt": attempts,
+                "parent_expanded": "OPEN" if expanded is True else "CLOSED" if expanded is False else "UNKNOWN",
+                "action": "WAIT_PARENT", "click_error": None, "wait_error": None,
+                "target_visible": False, "elapsed_ms": 0,
+            }
+            self._mobile_open_attempts.append(record)
+            started = time.monotonic()
             if link is not None:
                 try:
-                    # Empty / hidden parent locator is also a合法过渡态；下一轮
-                    # 重新查询，覆盖 menu root 已挂载但 parent 尚未出现的竞态。
+                    if not (link.count() and link.is_visible()):
+                        # The drawer shell can precede its real toggle. Use
+                        # the observation window to wait for the live locator.
+                        link.wait_for(state="visible", timeout=MOBILE_MENU_TARGET_WAIT_MS)
+                        expanded = self._mobile_parent_expanded(link)
+                        record["parent_expanded"] = "OPEN" if expanded is True else "CLOSED" if expanded is False else "UNKNOWN"
                     if link.count() and link.is_visible():
-                        link.click()
-                        self._wait_target_visible(timeout_ms=MOBILE_MENU_TARGET_WAIT_MS)
-                        return
-                except (PlaywrightTimeoutError, TimeoutError):
-                    # Accordion click may not have produced the target yet；bounded
-                    # retry will re-query the current DOM.
-                    pass
-                except Exception:
-                    # DOM rerender around click: discard this locator and re-query.
-                    pass
+                        if expanded is False or (expanded is None and not click_attempted):
+                            record["action"] = "CLICK"
+                            click_attempted = True
+                            try:
+                                link.click(timeout=MOBILE_MENU_CLICK_TIMEOUT_MS)
+                            except Exception as exc:
+                                record["click_error"] = self._mobile_error_type(exc)
+                        else:
+                            record["action"] = "WAIT_OPEN" if expanded else "WAIT_UNKNOWN"
+                        # A successful dispatch is not proof the child is ready.
+                        # If it is already open, wait rather than toggle closed.
+                        try:
+                            self._wait_target_visible(timeout_ms=MOBILE_MENU_TARGET_WAIT_MS)
+                            record["target_visible"] = True
+                            return
+                        except Exception as exc:
+                            record["wait_error"] = self._mobile_error_type(exc)
+                except Exception as exc:
+                    record["wait_error"] = self._mobile_error_type(exc)
+                finally:
+                    try:
+                        after = self._mobile_parent_expanded(link)
+                    except Exception:
+                        after = None
+                    record["parent_expanded_after"] = "OPEN" if after is True else "CLOSED" if after is False else "UNKNOWN"
+                    record["elapsed_ms"] = max(0, int((time.monotonic() - started) * 1000))
             self.page.wait_for_timeout(MOBILE_MENU_RETRY_INTERVAL_MS)
 
         raise RuntimeError(
