@@ -219,8 +219,10 @@ class ProductPage(BasePage):
 
         if strategy in {"associated_label", "label", "label_for"}:
             label = self._associated_label(radio, timeout_ms=timeout_ms)
-            if self._actionable_control(label, timeout_ms=timeout_ms):
-                return label
+            if label is not None:
+                # A temporarily hidden label is not permission to click its
+                # semantic radio, which can have a visible but clipped 1px box.
+                return label if self._actionable_control(label, timeout_ms=timeout_ms) else None
             # A configured label strategy must not make a visible native
             # radio unusable when a theme omits the label association.
             return (
@@ -506,7 +508,7 @@ class ProductPage(BasePage):
                     let control;
                     if (['radio','native'].includes(config.strategy)) control = visible(radio) ? radio : null;
                     else if (['variant_input','variant-container'].includes(config.strategy)) control = visible(variant) ? variant : null;
-                    else if (['associated_label','label','label_for'].includes(config.strategy)) control = visible(label) ? label : visible(radio) ? radio : null;
+                    else if (['associated_label','label','label_for'].includes(config.strategy)) control = label ? (visible(label) ? label : null) : visible(radio) ? radio : null;
                     else control = visible(radio) ? visible(variant) ? variant : radio : visible(label) ? label : null;
                     return !!control && norm(control.getAttribute('aria-disabled')) !== 'true' && !blocked(control);
                 });

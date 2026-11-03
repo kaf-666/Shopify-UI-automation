@@ -175,8 +175,12 @@ class _FakeLocator:
     def locator(self, _selector: str) -> "_FakeLocator":
         return self._child or _FakeLocator(count=0, visible=False)
 
-    def click(self) -> None:
+    def click(self, **_kwargs) -> None:
         self.click_calls += 1
+
+    def wait_for(self, **_kwargs) -> None:
+        if not self._count or not self._visible:
+            raise PlaywrightTimeoutError("synthetic locator remains hidden")
 
     def hover(self) -> None:
         self.hover_calls += 1
