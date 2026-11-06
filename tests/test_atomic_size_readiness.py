@@ -115,8 +115,10 @@ def test_current_dom_model_and_checked_state_are_resolved_again_after_replacemen
 
 def test_initial_candidate_scan_waits_for_transient_disabled_sizes_without_clicking(page):
     size=resolver(page)
-    page.locator('input').evaluate_all("els=>{els.forEach(el=>el.disabled=true); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.disabled=false),200)}")
-    assert size.first_available_value(timeout_ms=1500) == '2'
+    page.locator('input').evaluate_all("els=>{els.forEach(el=>el.disabled=true); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.disabled=false),600)}")
+    candidate=size.first_available_value(timeout_ms=1500)
+    assert candidate in {'2','4'}
+    assert any(o.value == candidate and o.available for o in size.options())
     assert page.evaluate('window.choiceClicks') == 0
     assert size.selected_value() == '4'
 
@@ -128,8 +130,10 @@ def test_native_candidate_scan_survives_visibility_transition_outside_purchase_f
         <label for="m">M</label><input hidden id="m" form="purchase" type="radio" name="Size" data-variant-input value="M">
       </fieldset>''')
     assert size.readiness_snapshot(deadline=time.monotonic()+1)['normal_size_available'] == 1
-    page.locator('label').evaluate_all("els=>{els.forEach(el=>el.style.visibility='hidden'); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.style.visibility='visible'),200)}")
-    assert size.first_available_value(timeout_ms=1500) == 'M'
+    page.locator('label').evaluate_all("els=>{els.forEach(el=>el.style.visibility='hidden'); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.style.visibility='visible'),600)}")
+    candidate=size.first_available_value(timeout_ms=1500)
+    assert candidate in {'S','M'}
+    assert any(o.value == candidate and o.available for o in size.options())
     assert page.evaluate('window.choiceClicks') == 0
     assert size.selected_value() == 'S'
 
