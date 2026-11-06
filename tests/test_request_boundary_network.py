@@ -44,8 +44,10 @@ def servers():
                 target = f"https://dummy@127.0.0.1:{tls.server_port}/forbidden"
             elif path in {"/cart/add.js", "/readonly-hop"}:
                 target = "/account/login" if path == "/cart/add.js" else "/cart/add.js"
-            elif path in {"/start", "/checkout"}:
+            elif path in {"/start", "/checkout", "/localization"}:
                 target = query.get("target", ["/landing"])[0]
+                if path == "/localization":
+                    target = self.headers.get("X-Synthetic-Target") or query.get("target", ["/products/example"])[0]
             else:
                 target = None
             status = int(query.get("status", ["302"])[0])
@@ -239,3 +241,43 @@ def test_popup_redirect_is_coordinated_without_replaying_the_click(context, serv
     assert len(context.pages) == 2 and context.pages[-1].url == origin + "/landing"
     assert len([row for row in seen if row[1] == "/start"]) == 1
     transport.assert_clean()
+
+
+@pytest.mark.parametrize("mode", ["readonly", "full"])
+def test_verified_localization_post_is_not_replayed_or_followed(context, servers, mode):
+    origin, seen = servers
+    guard = ReadonlyMutationGuard() if mode == "readonly" else TransactionalMutationPolicy(["127.0.0.1"], origin)
+    transport = boundary(context, origin, guard)
+    page = context.new_page()
+    transport.navigate(page, lambda: page.goto(origin + "/"))
+    status = page.evaluate("""async origin => {
+      const body=new FormData();
+      for (const [k,v] of Object.entries({form_type:'localization',_method:'put',country_code:'US',
+        utf8:'\u2713',return_to:origin+'/products/example'})) body.append(k,v);
+      return (await fetch('/localization', {method:'POST',body})).status;
+    }""", origin)
+    assert status == 204
+    assert [(m,p) for m,p,_,_ in seen if m == "POST"] == [("POST", "/localization")]
+    assert not any(p == "/products/example" for _,p,_,_ in seen)
+    assert "synthetic_session=present" in page.evaluate("document.cookie")
+    transport.assert_clean()
+    event = transport.summary()["events"][0]
+    assert event["code"] == "LOCALIZATION_RETURN_READ_SUPPRESSED" and event["gating_failure"] is False
+
+
+@pytest.mark.parametrize("target", ["/account/login", "/products/different"])
+def test_localization_cannot_suppress_an_unmatched_or_high_risk_return(context, servers, target):
+    origin, seen = servers
+    transport = boundary(context, origin, ReadonlyMutationGuard())
+    page = context.new_page()
+    transport.navigate(page, lambda: page.goto(origin + "/"))
+    status = page.evaluate("""async ({origin,target}) => {
+      const body=new FormData();
+      for (const [k,v] of Object.entries({form_type:'localization',_method:'put',country_code:'US',
+        utf8:'\u2713',return_to:origin+'/products/example'})) body.append(k,v);
+      try { await fetch('/localization', {method:'POST',body,headers:{'X-Synthetic-Target':target}}); return 'SENT'; }
+      catch { return 'BLOCKED'; }
+    }""", {"origin":origin,"target":target})
+    assert status == "BLOCKED" and not any(p == target for _,p,_,_ in seen)
+    with pytest.raises(RequestBoundaryError):
+        transport.assert_clean()

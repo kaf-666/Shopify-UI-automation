@@ -13,6 +13,7 @@ import pytest
 
 from utils.mutation_fingerprint import format_mutation_fingerprint_report
 from utils.readonly_mutation_guard import ReadonlyMutationGuard, TransactionalMutationPolicy
+from utils.localization_request_policy import is_verified_localization_return
 
 
 ORIGIN = "https://mondressy.com"
@@ -63,6 +64,23 @@ def _policy(origin=ORIGIN):
         ("mondressy.com", "www.mondressy.com", "lavetir.com", "shirees.com"),
         canonical_origin=origin,
     )
+
+
+@pytest.mark.parametrize("url", [ORIGIN + "/localization", URL])
+def test_localization_return_read_can_be_suppressed_only_for_the_exact_safe_form(url):
+    request = Route(url=url).request
+    target = dict(_fields())["return_to"]
+    assert is_verified_localization_return(url, 302, target, request)
+    assert is_verified_localization_return(url, 303, target, request)
+    for status in (301, 307, 308):
+        assert not is_verified_localization_return(url, status, target, request)
+    for bad in (ORIGIN + "/products/different", ORIGIN + "/account/login", ORIGIN + "/payment",
+                ORIGIN + "/cart/add.js", "https://other.example/products/example",
+                "http://mondressy.com/products/example"):
+        assert not is_verified_localization_return(url, 302, bad, request)
+    assert not is_verified_localization_return(url + "&extra=unknown", 302, target, request)
+    malformed = Route(url=url, fields=[*_fields(), ("email", "synthetic@example.invalid")]).request
+    assert not is_verified_localization_return(url, 302, target, malformed)
 
 
 @pytest.mark.parametrize("language", [None, "en", "pt-BR", "zh-Hans"])

@@ -24,6 +24,10 @@ GET redirects (including POST-to-GET Checkout redirects) resume through the
 navigation coordinator; redirected POST/PUT/PATCH/DELETE, subresource redirects,
 and redirects outside the permitted signed HTTPS origin set fail closed with
 `REQUEST_BOUNDARY_FAILURE`. API cart reads/cleanup reject redirects separately.
+A verified same-origin locale form POST keeps its actual cookie updates; its
+matching return-page GET is suppressed with a 204 browser response and recorded
+as `LOCALIZATION_RETURN_READ_SUPPRESSED`, a non-gating side effect. Unknown forms,
+different return targets, and account/payment/cart-writing redirects still fail.
 The local Chromium/WebKit regression uses synthetic HTTP(S) servers and dummy
 credentials; candidate Jenkins and live storefront acceptance are separate gates.
 

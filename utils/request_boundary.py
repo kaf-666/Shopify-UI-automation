@@ -12,6 +12,7 @@ import json
 from weakref import WeakSet
 from urllib.parse import urljoin, urlsplit, urldefrag
 from utils.mutation_fingerprint import safe_endpoint_fingerprint
+from utils.localization_request_policy import is_verified_localization_return
 
 
 MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -72,7 +73,8 @@ class RequestBoundary:
 
     def assert_clean(self):
         if self.failures:
-            raise RequestBoundaryError(self.failures[0], self.events[0] if self.events else None)
+            diagnostic = next((event for event in self.events if event["gating_failure"]), None)
+            raise RequestBoundaryError(self.failures[0], diagnostic)
         if self.pending:
             raise RequestBoundaryError("REDIRECT_NAVIGATION_NOT_COMPLETED")
 
@@ -81,8 +83,9 @@ class RequestBoundary:
                 "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
                 "events": [dict(event) for event in self.events]}
 
-    def _reject(self, route, code, *, target=None, status=None):
-        self.failures.append(code)
+    def _reject(self, route, code, *, target=None, status=None, gating=True):
+        if gating:
+            self.failures.append(code)
         request = route.request
         if len(self.events) < 100:
             hosts = getattr(self.access_policy, "_allowed_hosts", ())
@@ -98,7 +101,13 @@ class RequestBoundary:
                 "target_path": destination.get("sanitized_path"),
                 "source_host_class": source["host_class"],
                 "target_host_class": destination.get("host_class"), "http_status": status,
+                "gating_failure": gating, "source_query_present": source["query_present"],
             })
+        if not gating:
+            # The original locale POST completed and updated the shared cookie
+            # jar. Acknowledge it without replaying POST or fetching return HTML.
+            route.fulfill(status=204, body="")
+            return
         try:
             main_navigation = request.is_navigation_request() and request.frame.parent_frame is None
         except Exception:
@@ -150,6 +159,12 @@ class RequestBoundary:
                 return
             if signed and not policy._host_allowed(target):
                 self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
+                return
+            if (signed and request.resource_type in {"xhr", "fetch"}
+                    and not request.is_navigation_request()
+                    and is_verified_localization_return(request.url, response.status, target, request)):
+                self._reject(route, "LOCALIZATION_RETURN_READ_SUPPRESSED", target=target,
+                             status=response.status, gating=False)
                 return
             if method not in {"GET", "HEAD"} or not request.is_navigation_request():
                 self._reject(route, "REDIRECT_UNSUPPORTED", target=target, status=response.status)
