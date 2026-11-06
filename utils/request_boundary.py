@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 import json
 import re
+from playwright.sync_api import Error as PlaywrightError
 from weakref import WeakSet
 from urllib.parse import urljoin, urlsplit, urldefrag, parse_qsl
 from utils.mutation_fingerprint import safe_endpoint_fingerprint
@@ -20,6 +21,19 @@ MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
 STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
+
+
+def transport_error_kind(exc):
+    """Fixed diagnostics only; exception text can contain an opaque URI."""
+    if not isinstance(exc, PlaywrightError):
+        return "NON_PLAYWRIGHT_ERROR"
+    message = str(exc)
+    for text, kind in (("Request context disposed", "REQUEST_CONTEXT_DISPOSED"),
+                       ("Target page, context or browser has been closed", "TARGET_CLOSED"),
+                       ("Context closed", "CONTEXT_CLOSED")):
+        if text in message:
+            return kind
+    return "OTHER_PLAYWRIGHT_ERROR"
 
 
 def is_shop_bridge_target(url):
@@ -98,6 +112,8 @@ class RequestBoundary:
         self.failures = []
         self.events = []
         self.bridge_events = []
+        self.transport_errors = []
+        self.closing_cancellation_count = 0
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -151,7 +167,9 @@ class RequestBoundary:
         return {"status": "FAIL" if self.failures or self.pending else "PASS",
                 "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
                 "events": [dict(event) for event in self.events],
-                "bridge_events": [dict(event) for event in self.bridge_events]}
+                "bridge_events": [dict(event) for event in self.bridge_events],
+                "transport_errors": [dict(event) for event in self.transport_errors],
+                "closing_cancellation_count": self.closing_cancellation_count}
 
     def _anonymous_shop_return(self, route, target):
         """Read only the fixed bridge, returning only to the source endpoint.
@@ -358,8 +376,20 @@ class RequestBoundary:
             else:
                 route.fulfill(status=204, body="")
         except Exception as exc:
-            if not (self.closing and type(exc).__name__ == "TargetClosedError"):
+            kind = transport_error_kind(exc)
+            if self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
+                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}):
+                self.closing_cancellation_count += 1
+            else:
                 self.failures.append("REQUEST_TRANSPORT_FAILED")
+                if len(self.transport_errors) < 100:
+                    fingerprint = safe_endpoint_fingerprint(request.url, request.method,
+                                                           getattr(policy, "_allowed_hosts", ()))
+                    self.transport_errors.append({"code": "REQUEST_TRANSPORT_FAILED", "error_kind": kind,
+                                                  "closing": self.closing,
+                                                  "method": request.method if request.method in {
+                                                      "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "UNKNOWN",
+                                                  "path": fingerprint["sanitized_path"]})
             try:
                 route.abort()
             except Exception:
