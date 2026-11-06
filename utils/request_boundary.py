@@ -20,6 +20,7 @@ from utils.localization_request_policy import is_verified_localization_return
 MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
+PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest", "texttrack"}
 STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
 
 
@@ -114,6 +115,7 @@ class RequestBoundary:
         self.bridge_events = []
         self.transport_errors = []
         self.closing_cancellation_count = 0
+        self.closing_passive_read_cancellation_count = 0
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -169,7 +171,8 @@ class RequestBoundary:
                 "events": [dict(event) for event in self.events],
                 "bridge_events": [dict(event) for event in self.bridge_events],
                 "transport_errors": [dict(event) for event in self.transport_errors],
-                "closing_cancellation_count": self.closing_cancellation_count}
+                "closing_cancellation_count": self.closing_cancellation_count,
+                "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count}
 
     def _anonymous_shop_return(self, route, target):
         """Read only the fixed bridge, returning only to the source endpoint.
@@ -377,9 +380,21 @@ class RequestBoundary:
                 route.fulfill(status=204, body="")
         except Exception as exc:
             kind = transport_error_kind(exc)
+            # Closing disposes outstanding asset responses, sometimes through a
+            # generic driver Error. These GET/HEAD resources are no longer used
+            # after the suite barrier. Navigation, XHR and writes stay gating.
+            passive_read = False
+            if self.closing and isinstance(exc, PlaywrightError):
+                try:
+                    passive_read = (request.method in {"GET", "HEAD"}
+                                    and request.resource_type in PASSIVE_RESOURCES
+                                    and not request.is_navigation_request())
+                except Exception:
+                    pass
             if self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
-                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}):
+                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"} or passive_read):
                 self.closing_cancellation_count += 1
+                self.closing_passive_read_cancellation_count += int(passive_read)
             else:
                 self.failures.append("REQUEST_TRANSPORT_FAILED")
                 if len(self.transport_errors) < 100:

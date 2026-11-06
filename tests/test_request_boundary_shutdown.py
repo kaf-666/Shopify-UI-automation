@@ -10,6 +10,10 @@ class Request:
     url = "https://store.invalid/products/example?opaque=SECRET"
     headers = {}
     method = "GET"
+    resource_type = "fetch"
+
+    def is_navigation_request(self):
+        return False
 
 
 def boundary_with_failure(error, closing):
@@ -53,4 +57,41 @@ def test_shutdown_cancellation_does_not_erase_a_previous_safety_failure():
     boundary.failures.append("REDIRECT_ORIGIN_DENIED")
     boundary._handle_route(route)
     with pytest.raises(RequestBoundaryError, match="REDIRECT_ORIGIN_DENIED"):
+        boundary.assert_clean()
+
+
+@pytest.mark.parametrize('resource', ['script','stylesheet','image','font'])
+def test_passive_asset_disposal_only_cancelled_after_intentional_close(resource):
+    boundary,route=boundary_with_failure(PlaywrightError('opaque driver response disposal SECRET'),True)
+    route.request.resource_type=resource
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()['closing_passive_read_cancellation_count'] == 1
+    assert 'SECRET' not in str(boundary.summary())
+    boundary,route=boundary_with_failure(PlaywrightError('opaque driver response disposal'),False)
+    route.request.resource_type=resource
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError,match='REQUEST_TRANSPORT_FAILED'):
+        boundary.assert_clean()
+
+
+@pytest.mark.parametrize('method,resource,navigation', [
+    ('POST','script',False),('GET','xhr',False),('GET','fetch',False),('GET','document',True),
+])
+def test_shutdown_cannot_hide_writing_or_business_request_errors(method,resource,navigation):
+    boundary,route=boundary_with_failure(PlaywrightError('opaque driver error'),True)
+    route.request.method=method
+    route.request.resource_type=resource
+    route.request.is_navigation_request=lambda:navigation
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError,match='REQUEST_TRANSPORT_FAILED'):
+        boundary.assert_clean()
+
+
+def test_passive_disposal_does_not_erase_prior_safety_denial():
+    boundary,route=boundary_with_failure(PlaywrightError('opaque disposal error'),True)
+    route.request.resource_type='script'
+    boundary.failures.append('REDIRECT_MUTATION_DENIED')
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError,match='REDIRECT_MUTATION_DENIED'):
         boundary.assert_clean()
