@@ -21,7 +21,9 @@ real payment.
 Protected browser requests use a single-hop transport with automatic redirects
 and retries disabled. Redirect targets are checked before sending. Main-frame
 GET redirects (including POST-to-GET Checkout redirects) resume through the
-navigation coordinator; redirected POST/PUT/PATCH/DELETE, subresource redirects,
+navigation coordinator. Validated script-initiated navigation completes before
+the next UI gesture or the end-of-suite barrier, without replaying that gesture.
+Redirected POST/PUT/PATCH/DELETE, subresource redirects,
 and other redirects outside the permitted signed HTTPS origin set fail closed with
 `REQUEST_BOUNDARY_FAILURE`. API cart reads/cleanup reject redirects separately.
 A verified same-origin locale form POST keeps its actual cookie updates; its

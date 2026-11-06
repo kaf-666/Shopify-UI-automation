@@ -337,6 +337,35 @@ def test_resumed_navigation_errors_do_not_expose_return_query(context, servers, 
     assert not any(path == "/landing" for _,path,_,_ in seen)
 
 
+@pytest.mark.parametrize("completion", ["next_ui", "suite_end"])
+def test_script_navigation_is_finished_without_replaying_next_ui(context, servers, completion):
+    origin, seen = servers
+    transport = boundary(context, origin, ReadonlyMutationGuard())
+    page = context.new_page()
+    transport.navigate(page, lambda: page.goto(origin + "/"))
+    page.evaluate("url => { location.href=url; }", origin + "/start")
+    for _ in range(100):
+        if transport.pending:
+            break
+        page.wait_for_timeout(20)
+    assert set(transport.pending) == {page}
+    actions = []
+    if completion == "next_ui":
+        def action():
+            actions.append("CLICK")
+            return page.goto(origin + "/")
+        transport.navigate(page, action)
+        assert actions == ["CLICK"] and page.url == origin + "/"
+    else:
+        from utils.request_boundary import complete_request_navigation
+        complete_request_navigation(context)
+        assert page.url == origin + "/landing"
+    assert len([row for row in seen if row[1] == "/start"]) == 1
+    assert len([row for row in seen if row[1] == "/landing"]) == 1
+    assert "synthetic_session=present" in page.evaluate("document.cookie")
+    transport.assert_clean()
+
+
 def test_subresource_redirect_fails_without_sending_next_hop(context, servers):
     origin, seen = servers
     transport = boundary(context, origin)

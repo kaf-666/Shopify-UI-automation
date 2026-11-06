@@ -184,7 +184,8 @@ def run_viewport(
         )
         try:
             results = runner.run_all()
-            from utils.request_boundary import assert_request_boundary_clean
+            from utils.request_boundary import assert_request_boundary_clean, complete_request_navigation
+            complete_request_navigation(runtime.context)
             assert_request_boundary_clean(runtime.context)
         except Exception as exc:
             raise PartialViewportFailure(runner, runtime_meta, exc) from None

@@ -117,6 +117,36 @@ class RequestBoundary:
         if self.pending:
             raise RequestBoundaryError("REDIRECT_NAVIGATION_NOT_COMPLETED")
 
+    def _drain_pending(self, page, deadline):
+        """Finish a validated script navigation before the next UI action."""
+        for _ in range(11):
+            if not self.pending:
+                return
+            if set(self.pending) != {page} or page is None:
+                raise RequestBoundaryError("REDIRECT_NAVIGATION_CONFLICT")
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                raise RequestBoundaryError("REDIRECT_LOOP_OR_LIMIT")
+            target = self.pending.pop(page)
+            try:
+                self.navigate(page, lambda: page.goto(target, wait_until="domcontentloaded", timeout=remaining),
+                              timeout_ms=remaining)
+            except RequestBoundaryError:
+                raise
+            except Exception:
+                self.failures.append("RESUMED_NAVIGATION_FAILED")
+                raise RequestBoundaryError("RESUMED_NAVIGATION_FAILED") from None
+        raise RequestBoundaryError("REDIRECT_LOOP_OR_LIMIT")
+
+    def complete_pending(self):
+        """Explicit end-of-suite navigation barrier; never replay a UI gesture."""
+        if self.failures:
+            self.assert_clean()
+        if self.pending:
+            if len(self.pending) != 1:
+                raise RequestBoundaryError("REDIRECT_NAVIGATION_CONFLICT")
+            self._drain_pending(next(iter(self.pending)), time.monotonic() + 45)
+
     def summary(self):
         return {"status": "FAIL" if self.failures or self.pending else "PASS",
                 "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
@@ -345,9 +375,8 @@ class RequestBoundary:
 
     def navigate(self, page, action, *, timeout_ms=45000):
         """Perform one real UI action, then complete validated GET redirects."""
-        if self.pending:
-            raise RequestBoundaryError("REDIRECT_NAVIGATION_NOT_COMPLETED")
         deadline = time.monotonic() + timeout_ms / 1000
+        self._drain_pending(page, deadline)
         known_pages = set(self.context.pages)
         visited = set()
         result = None
@@ -433,3 +462,9 @@ def assert_request_boundary_clean(context):
     boundary = getattr(context, "_shopify_request_boundary", None)
     if isinstance(boundary, RequestBoundary):
         boundary.assert_clean()
+
+
+def complete_request_navigation(context):
+    boundary = getattr(context, "_shopify_request_boundary", None)
+    if isinstance(boundary, RequestBoundary):
+        boundary.complete_pending()
