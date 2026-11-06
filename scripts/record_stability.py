@@ -21,7 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from utils.artifacts import canonical_site_name, site_scoped_artifact_root
 from utils.errors import CliConfigError
-from utils.run_context import load_context, validate_context_results
+from utils.run_context import identity_valid, load_context, validate_context_results
 from utils.safe_artifact_write import write_run_json
 from utils.stability import (
     HISTORY_FILENAME,
@@ -35,13 +35,6 @@ from utils.stability import (
     summarize_records,
     write_history_record,
 )
-
-
-def _latest_results(root: Path) -> Optional[Path]:
-    candidates = sorted(root.rglob("results.json")) if root.exists() else []
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, str(path)))
 
 
 def _load_results(path: Path) -> dict:
@@ -65,6 +58,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--secret-gate", choices=["PASS", "FAIL", "NOT_RUN"])
     args = parser.parse_args(argv)
 
+    if not args.results:
+        print("Stability Record: EXPLICIT_RESULTS_REQUIRED")
+        return 1
+    if not args.run_context and (os.environ.get("JENKINS_URL") or os.environ.get("JOB_NAME")
+                                 or os.environ.get("BUILD_NUMBER")):
+        print("Stability Record: CURRENT_RUN_CONTEXT_REQUIRED")
+        return 1
+
     artifacts_root = Path(args.artifacts_root)
     context = None
     if args.run_context:
@@ -80,16 +81,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             print("Stability Record: CURRENT_RUN_VALIDATION_FAILED")
             return 1
-    result_path = Path(args.results) if args.results else _latest_results(artifacts_root)
+    result_path = Path(args.results)
     if context:
         result_path = PROJECT_ROOT / context["results_path"]
         artifacts_root = result_path.parent.parent.parent
     requested_viewport = (context["identity"]["viewport"] if context else
                           args.viewport or os.environ.get("SMOKE_VIEWPORT") or "")
-    if result_path is None or not result_path.exists():
+    if not result_path.exists():
         print("Stability Record: no Website Smoke V1 results.json found")
         print("STABILITY_STATUS=COLLECTING")
-        return 0
+        return 1
 
     record_env = dict(os.environ)
     if context:
@@ -104,6 +105,21 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         results = _load_results(result_path)
+        if context is None:
+            identity = results.get("execution_context")
+            if (not identity_valid(identity) or identity.get("suite") != "website_smoke_v1"
+                    or results.get("run_id") != identity["run_id"]
+                    or results.get("site") != identity["site"]
+                    or (args.commit_sha and args.commit_sha != identity["commit_sha"])
+                    or (args.viewport and args.viewport != identity["viewport"])):
+                print("Stability Record: RESULT_IDENTITY_INVALID")
+                return 1
+            for key in ("GIT_COMMIT", "CHANGE_SHA", "STABILITY_JENKINS_RESULT",
+                        "STABILITY_PYTHON_EXIT_CODE", "STABILITY_TRIGGER", "BUILD_TRIGGER"):
+                record_env.pop(key, None)
+            record_env.update(GIT_COMMIT_SHA=identity["commit_sha"],
+                              BUILD_NUMBER=str(identity["build_number"]))
+            requested_viewport = identity["viewport"]
         record = build_stability_record(
             results,
             result_path,
@@ -147,7 +163,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             write_run_json(record, result_path.parent, "stability_record.json")
         else:
             atomic_write_json(record_path, record)
-        if not args.defer_history and context is None:
+        if not args.defer_history and context is None and record.get("eligible") is True:
             write_history_record(history_path, record)
     except OSError as exc:
         print(f"Stability Record: write failed ({type(exc).__name__})")

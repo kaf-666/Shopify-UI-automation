@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 from pages.cart_drawer import CartDrawer
 from pages.collection_page import CollectionPage
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
+from utils.browser import PAGE_NAV_TIMEOUT_MS
 from utils.cart_cleanup import (CartStateUnavailable, cleanup_cart_session, read_cart, storefront_origin)
 from utils.config import resolve_url
 from utils.errors import sanitize_message
@@ -267,13 +268,27 @@ class ShoppingFlow:
         """打开第一个适用商品（确定性选择，最多尝试 N 个候选）。"""
         coll = self.state["coll"]
         total = self.state["product_count"]
-        for index in range(min(MAX_PRODUCT_CANDIDATES, total)):
+        candidates = min(MAX_PRODUCT_CANDIDATES, total)
+        collection_page = self.page
+        collection_url = self.page.url
+        for index in range(candidates):
             coll.open_product(index)
+            self.page = getattr(coll, "page", self.page)
             candidate = ProductPage(self.page, self.site_config, self.viewport)
             if self._suitable(candidate):
                 self.state["used_index"] = index
                 self.state["prod"] = candidate
                 return index, candidate
+            if index + 1 < candidates:
+                if self.page is not collection_page:
+                    self.page.close()
+                    self.page = collection_page
+                    coll.page = collection_page
+                if self.page.url != collection_url:
+                    from utils.request_boundary import run_navigation
+                    run_navigation(self.page, lambda: self.page.goto(
+                        collection_url, wait_until="domcontentloaded", timeout=PAGE_NAV_TIMEOUT_MS
+                    ))
         raise FlowError("PRODUCT_NOT_SUITABLE", "前 N 个商品均不满足颜色/尺码/加购条件")
 
     def validate_purchase_area(self, *, phase="legacy", timeout_ms=15_000) -> dict:

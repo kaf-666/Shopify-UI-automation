@@ -32,6 +32,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from utils.screenshots import capture_case_failure
 from utils.full_cleanup_contract import uses_v3, validate_progress, validate_operations
 from utils.run_context import load_context, validate_context_results, identity_valid
+from utils.mutation_fingerprint import sanitize_pathname
+from utils.smoke_case_contract import READONLY_CASE_IDS, WEBSITE_CASE_IDS
+from utils.errors import contains_sensitive_binding
 
 ARTIFACT_ROOTS = {
     "legacy": PROJECT_ROOT / "artifacts" / "smoke",
@@ -43,18 +46,7 @@ LEGACY_CASE_IDS = [
     "SMOKE-PLP-01", "SMOKE-PLP-02", "SMOKE-PDP-01", "SMOKE-PDP-02",
     "SMOKE-PDP-03", "SMOKE-PDP-04", "SMOKE-CART-01", "SMOKE-CART-02",
 ]
-WEBSITE_CASE_IDS = [
-    "WSMOKE-DIRECT-01", "WSMOKE-DIRECT-02", "WSMOKE-DIRECT-03",
-    "WSMOKE-SEARCH-01", "WSMOKE-SEARCH-02", "WSMOKE-SEARCH-03", "WSMOKE-SEARCH-04",
-    "WSMOKE-HOME-01", "WSMOKE-NAV-01", "WSMOKE-PLP-01", "WSMOKE-PDP-01",
-    "WSMOKE-CART-01", "WSMOKE-CART-02", "WSMOKE-CART-03", "WSMOKE-CHECKOUT-01",
-]
-WEBSITE_READONLY_CASE_IDS = (
-    "RSMOKE-DIRECT-01", "RSMOKE-DIRECT-02",
-    "RSMOKE-SEARCH-01", "RSMOKE-SEARCH-02", "RSMOKE-SEARCH-03", "RSMOKE-SEARCH-04",
-    "RSMOKE-HOME-01", "RSMOKE-NAV-01", "RSMOKE-PLP-01", "RSMOKE-PDP-01",
-    "RSMOKE-PDP-02",
-)
+WEBSITE_READONLY_CASE_IDS = READONLY_CASE_IDS
 
 SUITE_CASE_IDS = {
     "legacy": LEGACY_CASE_IDS,
@@ -171,7 +163,9 @@ def _validate_mutation_summary(value: object) -> bool:
         valid = isinstance(raw, int) and not isinstance(raw, bool) and raw >= 0
         ok_all = check(valid, f"mutation_summary {key}", "non-negative integer") and ok_all
         counts[key] = raw if valid else 0
-    expected_status = "PASS" if counts["unexpected_mutation"] == 0 and counts["high_risk_mutation"] == 0 else "FAIL"
+    audit_status = value.get("audit_status")
+    ok_all = check(audit_status in (None, "MISSING"), "mutation_summary audit_status") and ok_all
+    expected_status = "PASS" if counts["unexpected_mutation"] == 0 and counts["high_risk_mutation"] == 0 and audit_status != "MISSING" else "FAIL"
     ok_all = check(
         value.get("status") == expected_status,
         "mutation_summary status",
@@ -607,8 +601,21 @@ def validate_json(run_dir: Path, suite: str) -> bool:
 
         cases = vp.get("cases", [])
         partial = vp.get("partial", False)
-        ok_all = check(type(partial) is bool and (not partial or (suite == "website_smoke_v1" and fatal is not None and vp.get("status") == "FAIL")),
+        ok_all = check(type(partial) is bool and (not partial or (suite in {"website_smoke_v1", "website_smoke_readonly_v1"} and fatal is not None and vp.get("status") == "FAIL")),
                        f"{vp_name} partial requires fatal FAIL") and ok_all
+        if suite == "website_smoke_readonly_v1" and partial:
+            violations = vp.get("readonly_mutation_violations")
+            ok_all = check(isinstance(violations, list), f"{vp_name} readonly violations list") and ok_all
+            if isinstance(violations, list):
+                for violation in violations:
+                    valid = (isinstance(violation, dict)
+                             and set(violation) == {"method", "path", "case_id"}
+                             and violation.get("method") in {"POST", "PUT", "PATCH", "DELETE"}
+                             and isinstance(violation.get("path"), str)
+                             and violation["path"] == sanitize_pathname(violation["path"])
+                             and "?" not in violation["path"] and "#" not in violation["path"]
+                             and violation.get("case_id") in (None, *expected_ids))
+                    ok_all = check(valid, f"{vp_name} readonly violation safe shape") and ok_all
         if suite == "website_smoke_v1":
             unsafe = (any((vp.get(k) or {}).get("status") != "PASS" for k in ("pre_clean", "cleanup"))
                       or (vp.get("mutation_summary") or {}).get("status", "PASS") != "PASS"
@@ -677,6 +684,7 @@ def validate_json(run_dir: Path, suite: str) -> bool:
     # Security: values / local paths must not enter artifacts. Header names may
     # occur in diagnostics, but known secret sources and local binding markers may not.
     blob = json.dumps(data, ensure_ascii=False)
+    ok_all = check(not contains_sensitive_binding(blob), "JSON contains no Signed Request binding") and ok_all
     forbidden = [
         ".shopify-monitor",
         "C:\\Users\\",
@@ -693,8 +701,8 @@ def validate_json(run_dir: Path, suite: str) -> bool:
 class _FakePage:
     """离线测试 screenshot helper，不启动浏览器也能覆盖文件隔离逻辑。"""
 
-    def screenshot(self, path: str, full_page: bool = False):
-        Path(path).write_bytes(b"synthetic screenshot")
+    def screenshot(self, full_page: bool = False):
+        return b"synthetic screenshot"
 
 
 def validate_screenshot_helper() -> bool:

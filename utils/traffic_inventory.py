@@ -778,10 +778,14 @@ class TrafficInventory:
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
+        from utils.safe_artifact_write import write_run_json, write_run_text
+        if path.parent.name != "traffic":
+            raise ValueError("ARTIFACT_WRITE_REJECTED")
+        root, relative = path.parent.parent, f"traffic/{path.name}"
+        if path.suffix == ".json":
+            write_run_json(json.loads(text), root, relative)
+        else:
+            write_run_text(text, root, relative)
 
     def write_artifacts(self, traffic_dir: Path) -> dict:
         """Finalize and atomically persist sanitized JSONL/JSON/text artifacts."""

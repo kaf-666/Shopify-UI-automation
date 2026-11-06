@@ -39,6 +39,7 @@ from __future__ import annotations
 from utils.cart_cleanup import cleanup_report
 
 import time
+import re
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -57,6 +58,7 @@ from utils.search_url_diagnostics import (
     write_search_home_url_diagnostic,
 )
 from utils.screenshots import capture_case_failure
+from utils.readonly_mutation_guard import missing_transactional_mutation_summary
 
 STATUS_PASS = "PASS"
 STATUS_FAIL = "FAIL"
@@ -64,6 +66,26 @@ STATUS_BLOCKED = "BLOCKED"
 
 
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
+
+
+def checkout_variant_matches(variant: str, color: str, size: str) -> tuple[bool, bool]:
+    """Compare complete checkout option values; ambiguous text fails closed."""
+    text = normalize(variant)
+    expected_color, expected_size = normalize(color), normalize(size)
+    parts = re.split(r"\s+size\s*:\s*", text, maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) != 2:
+        parts = re.split(r"\s+/\s+", text, maxsplit=1)
+    if len(parts) != 2:
+        # Mobile checkout can concatenate adjacent text nodes without a space.
+        # Accept only the exact expected color followed by the case-sensitive
+        # Size label; the complete remaining value must still equal the size.
+        prefix = expected_color + "Size:"
+        if not expected_color or not text.startswith(prefix):
+            return False, False
+        return True, bool(expected_size) and normalize(text[len(prefix):]).casefold() == expected_size.casefold()
+    actual_color = re.sub(r"^color\s*:\s*", "", parts[0], flags=re.IGNORECASE)
+    return (bool(expected_color) and normalize(actual_color).casefold() == expected_color.casefold(),
+            bool(expected_size) and normalize(parts[1]).casefold() == expected_size.casefold())
 
 
 class WebsiteSmokeV1Runner:
@@ -481,15 +503,7 @@ class WebsiteSmokeV1Runner:
         """Return the transactional mutation audit for this viewport."""
         if self._mutation_policy is not None:
             return self._mutation_policy.summary()
-        return {
-            "mode": "TRANSACTIONAL_SAFE",
-            "status": "PASS",
-            "expected_mutation": 0,
-            "unexpected_mutation": 0,
-            "high_risk_mutation": 0,
-            "blocked_mutation": 0,
-            "by_path": [],
-        }
+        return missing_transactional_mutation_summary()
 
     # -------------------------------------------------------------------- API
     def run_all(self) -> List[CaseResult]:
@@ -591,7 +605,17 @@ class WebsiteSmokeV1Runner:
         """Direct PDP Variant + Add To Cart：变体可选、真实加购、抽屉打开。"""
         try:
             color = self.flow.select_color()
+        except FlowError:
+            raise
+        except Exception as exc:
+            raise FlowError("DIRECT_PDP_COLOR_SELECTION_FAILURE", f"{type(exc).__name__}: {exc}") from exc
+        try:
             size = self.flow.select_size()
+        except FlowError:
+            raise
+        except Exception as exc:
+            raise FlowError("DIRECT_PDP_SIZE_SELECTION_FAILURE", f"{type(exc).__name__}: {exc}") from exc
+        try:
             self.flow.add_to_cart()
             self.flow.capture_cart_state()
         except FlowError as exc:
@@ -794,6 +818,9 @@ class WebsiteSmokeV1Runner:
         coll = self.state["coll"]
         try:
             url = coll.open_product(0)
+            actual_page = getattr(coll, "page", self.page)
+            if actual_page is not self.page:
+                self._adopt_business_page(actual_page)
         except Exception as exc:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         if "/products/" not in url:
@@ -951,8 +978,8 @@ class WebsiteSmokeV1Runner:
                 raise FlowError("CHECKOUT_QUANTITY_MISMATCH", "quantity unreadable and count != 1")
             qty_detail = "IMPLICIT_SINGLE_ITEM"
         variant = checkout.get_product_variant(0)
-        color_ok = self.flow.state["color"].casefold() in variant.casefold()
-        size_ok = self.flow.state["size"].casefold() in variant.casefold()
+        color_ok, size_ok = checkout_variant_matches(
+            variant, self.flow.state["color"], self.flow.state["size"])
         if not (color_ok and size_ok):
             raise FlowError(
                 "CHECKOUT_VARIANT_MISMATCH",

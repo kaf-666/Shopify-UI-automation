@@ -7,11 +7,27 @@
 from __future__ import annotations
 
 import time
+import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import List, Optional
 
 from utils.errors import CliConfigError, sanitize_message
 from utils.result import RunResult, ResultWriteError, ViewportResult, iso_now, write_results_json
+from utils.safe_artifact_write import write_run_json
+
+_fatal_context = ContextVar("suite_fatal_context", default=None)
+_guard_active = ContextVar("suite_guard_active", default=False)
+
+
+def register_fatal_context(*, artifact_dir, run_id, site, suite, base_url="", viewports=None,
+                           started_at=None, started=None, execution_context=None):
+    """Remember the actual run identity, only inside a guarded CLI invocation."""
+    if _guard_active.get():
+        _fatal_context.set(dict(artifact_dir=Path(artifact_dir), run_id=run_id, site=site,
+                               suite=suite, base_url=base_url, viewports=viewports,
+                               started_at=started_at, started=started,
+                               execution_context=execution_context))
 
 
 def exit_code_for_exception(exc: BaseException) -> int:
@@ -41,6 +57,8 @@ def write_fatal_results(
     runtime: Optional[dict] = None,
     exc: Optional[BaseException] = None,
     classification: Optional[str] = None,
+    suite: str = "infrastructure",
+    execution_context: Optional[dict] = None,
 ) -> bool:
     """写入 framework fatal 结果；artifact 目录不可用时由调用方打印 console。"""
     viewports = list(viewports or [])
@@ -64,9 +82,12 @@ def write_fatal_results(
             "classification": classification or exception_classification(exc or RuntimeError()),
             "message": sanitize_message(exc or "framework fatal error"),
         },
+        execution_context=execution_context,
     )
     try:
-        write_results_json(result.to_dict(), artifact_dir / "results.json")
+        write_run_json(result.to_dict(), artifact_dir, "results.json")
+        from utils.run_summary import write_summary
+        write_summary(result.to_dict(), artifact_dir, suite=suite)
         return True
     except ResultWriteError as write_exc:
         print(f"RESULT_WRITE_FAILURE: {sanitize_message(write_exc)}")
@@ -82,6 +103,8 @@ def report_fatal(exc: BaseException) -> int:
 
 def guarded_main(main_func, argv=None) -> int:
     """CLI 入口保护层：未捕获配置异常统一 Exit 2，其他异常 Exit 1。"""
+    active_token = _guard_active.set(True)
+    context_token = _fatal_context.set(None)
     try:
         return main_func(argv)
     except SystemExit:
@@ -91,15 +114,24 @@ def guarded_main(main_func, argv=None) -> int:
         # CLI entry, preserve the fatal result contract even when their legacy
         # orchestration code did not reach its normal JSON write block.
         try:
-            root = main_func.__globals__.get("ARTIFACT_ROOT")
-            if root:
+            known = _fatal_context.get()
+            if known:
+                write_fatal_results(**known, exc=exc)
+            else:
+                root = main_func.__globals__.get("ARTIFACT_ROOT")
+                if root is None:
+                    return report_fatal(exc)
                 root = Path(root)
-                run_id = f"fatal_{time.strftime('%Y%m%d_%H%M%S')}"
-                artifact_dir = root / run_id
-                artifact_dir.mkdir(parents=True, exist_ok=True)
+                run_id = f"fatal_{uuid.uuid4().hex}"
+                from utils.run_context import confined_path
+                artifact_dir = confined_path(f"infrastructure/{run_id}", root, directory=True)
+                artifact_dir.mkdir(parents=True, exist_ok=False)
                 write_fatal_results(artifact_dir, run_id, exc=exc)
         except Exception:
             # The console classification remains authoritative if artifact
             # creation itself is unavailable.
             pass
         return report_fatal(exc)
+    finally:
+        _fatal_context.reset(context_token)
+        _guard_active.reset(active_token)

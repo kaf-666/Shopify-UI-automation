@@ -47,7 +47,7 @@ def residual_cart_items(runtime) -> int:
     policy = runtime.access_policy
     headers = policy.request_headers(CART_JS) if policy else {}
     try:
-        resp = runtime.context.request.get(CART_JS, headers=headers, timeout=15000)
+        resp = runtime.context.request.get(CART_JS, headers=headers, timeout=15000, max_redirects=0)
         if resp.status == 200:
             return int(resp.json().get("item_count", 0))
         return -1

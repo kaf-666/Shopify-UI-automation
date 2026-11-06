@@ -1,5 +1,6 @@
 # Python
 .venv/
+.venv-ci/
 venv/
 __pycache__/
 *.py[cod]
@@ -12,6 +13,7 @@ __pycache__/
 
 # Runtime artifacts
 artifacts/
+output/
 playwright-report/
 test-results/
 screenshots/

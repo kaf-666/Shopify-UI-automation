@@ -290,7 +290,8 @@ class CartDrawer(BasePage):
         btn = self.checkout_button()
         if not (btn.count() and btn.is_visible() and btn.is_enabled()):
             raise RuntimeError("standard checkout button not available")
-        btn.click()
+        from utils.request_boundary import run_navigation
+        run_navigation(self.page, btn.click)
 
     # ------------------------------------------------------------ 数量控件
     def quantity_input(self, index: int = 0):

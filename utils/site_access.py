@@ -143,21 +143,18 @@ class SignedRequestPolicy(SiteAccessPolicy):
         self.stats = {"injected": 0, "untouched": 0}
 
     def _host_allowed(self, url: str) -> bool:
-        host = (urlparse(url).hostname or "").lower()
-        return host in self._allowed_hosts
+        try:
+            parsed = urlparse(url)
+            return (parsed.scheme == "https" and not parsed.username and not parsed.password
+                    and parsed.port in (None, 443)
+                    and (parsed.hostname or "").lower() in self._allowed_hosts)
+        except ValueError:
+            return False
 
     def attach(self, context) -> None:
-        """对本 context 每个请求做路由级注入（仅白名单域名）。"""
-
-        def handler(route):
-            if self._host_allowed(route.request.url):
-                self.stats["injected"] += 1
-                route.continue_(headers={**route.request.headers, **self._headers})
-            else:
-                self.stats["untouched"] += 1
-                route.continue_()
-
-        context.route("**/*", handler)
+        """Inject only through the single-hop transport; never auto-redirect."""
+        from utils.request_boundary import ensure_request_boundary
+        ensure_request_boundary(context).access_policy = self
 
     def request_headers(self, url: str) -> dict:
         """返回 url 对应的签名请求头——非白名单域名返回空字典。"""
