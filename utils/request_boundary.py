@@ -353,8 +353,10 @@ class RequestBoundary:
                    if any(key.lower() == name for key in request.headers)}
         headers = {**cleared, **clean, **(policy.request_headers(request.url) if signed else {})}
         response = None
+        transport_phase = "FETCH"
         try:
             response = route.fetch(headers=headers, max_redirects=0, max_retries=0, timeout=15000)
+            transport_phase = "RESPONSE"
             if response.status not in REDIRECTS:
                 route.fulfill(response=response)
                 return
@@ -454,7 +456,12 @@ class RequestBoundary:
                                                   "closing": self.closing,
                                                   "method": request.method if request.method in {
                                                       "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "UNKNOWN",
-                                                  "path": fingerprint["sanitized_path"]})
+                                                  "path": fingerprint["sanitized_path"],
+                                                  "host_class": fingerprint["host_class"],
+                                                  "resource_type": request.resource_type if request.resource_type in {
+                                                      "document", "stylesheet", "script", "image", "font", "xhr", "fetch", "other",
+                                                      "media", "manifest", "texttrack", "eventsource", "websocket"} else "UNKNOWN",
+                                                  "phase": transport_phase})
             try:
                 route.abort()
             except Exception:

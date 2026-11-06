@@ -50,6 +50,10 @@ def test_unknown_transport_errors_still_fail_during_shutdown_without_printing_va
     with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
         boundary.assert_clean()
     assert "SECRET" not in str(boundary.summary())
+    diagnostic = boundary.summary()["transport_errors"][0]
+    assert diagnostic["host_class"] == "FIRST_PARTY"
+    assert diagnostic["resource_type"] == "fetch"
+    assert diagnostic["phase"] == "FETCH"
 
 
 def test_shutdown_cancellation_does_not_erase_a_previous_safety_failure():
