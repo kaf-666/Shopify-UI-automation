@@ -16,6 +16,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from platform import python_version
 from typing import Any, Iterable, Optional
+from utils.errors import contains_sensitive_binding
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEBSITE_ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-v1"
@@ -420,7 +421,7 @@ def is_record_eligible(record: dict) -> bool:
     if not str(record.get("commit_sha") or "").strip():
         return False
     if "eligible" in record:
-        return bool(record.get("eligible")) and record.get("viewport") == "both"
+        return record.get("eligible") is True and record.get("viewport") == "both"
     return record.get("viewport") == "both" and record.get("suite") == "website-smoke-v1"
 
 
@@ -546,13 +547,15 @@ def summarize_records(
         mixed_sites_ignored = 0
 
     scoped_records.sort(key=_record_sort_key)
-    commits = _record_commits(scoped_records)
+    qualifying_records = [record for record in scoped_records if is_record_eligible(record)]
+    commits = _record_commits(qualifying_records)
+    latest_run = scoped_records[-1] if scoped_records else None
     requested_baseline = str(baseline_commit or "").strip()
     if requested_baseline:
         baseline = requested_baseline
     else:
         baseline = ""
-        for record in reversed(scoped_records):
+        for record in reversed(qualifying_records):
             candidate = str(record.get("commit_sha") or "").strip()
             if candidate:
                 baseline = candidate
@@ -560,7 +563,7 @@ def summarize_records(
 
     baseline_records = [
         record
-        for record in scoped_records
+        for record in qualifying_records
         if str(record.get("commit_sha") or "").strip() == baseline
     ]
     eligible = [record for record in baseline_records if is_record_eligible(record)]
@@ -583,6 +586,14 @@ def summarize_records(
         "target_builds": target,
         "records": selected,
         "status": status,
+        # Execution health and the historical business window have separate
+        # identities: a fatal run on a new SHA cannot inherit the old STABLE.
+        "latest_execution": ({
+            "commit_sha": str(latest_run.get("commit_sha") or ""),
+            "run_id": str(latest_run.get("run_id") or ""),
+            "eligible": is_record_eligible(latest_run),
+            "jenkins_result": str(latest_run.get("jenkins_result") or "UNKNOWN"),
+        } if latest_run else None),
     }
 
 
@@ -697,6 +708,8 @@ def serialize_without_forbidden_markers(value: Any) -> str:
 
 def contains_forbidden_marker(value: Any) -> Optional[str]:
     blob = serialize_without_forbidden_markers(value)
+    if contains_sensitive_binding(blob):
+        return "SHOPIFY_SIGNATURE_BINDING"
     for marker in FORBIDDEN_MARKERS:
         if marker in blob:
             return marker

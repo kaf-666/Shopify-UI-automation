@@ -42,6 +42,14 @@ SENSITIVE_ENV_NAMES = (
 SIGNED_REQUEST_ENV_NAME_RE = re.compile(
     r"(?:^|_)SHOPIFY_SIGNATURE(?:_INPUT|_AGENT)?$", flags=re.IGNORECASE
 )
+SIGNED_REQUEST_BINDING_RE = re.compile(
+    r"\b(?:[A-Z][A-Z0-9_]*_)?SHOPIFY_SIGNATURE(?:_INPUT|_AGENT)?\b[\"']?\s*[:=]", re.IGNORECASE
+)
+
+
+def contains_sensitive_binding(text: str) -> bool:
+    """Recognize a credential assignment even when its value is absent from env."""
+    return bool(SIGNED_REQUEST_BINDING_RE.search(text))
 
 
 def sensitive_env_names(environ=None) -> tuple[str, ...]:
