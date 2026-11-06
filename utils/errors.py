@@ -83,6 +83,12 @@ def sanitize_message(message: object) -> str:
     text = re.sub(r"(https?://|socks5://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text, flags=re.I)
     text = re.sub(r"(https?://|socks5://)[^\s/@]+@", r"\1[REDACTED]@", text, flags=re.I)
 
+    # Navigation returns can append opaque session/auth parameters. Case
+    # details and Playwright exceptions must retain only the endpoint, even
+    # when the value is not an environment secret or the URL is truncated.
+    text = re.sub(r"(https?://[^\s'\"<>?#]+)[?#][^\s'\"<>]*",
+                  r"\1?[REDACTED_QUERY]", text, flags=re.I)
+
     # 避免 secret_file / 用户目录等本机绑定进入 results.json；不要把
     # 正常的 https:// URL 的斜杠误识别为本机路径。
     text = re.sub(r"(?i)(?<![A-Za-z])[A-Z]:[\\/][^\s'\"\n]+", "[REDACTED_PATH]", text)
