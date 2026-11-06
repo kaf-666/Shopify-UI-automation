@@ -69,6 +69,8 @@ def servers():
                 target = query.get("target", ["/measurement/1p-conversion/"])[0]
             elif path == "/pagead/viewthroughconversion/123456789/":
                 target = "/pagead/1p-conversion/123456789/"
+            elif path == "/pagead/1p-conversion/123456789/":
+                target = "/.well-known/private-click-measurement/trigger-attribution/02/01"
             elif path in {"/cart/add.js", "/readonly-hop"}:
                 target = "/account/login" if path == "/cart/add.js" else "/cart/add.js"
             elif path in {"/start", "/checkout", "/localization"}:
@@ -372,11 +374,12 @@ def test_script_navigation_is_finished_without_replaying_next_ui(context, server
 
 @pytest.mark.parametrize('status',[302,303])
 @pytest.mark.parametrize('signed',[False,True])
-@pytest.mark.parametrize('family',['measurement','pagead'])
+@pytest.mark.parametrize('family',['measurement','pagead','private_click'])
 def test_verified_conversion_return_is_discarded_without_a_second_request(context,servers,monkeypatch,status,signed,family):
     from utils import request_boundary
     origin,seen=servers
     original=request_boundary.is_verified_conversion_return
+    original_private=request_boundary.is_verified_private_click_return
     # Preserve the real protocol checks; replace only this TLS fixture's origin.
     def fixture_conversion(request,status,target):
         from types import SimpleNamespace
@@ -388,14 +391,21 @@ def test_verified_conversion_return_is_discarded_without_a_second_request(contex
             url=request.url.replace(origin,source_host,1))
         return original(proxy,status,target.replace(origin,'https://www.google.com',1))
     monkeypatch.setattr(request_boundary,'is_verified_conversion_return',fixture_conversion)
+    def fixture_private(request,status,target):
+        from types import SimpleNamespace
+        proxy=SimpleNamespace(method=request.method,resource_type=request.resource_type,
+            is_navigation_request=request.is_navigation_request,frame=request.frame,
+            url=request.url.replace(origin,'https://www.google.com',1))
+        return original_private(proxy,status,target.replace(origin,'https://www.google.com',1))
+    monkeypatch.setattr(request_boundary,'is_verified_private_click_return',fixture_private)
     transport=boundary(context,origin,ReadonlyMutationGuard(),signed=signed)
     page=context.new_page()
     transport.navigate(page,lambda:page.goto(origin+'/'))
     page.set_content('<iframe src="/frame"></iframe>')
     frame=page.frames[-1]
     frame.wait_for_load_state('domcontentloaded')
-    source_path='/pagead/viewthroughconversion/123456789/' if family=='pagead' else '/measurement/conversion'
-    target_path='/pagead/1p-conversion/123456789/' if family=='pagead' else '/measurement/1p-conversion/'
+    source_path={'pagead':'/pagead/viewthroughconversion/123456789/', 'private_click':'/pagead/1p-conversion/123456789/'}.get(family,'/measurement/conversion')
+    target_path={'pagead':'/pagead/1p-conversion/123456789/', 'private_click':'/.well-known/private-click-measurement/trigger-attribution/02/01'}.get(family,'/measurement/1p-conversion/')
     result=frame.evaluate("""async url=>{try {await fetch(url,{method:'POST',body:'opaque=SECRET'});return 'SENT'}catch{return 'BLOCKED'}}""",
                           origin+source_path+'?opaque=SECRET&status='+str(status))
     assert result=='BLOCKED'

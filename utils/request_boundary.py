@@ -81,6 +81,24 @@ def is_verified_conversion_return(request, status, target):
         return False
 
 
+def is_verified_private_click_return(request, status, target):
+    """Discard a narrowly identified measurement read without sending it."""
+    try:
+        source = urlsplit(request.url)
+        dest = urlsplit(target)
+        return (request.method == "POST" and status in {302, 303}
+                and request.resource_type in {"xhr", "fetch"}
+                and not request.is_navigation_request() and request.frame.parent_frame is not None
+                and _conversion_endpoint(request.url, "target") is not None
+                and source.scheme == dest.scheme == "https" and source.hostname == dest.hostname
+                and dest.hostname in MEASUREMENT_HOSTS and dest.port in {None, 443}
+                and not dest.username and not dest.password and not dest.fragment
+                and re.fullmatch(r"/\.well-known/private-click-measurement/trigger-attribution/[0-9]{2}/[0-9]{2}", dest.path) is not None
+                and len(target) <= 16384 and not any(ord(c) <= 32 or ord(c) == 127 for c in target))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def is_shop_bridge_target(url):
     """The observed Shop anonymous redirect endpoint; never a signing host."""
     try:
@@ -317,9 +335,11 @@ class RequestBoundary:
                 "target_host_class": destination.get("host_class"), "http_status": status,
                 "gating_failure": gating, "source_query_present": source["query_present"],
                 "frame_category": frame_category,
-                "source_service": "GOOGLE_MEASUREMENT" if _conversion_endpoint(request.url, "source") else "OTHER",
+                "source_service": "GOOGLE_MEASUREMENT" if (_conversion_endpoint(request.url, "source")
+                                                           or _conversion_endpoint(request.url, "target")) else "OTHER",
                 "target_service": ("SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else
-                                   "GOOGLE_MEASUREMENT" if target and _conversion_endpoint(target, "target") else "OTHER"),
+                                   "GOOGLE_MEASUREMENT" if target and (_conversion_endpoint(target, "target") or
+                                       _measurement_endpoint(target, {"/.well-known/private-click-measurement/trigger-attribution/02/01"})) else "OTHER"),
             })
         if not gating:
             # Preserve the blocked-response signal. A synthetic 2xx can make
@@ -400,7 +420,8 @@ class RequestBoundary:
                 self._reject(route, "LOCALIZATION_RETURN_READ_SUPPRESSED", target=target,
                              status=response.status, gating=False)
                 return
-            if not signed and is_verified_conversion_return(request, response.status, target):
+            if not signed and (is_verified_conversion_return(request, response.status, target)
+                               or is_verified_private_click_return(request, response.status, target)):
                 self._reject(route, "GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED", target=target,
                              status=response.status, gating=False)
                 return
