@@ -2,7 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit, parse_qs, urlencode
 import ssl
 
 import pytest
@@ -15,7 +15,12 @@ from utils.site_access import SignedRequestPolicy
 
 @pytest.fixture
 def servers():
-    seen = []
+    class RequestLog(list):
+        bridge_headers = None
+        def __init__(self):
+            super().__init__()
+            self.posts = []
+    seen = RequestLog()
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
@@ -25,8 +30,22 @@ def servers():
             self.rfile.read(int(self.headers.get("Content-Length", "0")))
             path = urlsplit(self.path).path
             seen.append((self.command, path, self.headers.get("Signature"), self.headers.get("Cookie")))
+            if self.command == "POST":
+                seen.posts.append((path, {k.lower(): v for k,v in self.headers.items()}))
             query = parse_qs(urlsplit(self.path).query)
-            if path == "/cross":
+            if path == "/products/bridge":
+                target = None if "synthetic_session=present" in (self.headers.get("Cookie") or "") else (
+                    f"https://localhost:{tls.server_port}/accounts/sur?" + urlencode({
+                        "return_to": f"https://127.0.0.1:{tls.server_port}{self.path}",
+                        "mode": query.get("mode", ["ok"])[0],
+                    }))
+            elif path == "/accounts/sur":
+                seen.bridge_headers = {k.lower(): v for k, v in self.headers.items()}
+                mode = query.get("mode", ["ok"])[0]
+                target = {"account": "/account/login", "different": "/products/different",
+                          "loop": self.path, "terminal": None,
+                          "cross": "https://example.invalid/forbidden"}.get(mode, query["return_to"][0])
+            elif path == "/cross":
                 target = f"https://localhost:{tls.server_port}/forbidden"
             elif path == "/downgrade":
                 target = f"http://127.0.0.1:{plain.server_port}/forbidden"
@@ -202,6 +221,80 @@ def test_untrusted_initial_request_strips_signature_case_variants(context, serve
     target = origin.replace("127.0.0.1", "localhost") + "/"
     transport.navigate(page, lambda: page.goto(target))
     assert seen and all(signature is None for _, _, signature, _ in seen)
+
+
+def enable_fixture_shop_bridge(monkeypatch, origin):
+    from utils import request_boundary
+    bridge_origin = origin.replace("127.0.0.1", "localhost")
+    monkeypatch.setattr(request_boundary.RequestBoundary, "_new_bridge_context",
+                        lambda self: self.context.browser.new_context(ignore_https_errors=True))
+    monkeypatch.setattr(request_boundary, "is_shop_bridge_target", lambda url:
+                        urlsplit(url).scheme == "https" and urlsplit(url).netloc == urlsplit(bridge_origin).netloc
+                        and urlsplit(url).path == "/accounts/sur")
+
+
+def test_unsigned_initial_post_clears_signing_context_defaults(context, servers):
+    origin, seen = servers
+    transport = boundary(context, origin)
+    context.set_extra_http_headers({"sIgNaTuRe": "SECRET", "Signature-Input": "SECRET", "Signature-Agent": "SECRET"})
+    page = context.new_page()
+    transport.navigate(page, lambda: page.goto(origin + "/"))
+    page.evaluate("async url => (await fetch(url,{method:'POST'})).status", origin.replace("127.0.0.1", "localhost") + "/")
+    assert len(seen.posts) == 1 and seen.posts[0][0] == "/"
+    for header in ("signature", "signature-input", "signature-agent"):
+        assert not seen.posts[0][1].get(header)
+
+
+def test_shop_bridge_omits_all_credentials_and_returns_only_to_source(context, servers, monkeypatch):
+    origin, seen = servers
+    enable_fixture_shop_bridge(monkeypatch, origin)
+    context.add_cookies([{"name": "shop_private", "value": "SECRET", "url": origin.replace("127.0.0.1", "localhost")}])
+    context.set_extra_http_headers({"Signature-Input": "SECRET", "Signature-Agent": "SECRET", "Authorization": "SECRET"})
+    transport = boundary(context, origin)
+    page = context.new_page()
+    source = origin + "/products/bridge?source=private"
+    transport.navigate(page, lambda: page.goto(source))
+    assert page.url == source and page.get_by_role("button", name="Checkout").count() == 1
+    assert seen.bridge_headers is not None
+    for header in ("signature", "signature-input", "signature-agent", "authorization", "referer", "origin"):
+        assert header not in seen.bridge_headers
+    assert not seen.bridge_headers.get("cookie")
+    assert [(m,p) for m,p,_,_ in seen if p == "/accounts/sur"] == [("GET", "/accounts/sur")]
+    assert len([row for row in seen if row[1] == "/products/bridge"]) == 2
+    transport.assert_clean()
+    report = str(transport.summary())
+    assert "SECRET" not in report and "private" not in report
+    assert transport.summary()["bridge_events"][0]["response_status"] == 302
+
+
+@pytest.mark.parametrize("mode", ["account", "different", "cross", "loop", "terminal"])
+def test_shop_bridge_cannot_leave_the_exact_return_or_render_shop(context, servers, monkeypatch, mode):
+    origin, seen = servers
+    enable_fixture_shop_bridge(monkeypatch, origin)
+    transport = boundary(context, origin)
+    page = context.new_page()
+    with pytest.raises(RequestBoundaryError, match="REDIRECT_ORIGIN_DENIED"):
+        transport.navigate(page, lambda: page.goto(origin + "/products/bridge?mode=" + mode))
+    assert not any(p in {"/account/login", "/products/different", "/forbidden"} for _,p,_,_ in seen)
+    assert page.get_by_role("button", name="Checkout").count() == 0
+    assert len([row for row in seen if row[1] == "/accounts/sur"]) == 1
+
+
+@pytest.mark.parametrize("url,allowed", [
+    ("https://shop.app/accounts/sur?opaque=secret", True),
+    ("https://shop.app:443/accounts/sur", True),
+    ("http://shop.app/accounts/sur", False),
+    ("https://shop.app:444/accounts/sur", False),
+    ("https://user@shop.app/accounts/sur", False),
+    ("https://shop.app.attacker.invalid/accounts/sur", False),
+    ("https://shop.app/accounts/login", False),
+    ("https://shop.app/accounts/sur/", False),
+    ("https://shop.app/accounts/sur#fragment", False),
+    ("https://shop.app/accounts/sur?bad= ", False),
+])
+def test_shop_bridge_exact_endpoint(url, allowed):
+    from utils.request_boundary import is_shop_bridge_target
+    assert is_shop_bridge_target(url) is allowed
 
 
 def test_subresource_redirect_fails_without_sending_next_hop(context, servers):

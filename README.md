@@ -22,12 +22,17 @@ Protected browser requests use a single-hop transport with automatic redirects
 and retries disabled. Redirect targets are checked before sending. Main-frame
 GET redirects (including POST-to-GET Checkout redirects) resume through the
 navigation coordinator; redirected POST/PUT/PATCH/DELETE, subresource redirects,
-and redirects outside the permitted signed HTTPS origin set fail closed with
+and other redirects outside the permitted signed HTTPS origin set fail closed with
 `REQUEST_BOUNDARY_FAILURE`. API cart reads/cleanup reject redirects separately.
 A verified same-origin locale form POST keeps its actual cookie updates; its
 matching return-page GET is blocked as a network failure and recorded
 as `LOCALIZATION_RETURN_READ_SUPPRESSED`, a non-gating side effect. Unknown forms,
 different return targets, and account/payment/cart-writing redirects still fail.
+The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
+path: no signing, authorization, referral headers or cookies are sent; only 3xx
+responses returning to the exact original storefront URL are accepted. Shop HTML
+is never rendered, and Shop is never added to the signing allowlist. Unknown
+endpoints, different return URLs, loops and terminal HTML responses fail closed.
 The local Chromium/WebKit regression uses synthetic HTTP(S) servers and dummy
 credentials; candidate Jenkins and live storefront acceptance are separate gates.
 
@@ -58,9 +63,8 @@ existing credentials into the process environment or Jenkins credentials binding
 
 Each prefix requires `SIGNATURE`, `SIGNATURE_INPUT`, `SIGNATURE_AGENT`. Values,
 cookies and signing keys must never be committed or printed. Initial requests are
-signed only for the exact HTTPS hosts in `configs/sites/<site>.yaml`; browser-followed
-cross-host redirects can carry these headers onward. This redirect boundary remains
-unresolved and must be considered before running signed storefront traffic. Proxy defaults to off;
+signed only for the exact HTTPS hosts in `configs/sites/<site>.yaml`; protected
+redirects are handled by the boundary described above. Proxy defaults to off;
 optional settings are `SHOPIFY_PROXY_SERVER`, `SHOPIFY_PROXY_USERNAME`,
 `SHOPIFY_PROXY_PASSWORD`, and `SHOPIFY_PROXY_ENABLED`. Keep values external.
 Profiles declare suite capabilities, navigation and supported product options;

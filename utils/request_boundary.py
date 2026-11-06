@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 import json
+import re
 from weakref import WeakSet
 from urllib.parse import urljoin, urlsplit, urldefrag
 from utils.mutation_fingerprint import safe_endpoint_fingerprint
@@ -18,6 +19,19 @@ from utils.localization_request_policy import is_verified_localization_return
 MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
+STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
+
+
+def is_shop_bridge_target(url):
+    """The observed Shop anonymous redirect endpoint; never a signing host."""
+    try:
+        parsed = urlsplit(url)
+        return (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname == "shop.app"
+                and parsed.port in {None, 443} and not parsed.username and not parsed.password
+                and parsed.path == "/accounts/sur" and not parsed.fragment
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except (ValueError, TypeError):
+        return False
 
 
 class RequestBoundaryError(RuntimeError):
@@ -59,6 +73,7 @@ class RequestBoundary:
         self.settled = WeakSet()
         self.failures = []
         self.events = []
+        self.bridge_events = []
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -81,7 +96,69 @@ class RequestBoundary:
     def summary(self):
         return {"status": "FAIL" if self.failures or self.pending else "PASS",
                 "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
-                "events": [dict(event) for event in self.events]}
+                "events": [dict(event) for event in self.events],
+                "bridge_events": [dict(event) for event in self.bridge_events]}
+
+    def _anonymous_shop_return(self, route, target):
+        """Read only the fixed bridge, returning only to the exact source URL.
+
+        No Shop document is rendered or script executed, and no mutation is
+        issued. A non-redirect bridge response fails closed. Only the original
+        storefront response can update the storefront context's cookie jar.
+        """
+        request = route.request
+        if request.method != "GET" or not request.is_navigation_request():
+            return None
+        try:
+            if request.frame.parent_frame is not None:
+                return None
+        except Exception:
+            return None
+        if not STOREFRONT_READ_PATH.fullmatch(urlsplit(request.url).path):
+            return None
+        deadline = time.monotonic() + 15000 / 1000
+        visited = set()
+        # Do not copy Origin, Referer, Cookie, authorization, signing headers,
+        # request bodies, or arbitrary page/SDK headers to Shop.
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() in {"user-agent", "accept", "accept-language"}}
+        # APIRequestContext otherwise loads cookies from the shared jar.
+        headers["Cookie"] = ""
+        # route.fetch merges the browser context's default headers. Use a
+        # separate blank context so signing/authorization defaults cannot enter
+        # the bridge request. Its cookie jar is never exported to the storefront.
+        bridge_context = self._new_bridge_context()
+        try:
+            for _ in range(3):
+                if not is_shop_bridge_target(target) or target in visited or time.monotonic() >= deadline:
+                    return None
+                visited.add(target)
+                event = {"service": "SHOP_APP", "method": "GET", "path": "/accounts/sur",
+                         "signature_headers": "OMITTED", "response_status": None}
+                if len(self.bridge_events) < 100:
+                    self.bridge_events.append(event)
+                response = bridge_context.request.get(target, headers=headers,
+                                         max_redirects=0, max_retries=0,
+                                         timeout=max(1, int((deadline-time.monotonic())*1000)))
+                try:
+                    event["response_status"] = response.status
+                    if response.status not in REDIRECTS:
+                        return None
+                    location = response.headers.get("location")
+                    if not location or any(ord(c) <= 32 or ord(c) == 127 for c in location):
+                        return None
+                    following = urljoin(target, location)
+                    if self.access_policy._host_allowed(following) and urldefrag(following)[0] == urldefrag(request.url)[0]:
+                        return following
+                    target = following
+                finally:
+                    response.dispose()
+            return None
+        finally:
+            bridge_context.close()
+
+    def _new_bridge_context(self):
+        return self.context.browser.new_context(service_workers="block")
 
     def _reject(self, route, code, *, target=None, status=None, gating=True):
         if gating:
@@ -135,7 +212,11 @@ class RequestBoundary:
             route.continue_(headers=clean)
             self.settled.add(request)
             return
-        headers = {**clean, **(policy.request_headers(request.url) if signed else {})}
+        # fetch merges context defaults for omitted names. Empty overrides stop
+        # stale signing values from reappearing on an unsigned initial POST.
+        cleared = {name: "" for name in SIGNATURE_NAMES
+                   if any(key.lower() == name for key in request.headers)}
+        headers = {**cleared, **clean, **(policy.request_headers(request.url) if signed else {})}
         response = None
         try:
             response = route.fetch(headers=headers, max_redirects=0, max_retries=0, timeout=15000)
@@ -165,8 +246,11 @@ class RequestBoundary:
                 self._reject(route, "REDIRECT_MUTATION_DENIED", target=target, status=response.status)
                 return
             if signed and not policy._host_allowed(target):
-                self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
-                return
+                returned = self._anonymous_shop_return(route, target) if is_shop_bridge_target(target) else None
+                if returned is None:
+                    self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
+                    return
+                target = returned
             if (signed and request.resource_type in {"xhr", "fetch"}
                     and not request.is_navigation_request()
                     and is_verified_localization_return(request.url, response.status, target, request)):
