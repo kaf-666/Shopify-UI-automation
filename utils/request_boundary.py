@@ -148,7 +148,18 @@ class RequestBoundary:
                     if not location or any(ord(c) <= 32 or ord(c) == 127 for c in location):
                         return None
                     following = urljoin(target, location)
-                    if self.access_policy._host_allowed(following) and urldefrag(following)[0] == urldefrag(request.url)[0]:
+                    allowed_host = self.access_policy._host_allowed(following)
+                    fingerprint = safe_endpoint_fingerprint(following, "GET", self.access_policy._allowed_hosts)
+                    event.update(return_host_class=fingerprint["host_class"],
+                                 return_path=fingerprint["sanitized_path"],
+                                 return_query_present=fingerprint["query_present"],
+                                 return_relation="OTHER_ENDPOINT")
+                    source_parts, return_parts = urlsplit(request.url), urlsplit(following)
+                    if (source_parts.scheme, source_parts.netloc, source_parts.path) == (
+                            return_parts.scheme, return_parts.netloc, return_parts.path):
+                        event["return_relation"] = "SAME_ENDPOINT_DIFFERENT_QUERY"
+                    if allowed_host and urldefrag(following)[0] == urldefrag(request.url)[0]:
+                        event["return_relation"] = "EXACT_SOURCE"
                         return following
                     target = following
                 finally:

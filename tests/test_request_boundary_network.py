@@ -265,6 +265,7 @@ def test_shop_bridge_omits_all_credentials_and_returns_only_to_source(context, s
     report = str(transport.summary())
     assert "SECRET" not in report and "private" not in report
     assert transport.summary()["bridge_events"][0]["response_status"] == 302
+    assert transport.summary()["bridge_events"][0]["return_relation"] == "EXACT_SOURCE"
 
 
 @pytest.mark.parametrize("mode", ["account", "different", "cross", "loop", "terminal"])
