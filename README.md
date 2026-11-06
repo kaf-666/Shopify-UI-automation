@@ -30,7 +30,9 @@ as `LOCALIZATION_RETURN_READ_SUPPRESSED`, a non-gating side effect. Unknown form
 different return targets, and account/payment/cart-writing redirects still fail.
 The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
 path: no signing, authorization, referral headers or cookies are sent; only 3xx
-responses returning to the exact original storefront URL are accepted. Shop HTML
+responses returning to the same original storefront endpoint are accepted. Source
+query parameters must remain unchanged; bounded opaque additions stay in memory.
+Shop HTML
 is never rendered, and Shop is never added to the signing allowlist. Unknown
 endpoints, different return URLs, loops and terminal HTML responses fail closed.
 The local Chromium/WebKit regression uses synthetic HTTP(S) servers and dummy

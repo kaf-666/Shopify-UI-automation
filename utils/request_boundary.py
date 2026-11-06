@@ -11,7 +11,7 @@ import time
 import json
 import re
 from weakref import WeakSet
-from urllib.parse import urljoin, urlsplit, urldefrag
+from urllib.parse import urljoin, urlsplit, urldefrag, parse_qsl
 from utils.mutation_fingerprint import safe_endpoint_fingerprint
 from utils.localization_request_policy import is_verified_localization_return
 
@@ -30,6 +30,30 @@ def is_shop_bridge_target(url):
                 and parsed.port in {None, 443} and not parsed.username and not parsed.password
                 and parsed.path == "/accounts/sur" and not parsed.fragment
                 and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except (ValueError, TypeError):
+        return False
+
+
+def is_shop_storefront_return(source, target):
+    """Same safe endpoint, preserving source query pairs; opaque additions only."""
+    try:
+        before, after = urlsplit(source), urlsplit(target)
+        if (len(target) > 16384 or after.fragment
+                or any(ord(c) <= 32 or ord(c) == 127 for c in target)
+                or before.scheme != "https" or before.username or before.password
+                or (before.scheme, before.netloc, before.path) != (after.scheme, after.netloc, after.path)
+                or not STOREFRONT_READ_PATH.fullmatch(before.path)):
+            return False
+        original = parse_qsl(before.query, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
+        returned = parse_qsl(after.query, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
+        # Repeated names cannot ambiguously overwrite a variant or source key.
+        if len(dict(original)) != len(original) or len(dict(returned)) != len(returned):
+            return False
+        if not all(dict(returned).get(k) == v for k,v in original):
+            return False
+        return all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", k)
+                   and len(v) <= 8192 and not any(ord(c) < 32 or ord(c) == 127 for c in v)
+                   for k,v in returned)
     except (ValueError, TypeError):
         return False
 
@@ -100,7 +124,7 @@ class RequestBoundary:
                 "bridge_events": [dict(event) for event in self.bridge_events]}
 
     def _anonymous_shop_return(self, route, target):
-        """Read only the fixed bridge, returning only to the exact source URL.
+        """Read only the fixed bridge, returning only to the source endpoint.
 
         No Shop document is rendered or script executed, and no mutation is
         issued. A non-redirect bridge response fails closed. Only the original
@@ -158,9 +182,12 @@ class RequestBoundary:
                     if (source_parts.scheme, source_parts.netloc, source_parts.path) == (
                             return_parts.scheme, return_parts.netloc, return_parts.path):
                         event["return_relation"] = "SAME_ENDPOINT_DIFFERENT_QUERY"
-                    if allowed_host and urldefrag(following)[0] == urldefrag(request.url)[0]:
-                        event["return_relation"] = "EXACT_SOURCE"
+                    if allowed_host and is_shop_storefront_return(request.url, following):
+                        if urldefrag(following)[0] == urldefrag(request.url)[0]:
+                            event["return_relation"] = "EXACT_SOURCE"
+                        event["return_accepted"] = True
                         return following
+                    event["return_accepted"] = False
                     target = following
                 finally:
                     response.dispose()
@@ -262,6 +289,12 @@ class RequestBoundary:
                     self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
                     return
                 target = returned
+                for guard in self.guards:
+                    decision = _DecisionRoute(_RedirectRequest(request, target, method))
+                    guard._handle_route(decision)
+                    if not decision.allowed:
+                        self._reject(route, "REDIRECT_MUTATION_DENIED", target=target, status=response.status)
+                        return
             if (signed and request.resource_type in {"xhr", "fetch"}
                     and not request.is_navigation_request()
                     and is_verified_localization_return(request.url, response.status, target, request)):
@@ -318,6 +351,7 @@ class RequestBoundary:
         known_pages = set(self.context.pages)
         visited = set()
         result = None
+        resuming = False
         for _ in range(11):
             previous_errors = len(self.failures)
             remaining = max(1, int((deadline - time.monotonic()) * 1000))
@@ -346,6 +380,9 @@ class RequestBoundary:
                 if not self.pending:
                     if len(self.failures) > previous_errors:
                         raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None) from None
+                    if resuming:
+                        self.failures.append("RESUMED_NAVIGATION_FAILED")
+                        raise RequestBoundaryError("RESUMED_NAVIGATION_FAILED") from None
                     raise
             if len(self.failures) > previous_errors:
                 raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None)
@@ -374,6 +411,7 @@ class RequestBoundary:
             visited.add(key)
             remaining = max(1, int((deadline - time.monotonic()) * 1000))
             action = lambda: destination_page.goto(target, wait_until="domcontentloaded", timeout=remaining)
+            resuming = True
         self.failures.append("REDIRECT_LOOP_OR_LIMIT")
         raise RequestBoundaryError(self.failures[-1])
 

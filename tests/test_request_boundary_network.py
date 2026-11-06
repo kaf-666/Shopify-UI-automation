@@ -42,9 +42,13 @@ def servers():
             elif path == "/accounts/sur":
                 seen.bridge_headers = {k.lower(): v for k, v in self.headers.items()}
                 mode = query.get("mode", ["ok"])[0]
+                source = query["return_to"][0]
                 target = {"account": "/account/login", "different": "/products/different",
                           "loop": self.path, "terminal": None,
-                          "cross": "https://example.invalid/forbidden"}.get(mode, query["return_to"][0])
+                          "cross": "https://example.invalid/forbidden",
+                          "append": source + "&shop_return=OPAQUE_SECRET",
+                          "overwrite": source.replace("mode=overwrite", "mode=changed"),
+                          "duplicate": source + "&mode=changed"}.get(mode, source)
             elif path == "/cross":
                 target = f"https://localhost:{tls.server_port}/forbidden"
             elif path == "/downgrade":
@@ -245,16 +249,18 @@ def test_unsigned_initial_post_clears_signing_context_defaults(context, servers)
         assert not seen.posts[0][1].get(header)
 
 
-def test_shop_bridge_omits_all_credentials_and_returns_only_to_source(context, servers, monkeypatch):
+@pytest.mark.parametrize("mode", ["ok", "append"])
+def test_shop_bridge_omits_all_credentials_and_returns_only_to_source(context, servers, monkeypatch, mode):
     origin, seen = servers
     enable_fixture_shop_bridge(monkeypatch, origin)
     context.add_cookies([{"name": "shop_private", "value": "SECRET", "url": origin.replace("127.0.0.1", "localhost")}])
     context.set_extra_http_headers({"Signature-Input": "SECRET", "Signature-Agent": "SECRET", "Authorization": "SECRET"})
-    transport = boundary(context, origin)
+    transport = boundary(context, origin, ReadonlyMutationGuard())
     page = context.new_page()
-    source = origin + "/products/bridge?source=private"
+    source = origin + "/products/bridge?source=private&mode=" + mode
     transport.navigate(page, lambda: page.goto(source))
-    assert page.url == source and page.get_by_role("button", name="Checkout").count() == 1
+    assert page.url == source + ("&shop_return=OPAQUE_SECRET" if mode == "append" else "")
+    assert page.get_by_role("button", name="Checkout").count() == 1
     assert seen.bridge_headers is not None
     for header in ("signature", "signature-input", "signature-agent", "authorization", "referer", "origin"):
         assert header not in seen.bridge_headers
@@ -265,10 +271,10 @@ def test_shop_bridge_omits_all_credentials_and_returns_only_to_source(context, s
     report = str(transport.summary())
     assert "SECRET" not in report and "private" not in report
     assert transport.summary()["bridge_events"][0]["response_status"] == 302
-    assert transport.summary()["bridge_events"][0]["return_relation"] == "EXACT_SOURCE"
+    assert transport.summary()["bridge_events"][0]["return_accepted"] is True
 
 
-@pytest.mark.parametrize("mode", ["account", "different", "cross", "loop", "terminal"])
+@pytest.mark.parametrize("mode", ["account", "different", "cross", "loop", "terminal", "overwrite", "duplicate"])
 def test_shop_bridge_cannot_leave_the_exact_return_or_render_shop(context, servers, monkeypatch, mode):
     origin, seen = servers
     enable_fixture_shop_bridge(monkeypatch, origin)
@@ -296,6 +302,39 @@ def test_shop_bridge_cannot_leave_the_exact_return_or_render_shop(context, serve
 def test_shop_bridge_exact_endpoint(url, allowed):
     from utils.request_boundary import is_shop_bridge_target
     assert is_shop_bridge_target(url) is allowed
+
+
+@pytest.mark.parametrize("source,target,allowed", [
+    ("/products/a?variant=1", "/products/a?variant=1&opaque=secret", True),
+    ("/products/a?variant=1", "/products/a?opaque=secret", False),
+    ("/products/a?variant=1", "/products/a?variant=2", False),
+    ("/products/a?variant=1", "/products/a?variant=1&variant=2", False),
+    ("/products/a", "/products/b?opaque=secret", False),
+    ("/cart", "/cart?opaque=secret", False),
+    ("/account/login", "/account/login?opaque=secret", False),
+    ("/products/a", "/products/a?opaque=secret#fragment", False),
+    ("/products/a", "/products/a?opaque=%0Asecret", False),
+    ("/products/a", "/products/a?bad%20name=secret", False),
+])
+def test_shop_return_is_same_endpoint_with_preserved_unambiguous_query(source,target,allowed):
+    from utils.request_boundary import is_shop_storefront_return
+    assert is_shop_storefront_return("https://store.invalid"+source, "https://store.invalid"+target) is allowed
+
+
+def test_resumed_navigation_errors_do_not_expose_return_query(context, servers, monkeypatch):
+    origin, seen = servers
+    transport = boundary(context, origin)
+    page = context.new_page()
+    original_goto = page.goto
+    def failing_goto(url, **kwargs):
+        if urlsplit(url).path == "/landing":
+            raise RuntimeError("navigation failed at " + url)
+        return original_goto(url, **kwargs)
+    monkeypatch.setattr(page, "goto", failing_goto)
+    with pytest.raises(RequestBoundaryError, match="RESUMED_NAVIGATION_FAILED") as error:
+        transport.navigate(page, lambda: page.goto(origin + "/start?" + urlencode({"target":"/landing?opaque=SECRET"})))
+    assert "SECRET" not in str(error.value) and "SECRET" not in str(transport.summary())
+    assert not any(path == "/landing" for _,path,_,_ in seen)
 
 
 def test_subresource_redirect_fails_without_sending_next_hop(context, servers):
