@@ -24,3 +24,17 @@ def test_conversion_exception_is_exact_and_read_only(change):
     if change=='navigation':request.is_navigation_request=lambda:True
     if change=='main_frame':request.frame.parent_frame=None
     assert is_verified_conversion_return(request,status,target) is (change is None)
+
+
+@pytest.mark.parametrize('target,allowed', [
+    ('https://www.google.com/pagead/1p-conversion/123456789/?opaque=SECRET',True),
+    ('https://www.google.com/pagead/1p-conversion/987654321/',False),
+    ('https://untrusted.invalid/pagead/1p-conversion/123456789/',False),
+    ('https://www.google.com/cart/add.js',False),
+    ('http://www.google.com/pagead/1p-conversion/123456789/',False),
+])
+def test_pagead_return_requires_the_same_ad_id_and_exact_google_endpoint(target,allowed):
+    request=SimpleNamespace(url='https://googleads.g.doubleclick.net/pagead/viewthroughconversion/123456789/?opaque=SECRET',
+        method='POST',resource_type='fetch',is_navigation_request=lambda:False,
+        frame=SimpleNamespace(parent_frame=object()))
+    assert is_verified_conversion_return(request,302,target) is allowed

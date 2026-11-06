@@ -67,6 +67,8 @@ def servers():
                 target = f"https://dummy@127.0.0.1:{tls.server_port}/forbidden"
             elif path == "/measurement/conversion":
                 target = query.get("target", ["/measurement/1p-conversion/"])[0]
+            elif path == "/pagead/viewthroughconversion/123456789/":
+                target = "/pagead/1p-conversion/123456789/"
             elif path in {"/cart/add.js", "/readonly-hop"}:
                 target = "/account/login" if path == "/cart/add.js" else "/cart/add.js"
             elif path in {"/start", "/checkout", "/localization"}:
@@ -370,7 +372,8 @@ def test_script_navigation_is_finished_without_replaying_next_ui(context, server
 
 @pytest.mark.parametrize('status',[302,303])
 @pytest.mark.parametrize('signed',[False,True])
-def test_verified_conversion_return_is_discarded_without_a_second_request(context,servers,monkeypatch,status,signed):
+@pytest.mark.parametrize('family',['measurement','pagead'])
+def test_verified_conversion_return_is_discarded_without_a_second_request(context,servers,monkeypatch,status,signed,family):
     from utils import request_boundary
     origin,seen=servers
     original=request_boundary.is_verified_conversion_return
@@ -379,9 +382,10 @@ def test_verified_conversion_return_is_discarded_without_a_second_request(contex
         from types import SimpleNamespace
         if not request.url.startswith(origin+'/') or not target.startswith(origin+'/'):
             return False
+        source_host='https://googleads.g.doubleclick.net' if family=='pagead' else 'https://www.google.com'
         proxy=SimpleNamespace(method=request.method,resource_type=request.resource_type,
             is_navigation_request=request.is_navigation_request,frame=request.frame,
-            url=request.url.replace(origin,'https://www.google.com',1))
+            url=request.url.replace(origin,source_host,1))
         return original(proxy,status,target.replace(origin,'https://www.google.com',1))
     monkeypatch.setattr(request_boundary,'is_verified_conversion_return',fixture_conversion)
     transport=boundary(context,origin,ReadonlyMutationGuard(),signed=signed)
@@ -390,11 +394,13 @@ def test_verified_conversion_return_is_discarded_without_a_second_request(contex
     page.set_content('<iframe src="/frame"></iframe>')
     frame=page.frames[-1]
     frame.wait_for_load_state('domcontentloaded')
+    source_path='/pagead/viewthroughconversion/123456789/' if family=='pagead' else '/measurement/conversion'
+    target_path='/pagead/1p-conversion/123456789/' if family=='pagead' else '/measurement/1p-conversion/'
     result=frame.evaluate("""async url=>{try {await fetch(url,{method:'POST',body:'opaque=SECRET'});return 'SENT'}catch{return 'BLOCKED'}}""",
-                          origin+'/measurement/conversion?opaque=SECRET&status='+str(status))
+                          origin+source_path+'?opaque=SECRET&status='+str(status))
     assert result=='BLOCKED'
-    assert [(m,p) for m,p,_,_ in seen if m=='POST']==[('POST','/measurement/conversion')]
-    assert not any(p=='/measurement/1p-conversion/' for _,p,_,_ in seen)
+    assert [(m,p) for m,p,_,_ in seen if m=='POST']==[('POST',source_path)]
+    assert not any(p==target_path for _,p,_,_ in seen)
     if signed:
         with pytest.raises(RequestBoundaryError,match='REDIRECT_UNSUPPORTED'):
             transport.assert_clean()

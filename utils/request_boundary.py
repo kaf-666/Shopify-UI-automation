@@ -49,14 +49,34 @@ def _measurement_endpoint(url, paths):
         return False
 
 
+def _conversion_endpoint(url, role):
+    """Return a fixed family and in-memory ad ID; never export the ID."""
+    paths = {"/measurement/conversion"} if role == "source" else {"/measurement/1p-conversion/"}
+    if _measurement_endpoint(url, paths):
+        return ("measurement", "")
+    try:
+        parsed = urlsplit(url)
+        hosts = MEASUREMENT_HOSTS | ({"googleads.g.doubleclick.net"} if role == "source" else set())
+        kind = "viewthroughconversion" if role == "source" else "1p-conversion"
+        match = re.fullmatch(r"/pagead/" + kind + r"/([0-9]{5,20})/", parsed.path)
+        if (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname in hosts
+                and parsed.port in {None,443} and not parsed.username and not parsed.password
+                and not parsed.fragment and match
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url)):
+            return ("pagead", match[1])
+    except (ValueError,TypeError):
+        pass
+    return None
+
+
 def is_verified_conversion_return(request, status, target):
     """Recognize only a discarded Google measurement read, never send it."""
     try:
-        return (request.method == "POST" and status in {302,303}
+        source_endpoint = _conversion_endpoint(request.url, "source")
+        return (source_endpoint is not None and request.method == "POST" and status in {302,303}
                 and request.resource_type in {"xhr","fetch"} and not request.is_navigation_request()
                 and request.frame.parent_frame is not None
-                and _measurement_endpoint(request.url, {"/measurement/conversion"})
-                and _measurement_endpoint(target, {"/measurement/1p-conversion/"}))
+                and _conversion_endpoint(target, "target") == source_endpoint)
     except Exception:
         return False
 
@@ -297,9 +317,9 @@ class RequestBoundary:
                 "target_host_class": destination.get("host_class"), "http_status": status,
                 "gating_failure": gating, "source_query_present": source["query_present"],
                 "frame_category": frame_category,
-                "source_service": "GOOGLE_MEASUREMENT" if _measurement_endpoint(request.url, {"/measurement/conversion"}) else "OTHER",
+                "source_service": "GOOGLE_MEASUREMENT" if _conversion_endpoint(request.url, "source") else "OTHER",
                 "target_service": ("SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else
-                                   "GOOGLE_MEASUREMENT" if target and _measurement_endpoint(target, {"/measurement/1p-conversion/"}) else "OTHER"),
+                                   "GOOGLE_MEASUREMENT" if target and _conversion_endpoint(target, "target") else "OTHER"),
             })
         if not gating:
             # Preserve the blocked-response signal. A synthetic 2xx can make
