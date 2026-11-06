@@ -92,6 +92,10 @@ class RequestBoundary:
             source = safe_endpoint_fingerprint(request.url, request.method, hosts)
             destination = safe_endpoint_fingerprint(target, request.method, hosts) if target else {}
             resource = request.resource_type
+            try:
+                frame_category = "MAIN_FRAME" if request.frame.parent_frame is None else "CHILD_FRAME"
+            except Exception:
+                frame_category = "UNAVAILABLE"
             self.events.append({
                 "code": code, "resource_type": resource if resource in {
                     "document", "stylesheet", "script", "image", "font", "xhr", "fetch", "other",
@@ -102,11 +106,14 @@ class RequestBoundary:
                 "source_host_class": source["host_class"],
                 "target_host_class": destination.get("host_class"), "http_status": status,
                 "gating_failure": gating, "source_query_present": source["query_present"],
+                "frame_category": frame_category,
+                "target_service": "SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else "OTHER",
             })
         if not gating:
-            # The original locale POST completed and updated the shared cookie
-            # jar. Acknowledge it without replaying POST or fetching return HTML.
-            route.fulfill(status=204, body="")
+            # Preserve the blocked-response signal. A synthetic 2xx can make
+            # localization clients replace the live document with empty HTML.
+            # The initial POST's real cookie updates remain in the shared jar.
+            route.abort()
             return
         try:
             main_navigation = request.is_navigation_request() and request.frame.parent_frame is None

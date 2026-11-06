@@ -254,9 +254,15 @@ def test_verified_localization_post_is_not_replayed_or_followed(context, servers
       const body=new FormData();
       for (const [k,v] of Object.entries({form_type:'localization',_method:'put',country_code:'US',
         utf8:'\u2713',return_to:origin+'/products/example'})) body.append(k,v);
-      return (await fetch('/localization', {method:'POST',body})).status;
+      try {
+        const response = await fetch('/localization', {method:'POST',body});
+        if (response.ok) document.body.innerHTML = await response.text();
+        return 'SENT';
+      }
+      catch { return 'BLOCKED'; }
     }""", origin)
-    assert status == 204
+    assert status == "BLOCKED"
+    assert page.get_by_role("button", name="Checkout").count() == 1
     assert [(m,p) for m,p,_,_ in seen if m == "POST"] == [("POST", "/localization")]
     assert not any(p == "/products/example" for _,p,_,_ in seen)
     assert "synthetic_session=present" in page.evaluate("document.cookie")
