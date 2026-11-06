@@ -30,6 +30,10 @@ A verified same-origin locale form POST keeps its actual cookie updates; its
 matching return-page GET is blocked as a network failure and recorded
 as `LOCALIZATION_RETURN_READ_SUPPRESSED`, a non-gating side effect. Unknown forms,
 different return targets, and account/payment/cart-writing redirects still fail.
+An unsigned Google measurement POST-to-GET return in a child frame is also
+aborted and separately audited as `GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED`.
+This exact HTTPS provider/endpoint rule sends no follow-up request; unknown
+providers, paths and writing redirects still fail.
 The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
 path: no signing, authorization, referral headers or cookies are sent; only 3xx
 responses returning to the same original storefront endpoint are accepted. Source

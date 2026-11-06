@@ -21,6 +21,7 @@ MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
 PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest", "texttrack"}
+MEASUREMENT_HOSTS = {"google.com", "www.google.com", "www.googleadservices.com"}
 STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
 
 
@@ -35,6 +36,29 @@ def transport_error_kind(exc):
         if text in message:
             return kind
     return "OTHER_PLAYWRIGHT_ERROR"
+
+
+def _measurement_endpoint(url, paths):
+    try:
+        parsed = urlsplit(url)
+        return (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname in MEASUREMENT_HOSTS
+                and parsed.port in {None,443} and not parsed.username and not parsed.password
+                and not parsed.fragment and parsed.path in paths
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except (ValueError,TypeError):
+        return False
+
+
+def is_verified_conversion_return(request, status, target):
+    """Recognize only a discarded Google measurement read, never send it."""
+    try:
+        return (request.method == "POST" and status in {302,303}
+                and request.resource_type in {"xhr","fetch"} and not request.is_navigation_request()
+                and request.frame.parent_frame is not None
+                and _measurement_endpoint(request.url, {"/measurement/conversion"})
+                and _measurement_endpoint(target, {"/measurement/1p-conversion/"}))
+    except Exception:
+        return False
 
 
 def is_shop_bridge_target(url):
@@ -273,7 +297,9 @@ class RequestBoundary:
                 "target_host_class": destination.get("host_class"), "http_status": status,
                 "gating_failure": gating, "source_query_present": source["query_present"],
                 "frame_category": frame_category,
-                "target_service": "SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else "OTHER",
+                "source_service": "GOOGLE_MEASUREMENT" if _measurement_endpoint(request.url, {"/measurement/conversion"}) else "OTHER",
+                "target_service": ("SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else
+                                   "GOOGLE_MEASUREMENT" if target and _measurement_endpoint(target, {"/measurement/1p-conversion/"}) else "OTHER"),
             })
         if not gating:
             # Preserve the blocked-response signal. A synthetic 2xx can make
@@ -350,6 +376,10 @@ class RequestBoundary:
                     and not request.is_navigation_request()
                     and is_verified_localization_return(request.url, response.status, target, request)):
                 self._reject(route, "LOCALIZATION_RETURN_READ_SUPPRESSED", target=target,
+                             status=response.status, gating=False)
+                return
+            if not signed and is_verified_conversion_return(request, response.status, target):
+                self._reject(route, "GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED", target=target,
                              status=response.status, gating=False)
                 return
             if method not in {"GET", "HEAD"} or not request.is_navigation_request():

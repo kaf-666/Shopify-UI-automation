@@ -65,6 +65,8 @@ def servers():
                 target = "javascript:void(0)"
             elif path == "/userinfo":
                 target = f"https://dummy@127.0.0.1:{tls.server_port}/forbidden"
+            elif path == "/measurement/conversion":
+                target = query.get("target", ["/measurement/1p-conversion/"])[0]
             elif path in {"/cart/add.js", "/readonly-hop"}:
                 target = "/account/login" if path == "/cart/add.js" else "/cart/add.js"
             elif path in {"/start", "/checkout", "/localization"}:
@@ -364,6 +366,42 @@ def test_script_navigation_is_finished_without_replaying_next_ui(context, server
     assert len([row for row in seen if row[1] == "/landing"]) == 1
     assert "synthetic_session=present" in page.evaluate("document.cookie")
     transport.assert_clean()
+
+
+@pytest.mark.parametrize('status',[302,303])
+@pytest.mark.parametrize('signed',[False,True])
+def test_verified_conversion_return_is_discarded_without_a_second_request(context,servers,monkeypatch,status,signed):
+    from utils import request_boundary
+    origin,seen=servers
+    original=request_boundary.is_verified_conversion_return
+    # Preserve the real protocol checks; replace only this TLS fixture's origin.
+    def fixture_conversion(request,status,target):
+        from types import SimpleNamespace
+        if not request.url.startswith(origin+'/') or not target.startswith(origin+'/'):
+            return False
+        proxy=SimpleNamespace(method=request.method,resource_type=request.resource_type,
+            is_navigation_request=request.is_navigation_request,frame=request.frame,
+            url=request.url.replace(origin,'https://www.google.com',1))
+        return original(proxy,status,target.replace(origin,'https://www.google.com',1))
+    monkeypatch.setattr(request_boundary,'is_verified_conversion_return',fixture_conversion)
+    transport=boundary(context,origin,ReadonlyMutationGuard(),signed=signed)
+    page=context.new_page()
+    transport.navigate(page,lambda:page.goto(origin+'/'))
+    page.set_content('<iframe src="/frame"></iframe>')
+    frame=page.frames[-1]
+    frame.wait_for_load_state('domcontentloaded')
+    result=frame.evaluate("""async url=>{try {await fetch(url,{method:'POST',body:'opaque=SECRET'});return 'SENT'}catch{return 'BLOCKED'}}""",
+                          origin+'/measurement/conversion?opaque=SECRET&status='+str(status))
+    assert result=='BLOCKED'
+    assert [(m,p) for m,p,_,_ in seen if m=='POST']==[('POST','/measurement/conversion')]
+    assert not any(p=='/measurement/1p-conversion/' for _,p,_,_ in seen)
+    if signed:
+        with pytest.raises(RequestBoundaryError,match='REDIRECT_UNSUPPORTED'):
+            transport.assert_clean()
+    else:
+        transport.assert_clean()
+    assert transport.summary()['events'][0]['code']==('REDIRECT_UNSUPPORTED' if signed else 'GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED')
+    assert 'SECRET' not in str(transport.summary())
 
 
 def test_subresource_redirect_fails_without_sending_next_hop(context, servers):
