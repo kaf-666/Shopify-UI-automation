@@ -71,13 +71,19 @@ CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
 def checkout_variant_matches(variant: str, color: str, size: str) -> tuple[bool, bool]:
     """Compare complete checkout option values; ambiguous text fails closed."""
     text = normalize(variant)
+    expected_color, expected_size = normalize(color), normalize(size)
     parts = re.split(r"\s+size\s*:\s*", text, maxsplit=1, flags=re.IGNORECASE)
     if len(parts) != 2:
         parts = re.split(r"\s+/\s+", text, maxsplit=1)
     if len(parts) != 2:
-        return False, False
+        # Mobile checkout can concatenate adjacent text nodes without a space.
+        # Accept only the exact expected color followed by the case-sensitive
+        # Size label; the complete remaining value must still equal the size.
+        prefix = expected_color + "Size:"
+        if not expected_color or not text.startswith(prefix):
+            return False, False
+        return True, bool(expected_size) and normalize(text[len(prefix):]).casefold() == expected_size.casefold()
     actual_color = re.sub(r"^color\s*:\s*", "", parts[0], flags=re.IGNORECASE)
-    expected_color, expected_size = normalize(color), normalize(size)
     return (bool(expected_color) and normalize(actual_color).casefold() == expected_color.casefold(),
             bool(expected_size) and normalize(parts[1]).casefold() == expected_size.casefold())
 
