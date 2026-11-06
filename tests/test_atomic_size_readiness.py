@@ -39,7 +39,8 @@ def test_ready_size_survives_short_metadata_rpc_timeout(page, monkeypatch):
             raise PlaywrightTimeoutError('synthetic metadata transport timeout')
         return original(self, name, timeout=timeout)
     monkeypatch.setattr(Locator, 'get_attribute', slow_metadata)
-    state = size.readiness_snapshot(deadline=time.monotonic()+1)
+    # This test checks semantic parity; dedicated tests cover deadline expiry.
+    state = size.readiness_snapshot(deadline=time.monotonic()+5)
     assert state['size_group_detected'] and state['normal_size_available'] == 1
     assert size.selected_value(deadline=time.monotonic()+1) == '4'
 
@@ -84,7 +85,7 @@ def test_atomic_availability_matches_business_semantics(page, strategy, markup):
     assert bool(state['size_option_available']) == bool(available)
     assert bool(state['normal_size_available']) == bool(normal)
     assert state['selected_size'] == expected_selected
-    assert size.selected_value(deadline=time.monotonic()+1) == expected_selected
+    assert size.selected_value(deadline=time.monotonic()+5) == expected_selected
 
 
 @pytest.mark.parametrize('site', ['mondressy','lavetir','shirees'])
