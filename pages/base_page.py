@@ -13,6 +13,7 @@ from typing import Optional
 from utils.browser import PAGE_NAV_TIMEOUT_MS, SITES_DIR, load_settings
 from utils.config import load_yaml_mapping, resolve_url, site_config_path
 from utils.errors import CliConfigError
+from utils.request_boundary import run_navigation
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -116,8 +117,8 @@ class BasePage:
 
     # -------------------------------------------------------------------- 打开
     def open(self, ready_selector: Optional[str] = None) -> None:
-        self.page.goto(
+        run_navigation(self.page, lambda: self.page.goto(
             self.page_url(), wait_until="domcontentloaded", timeout=PAGE_NAV_TIMEOUT_MS
-        )
+        ))
         if ready_selector:
             self.wait_visible(ready_selector)

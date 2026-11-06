@@ -594,7 +594,8 @@ class NavigationPage(BasePage):
 
         source_page.context.on("page", capture_page)
         try:
-            target.click()
+            from utils.request_boundary import run_navigation
+            run_navigation(source_page, target.click)
             self._resolve_clicked_page(source_page, created_pages, path, source_url)
         except Exception as exc:
             if created_pages and not isinstance(exc, NavigationCollectionError):

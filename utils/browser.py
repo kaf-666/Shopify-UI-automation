@@ -201,6 +201,10 @@ class BrowserRuntime:
 
     def close(self) -> None:
         """统一销毁：context → browser → playwright 驱动。"""
+        from utils.request_boundary import RequestBoundary
+        boundary = getattr(self.context, "_shopify_request_boundary", None)
+        if isinstance(boundary, RequestBoundary):
+            boundary.closing = True
         errors = []
         try:
             if self.context is not None:
@@ -217,6 +221,11 @@ class BrowserRuntime:
                 self.playwright.stop()
         except Exception as exc:  # noqa: BLE001
             errors.append(f"playwright: {exc}")
+        if isinstance(boundary, RequestBoundary):
+            try:
+                boundary.assert_clean()
+            except Exception as exc:
+                errors.append(f"request_boundary: {exc}")
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -285,7 +294,7 @@ def create_browser(
             width = int(vp.get("width") or 1440)
             height = int(vp.get("height") or 900)
             size = (width, height)
-            context = browser.new_context(viewport={"width": width, "height": height})
+            context = browser.new_context(viewport={"width": width, "height": height}, service_workers="block")
         else:
             device_name = str(viewport_cfg.get("device") or "").strip()
             if not device_name:
@@ -300,6 +309,7 @@ def create_browser(
                     category="BROWSER_CONFIG_ERROR",
                 ) from exc
             profile.pop("default_browser_type", None)  # new_context 不接受该键
+            profile["service_workers"] = "block"
             context = browser.new_context(**profile)
             size = (profile["viewport"]["width"], profile["viewport"]["height"])
             device = device_name
@@ -344,7 +354,4 @@ def close_browser(runtime: Optional[BrowserRuntime]) -> None:
     """统一关闭 BrowserRuntime（允许传 None）。"""
     if runtime is None:
         return
-    try:
-        runtime.close()
-    except Exception:  # noqa: BLE001
-        pass
+    runtime.close()

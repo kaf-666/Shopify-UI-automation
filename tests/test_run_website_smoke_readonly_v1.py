@@ -115,6 +115,53 @@ class _OutOfScopeGuard(_EmptyGuard):
         return self.violations()
 
 
+def test_fatal_viewport_preserves_executed_cases_and_guard_evidence(monkeypatch, tmp_path):
+    from scripts.validate_result_schema import validate_json
+
+    context = SimpleNamespace(route=lambda *_args: None, unroute=lambda *_args: None)
+    runtime = SimpleNamespace(context=context, site_config={"base_url": "https://mondressy.com"},
+                              site_name="mondressy", metadata=lambda: {})
+
+    class FailingRunner:
+        def __init__(self, _runtime, _site, _viewport, *, artifact_dir, mutation_guard):
+            self.mutation_guard = mutation_guard
+            self.results = {}
+
+        def run_all(self):
+            case = _pass_results()[0]
+            self.results[case.case_id] = case
+            self.mutation_guard.set_scope("desktop", "direct", case.case_id)
+            self.mutation_guard._handle_route(_FakeRoute("https://mondressy.com/cart/add.js", "POST"))
+            raise RuntimeError("synthetic fatal")
+
+    monkeypatch.setattr(cli, "ARTIFACT_ROOT", tmp_path)
+    monkeypatch.setattr(cli, "make_run_id", lambda: "readonly-fatal")
+    monkeypatch.setattr(cli, "load_settings", lambda: {"default_site": "mondressy"})
+    monkeypatch.setattr(cli, "validate_site_config", lambda *_args, **_kwargs: runtime.site_config)
+    monkeypatch.setattr(cli, "create_browser", lambda *_args, **_kwargs: runtime)
+    monkeypatch.setattr(cli, "close_browser", lambda _runtime: None)
+    monkeypatch.setattr(cli, "WebsiteSmokeReadonlyV1Runner", FailingRunner)
+
+    assert cli.main(["--site", "mondressy", "--viewport", "desktop"]) == 1
+    root = tmp_path / "mondressy" / "readonly-fatal"
+    payload = json.loads((root / "results.json").read_text(encoding="utf-8"))
+    viewport = payload["viewports"][0]
+    assert viewport["partial"] is True and viewport["status"] == "FAIL"
+    assert [case["case_id"] for case in viewport["cases"]] == [READONLY_CASE_IDS[0]]
+    assert viewport["readonly_mutation_violations"] == [
+        {"method": "POST", "path": "/cart/add.js", "case_id": READONLY_CASE_IDS[0]}]
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["viewports"][0]["readonly_mutation_violations"] == viewport["readonly_mutation_violations"]
+    html = (root / "summary.html").read_text(encoding="utf-8")
+    assert "/cart/add.js" in html and "READONLY_MUTATION_VIOLATION" in html
+    assert validate_json(root, "website_smoke_readonly_v1")
+
+
+def test_missing_guard_is_not_treated_as_no_violations():
+    with pytest.raises(RuntimeError, match="READONLY_GUARD_UNAVAILABLE"):
+        cli._guard_violations(SimpleNamespace(mutation_guard=None))
+
+
 @pytest.mark.parametrize(
     ("requested", "expected_viewports", "expected_total"),
     [
@@ -182,7 +229,7 @@ def test_cli_result_write_failure_is_nonzero(monkeypatch, tmp_path) -> None:
     def fail_write(*_args, **_kwargs):
         raise cli.ResultWriteError("offline write failure")
 
-    monkeypatch.setattr(cli, "write_results_json", fail_write)
+    monkeypatch.setattr(cli, "write_run_json", fail_write)
 
     assert cli.main(["--viewport", "desktop"]) == 1
 

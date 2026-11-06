@@ -260,6 +260,8 @@ def test_browser_formdata_uses_real_policy_without_network(engine):
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         context = browser.new_context()
+        from utils.request_boundary import ensure_request_boundary
+        ensure_request_boundary(context)
         sent = []
         def sink(route):
             if route.request.method == "POST":

@@ -57,6 +57,13 @@ class _FakeContext:
         "/cart/update",
         "/cart/clear.js?x=1",
         "https://MONDRESSY.COM/CART/ADD.JS/?x=1",
+        "/cart",
+        "/en-us/cart/add.js",
+        "/fr/cart/change",
+        "/cart/%61dd.js",
+        "/en-us/cart%2Fadd.js",
+        "/cart/add%252ejs",
+        "/fr//cart/./change",
     ],
 )
 def test_cart_mutation_urls_match(url: str) -> None:
@@ -66,7 +73,6 @@ def test_cart_mutation_urls_match(url: str) -> None:
 @pytest.mark.parametrize(
     "url",
     [
-        "/cart",
         "/cart.js",
         "/products/test",
         "/search",
@@ -82,6 +88,23 @@ def test_non_cart_urls_do_not_match(url: str) -> None:
 def test_get_cart_endpoint_is_not_treated_as_mutation() -> None:
     assert not ReadonlyMutationGuard.matches("/cart/add.js", "GET")
     assert not ReadonlyMutationGuard.matches("/cart/clear", "OPTIONS")
+
+
+def test_ambiguous_cart_path_is_blocked_without_exposing_path_data() -> None:
+    guard = ReadonlyMutationGuard()
+    route = _FakeRoute("https://mondressy.com/cart/customer@example.com%252Fsecret", "POST")
+    guard._handle_route(route)
+    assert route.calls == ["abort"]
+    assert "customer@example.com" not in str(guard.violations())
+    assert "secret" not in str(guard.violations())
+
+
+def test_full_policy_recognizes_unambiguous_locale_cart_paths_only_for_first_party() -> None:
+    policy = TransactionalMutationPolicy(["mondressy.com"])
+    assert policy._classify("https://mondressy.com/fr/cart/add.js", "POST") == policy.EXPECTED
+    assert policy._classify("https://mondressy.com/en-us/cart/%61dd.js", "POST") == policy.EXPECTED
+    assert policy._classify("https://mondressy.com/cart/add%252ejs", "POST") == policy.UNEXPECTED
+    assert policy._classify("https://other.example/fr/cart/add.js", "POST") is None
 
 
 def test_guard_blocks_match_and_falls_back_non_match() -> None:
@@ -109,7 +132,7 @@ def test_guard_blocks_match_and_falls_back_non_match() -> None:
     assert guard.violation_count() == 1
 
     guard.detach()
-    assert len(context.route_calls) == 1
+    assert len(context.route_calls) == 2  # terminal boundary plus policy
     assert len(context.unroute_calls) == 1
 
 

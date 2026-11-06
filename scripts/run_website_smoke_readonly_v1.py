@@ -29,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pages.base_page import BasePage
-from tests.website_smoke_readonly_v1_cases import WebsiteSmokeReadonlyV1Runner
+from tests.website_smoke_readonly_v1_cases import READONLY_CASE_IDS, WebsiteSmokeReadonlyV1Runner
 from utils.artifacts import (
     artifact_display_path,
     canonical_site_name,
@@ -39,6 +39,7 @@ from utils.browser import close_browser, create_browser, load_settings
 from utils.config import resolve_url
 from utils.errors import CliConfigError, sanitize_message
 from utils.readonly_mutation_guard import ReadonlyMutationGuard
+from utils.mutation_fingerprint import sanitize_pathname
 from utils.result import (
     ResultWriteError,
     RunResult,
@@ -57,6 +58,23 @@ ARTIFACT_ROOT = PROJECT_ROOT / "artifacts" / "website-smoke-readonly-v1"
 READONLY_CASES_PER_VIEWPORT = 11
 
 
+class PartialReadonlyViewportFailure(Exception):
+    """Keep executed cases and guard evidence when a viewport fails."""
+    def __init__(self, runner, metadata, original):
+        super().__init__("READONLY_VIEWPORT_FATAL")
+        self.runner, self.metadata, self.original = runner, metadata, original
+
+
+class PartialReadonlyViewportResult(ViewportResult):
+    def __init__(self, *args, violations, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.violations = violations
+
+    def to_dict(self):
+        return {**super().to_dict(), "partial": True,
+                "readonly_mutation_violations": self.violations}
+
+
 def run_viewport(
     viewport: str,
     artifact_dir: Path,
@@ -65,6 +83,8 @@ def run_viewport(
     """Run one viewport and always dispose its BrowserRuntime."""
     runtime = create_browser(viewport, site_name=site_name)
     guard: Optional[ReadonlyMutationGuard] = None
+    runner = None
+    runtime_meta = {}
     try:
         guard = ReadonlyMutationGuard()
         # create_browser() has already registered Signed Request first;
@@ -79,11 +99,22 @@ def run_viewport(
             artifact_dir=artifact_dir,
             mutation_guard=guard,
         )
-        results = runner.run_all()
+        try:
+            results = runner.run_all()
+            from utils.request_boundary import assert_request_boundary_clean
+            assert_request_boundary_clean(runtime.context)
+        except Exception as exc:
+            raise PartialReadonlyViewportFailure(runner, runtime_meta, exc) from None
         return results, runner, runtime_meta
     finally:
+        pending_failure = sys.exc_info()[0] is not None
         try:
             close_browser(runtime)
+        except Exception as exc:
+            if not pending_failure:
+                if runner is not None:
+                    raise PartialReadonlyViewportFailure(runner, runtime_meta, exc) from None
+                raise
         finally:
             if guard is not None:
                 guard.detach()
@@ -96,7 +127,7 @@ def count_statuses(results: List) -> Dict[str, int]:
 def _guard_violations(runner) -> List[dict]:
     guard = getattr(runner, "mutation_guard", None)
     if guard is None:
-        return []
+        raise RuntimeError("READONLY_GUARD_UNAVAILABLE")
     return guard.violations()
 
 
@@ -160,10 +191,7 @@ def _write_run_result(
         execution_context=execution_context,
     )
     try:
-        if execution_context:
-            write_run_json(result.to_dict(), artifact_dir, "results.json")
-        else:
-            write_results_json(result.to_dict(), artifact_dir / "results.json")
+        write_run_json(result.to_dict(), artifact_dir, "results.json")
         write_summary(result.to_dict(), artifact_dir, suite="website_smoke_readonly_v1")
         return True
     except ResultWriteError as exc:
@@ -226,6 +254,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ARTIFACT_DIRECTORY_FAILURE: {sanitize_message(exc)}")
         return 2
 
+    from utils.suite_runner import register_fatal_context
+    register_fatal_context(artifact_dir=artifact_dir, run_id=run_id, site=site,
+                           suite="website_smoke_readonly_v1", base_url=base_url,
+                           viewports=viewport_results, started_at=started_at, started=started,
+                           execution_context=context["identity"] if context else None)
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 
     print(f"=== {site} Website Smoke Readonly V1 ===")
@@ -241,7 +274,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             runtime_by_viewport[viewport] = runtime_meta
 
-            if len(results) != READONLY_CASES_PER_VIEWPORT:
+            if tuple(getattr(case, "case_id", None) for case in results) != READONLY_CASE_IDS:
                 raise RuntimeError(
                     f"readonly case contract mismatch: expected={READONLY_CASES_PER_VIEWPORT} "
                     f"actual={len(results)}"
@@ -263,7 +296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             counts = count_statuses(results)
             viewport_status = (
                 "PASS"
-                if counts["FAIL"] == 0 and counts["BLOCKED"] == 0 and not violations
+                if counts["PASS"] == READONLY_CASES_PER_VIEWPORT and counts["FAIL"] == 0 and counts["BLOCKED"] == 0 and not violations
                 else "FAIL"
             )
             viewport_results.append(
@@ -287,6 +320,25 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             print_viewport(viewport, results, runner)
     except Exception as exc:  # framework fatal: retain completed viewport data
+        if isinstance(exc, PartialReadonlyViewportFailure):
+            runner, runtime_meta = exc.runner, exc.metadata
+            runtime_by_viewport[viewport] = runtime_meta
+            results = list(runner.results.values())
+            counts = count_statuses(results)
+            violations = [{"method": item.get("method") if item.get("method") in {"POST", "PUT", "PATCH", "DELETE"} else "UNKNOWN",
+                           "path": sanitize_pathname(str(item.get("path") or "")),
+                           "case_id": item.get("case_id") if item.get("case_id") in READONLY_CASE_IDS else None}
+                          for item in _guard_violations(runner)]
+            viewport_results.append(PartialReadonlyViewportResult(
+                viewport=viewport, browser=runtime_meta, status="FAIL",
+                started_at=viewport_started_at, finished_at=iso_now(),
+                duration_ms=int((time.perf_counter() - viewport_started) * 1000),
+                summary={"pass": counts["PASS"], "fail": counts["FAIL"],
+                         "blocked": counts["BLOCKED"], "total": len(results)},
+                pre_clean={"status": "PASS", "detail": "readonly_not_required"},
+                cleanup={"status": "PASS", "detail": "readonly_not_required"},
+                cases=results, violations=violations))
+            exc = exc.original
         classification, exit_code = _fatal_classification(exc)
         _write_run_result(
             artifact_dir,

@@ -174,7 +174,7 @@ def run_viewport(viewport: str, site_name: Optional[str] = None) -> tuple[bool, 
         # ---- APIRequestContext 携带策略请求头
         headers = dict(policy.request_headers(cart_url) or {})
         signed = all(headers.get(name) for name in SIGNATURE_HEADER_NAMES)
-        resp = runtime.context.request.get(cart_url, headers=headers, timeout=15000)
+        resp = runtime.context.request.get(cart_url, headers=headers, timeout=15000, max_redirects=0)
         lines.append(
             f"  APIRequestContext Signed Request: {'ENABLED' if signed else 'DISABLED'}"
         )

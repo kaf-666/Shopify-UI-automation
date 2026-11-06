@@ -49,6 +49,12 @@ def test_real_site_profiles_validate_without_reading_secrets() -> None:
     assert lavetir["capabilities"]["suites"]["website_smoke_v1"] is True
 
 
+def test_signed_request_profile_rejects_http_before_browser_creation() -> None:
+    config = _profile()
+    config["base_url"] = config["base_url"].replace("https://", "http://", 1)
+    _assert_error(config, "INVALID_ACCESS_CONFIG")
+
+
 def test_missing_schema_version_is_invalid() -> None:
     config = _profile()
     del config["schema_version"]
