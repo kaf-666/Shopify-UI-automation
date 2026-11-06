@@ -212,6 +212,21 @@ def test_subresource_redirect_fails_without_sending_next_hop(context, servers):
     assert not any(path == "/landing" for _, path, _, _ in seen)
     with pytest.raises(RequestBoundaryError, match="REDIRECT_UNSUPPORTED"):
         transport.assert_clean()
+    event = transport.summary()["events"][0]
+    assert event["source_path"] == "/start" and event["target_path"] == "/landing"
+    assert event["resource_type"] == "fetch" and event["http_status"] == 302
+    assert "SYNTHETIC" not in str(transport.summary())
+
+
+def test_legacy_signed_api_read_cannot_follow_redirects(context, servers, monkeypatch):
+    from types import SimpleNamespace
+    from scripts import run_smoke_cases as legacy
+    origin, seen = servers
+    transport = boundary(context, origin)
+    monkeypatch.setattr(legacy, "CART_JS", origin + "/cross")
+    runtime = SimpleNamespace(context=context, access_policy=transport.access_policy)
+    assert legacy.residual_cart_items(runtime) == -1
+    assert [row[1] for row in seen] == ["/cross"]
 
 
 def test_popup_redirect_is_coordinated_without_replaying_the_click(context, servers):

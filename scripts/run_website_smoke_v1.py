@@ -226,6 +226,7 @@ def run_viewport(
                 raise
             # A teardown error must not replace the already propagating failure.
         finally:
+            runtime_meta.update(runtime.metadata())
             if mutation_policy is not None:
                 mutation_policy.detach()
 

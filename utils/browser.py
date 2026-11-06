@@ -188,7 +188,7 @@ class BrowserRuntime:
         size = None
         if self.viewport_size:
             size = {"width": self.viewport_size[0], "height": self.viewport_size[1]}
-        return {
+        metadata = {
             "viewport": self.viewport,
             "engine": self.engine,
             "device": self.device,
@@ -198,6 +198,11 @@ class BrowserRuntime:
             "site": self.site_name,
             "site_access_policy": self.access_policy.type_name if self.access_policy else "none",
         }
+        from utils.request_boundary import RequestBoundary
+        boundary = getattr(self.context, "_shopify_request_boundary", None)
+        if isinstance(boundary, RequestBoundary):
+            metadata["request_boundary"] = boundary.summary()
+        return metadata
 
     def close(self) -> None:
         """统一销毁：context → browser → playwright 驱动。"""

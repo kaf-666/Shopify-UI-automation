@@ -2,13 +2,16 @@
 
 Protected redirects are never handed back to the browser. Main-frame GET
 navigation is resumed outside route callbacks; other redirects fail closed.
-Only fixed error codes leave this module. URLs and bodies stay in memory.
+Only fixed error codes and sanitized endpoint diagnostics leave this module.
+Raw URLs, headers and bodies stay in memory.
 """
 from __future__ import annotations
 
 import time
+import json
 from weakref import WeakSet
 from urllib.parse import urljoin, urlsplit, urldefrag
+from utils.mutation_fingerprint import safe_endpoint_fingerprint
 
 
 MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -18,6 +21,10 @@ SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
 
 class RequestBoundaryError(RuntimeError):
     category = "REQUEST_BOUNDARY_FAILURE"
+
+    def __init__(self, code, diagnostic=None):
+        self.code, self.diagnostic = code, diagnostic
+        super().__init__(code + (" " + json.dumps(diagnostic, separators=(",", ":")) if diagnostic else ""))
 
 
 class _RedirectRequest:
@@ -50,6 +57,7 @@ class RequestBoundary:
         self.pending = {}
         self.settled = WeakSet()
         self.failures = []
+        self.events = []
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -64,13 +72,33 @@ class RequestBoundary:
 
     def assert_clean(self):
         if self.failures:
-            raise RequestBoundaryError(self.failures[0])
+            raise RequestBoundaryError(self.failures[0], self.events[0] if self.events else None)
         if self.pending:
             raise RequestBoundaryError("REDIRECT_NAVIGATION_NOT_COMPLETED")
 
-    def _reject(self, route, code):
+    def summary(self):
+        return {"status": "FAIL" if self.failures or self.pending else "PASS",
+                "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
+                "events": [dict(event) for event in self.events]}
+
+    def _reject(self, route, code, *, target=None, status=None):
         self.failures.append(code)
         request = route.request
+        if len(self.events) < 100:
+            hosts = getattr(self.access_policy, "_allowed_hosts", ())
+            source = safe_endpoint_fingerprint(request.url, request.method, hosts)
+            destination = safe_endpoint_fingerprint(target, request.method, hosts) if target else {}
+            resource = request.resource_type
+            self.events.append({
+                "code": code, "resource_type": resource if resource in {
+                    "document", "stylesheet", "script", "image", "font", "xhr", "fetch", "other",
+                    "media", "manifest", "texttrack", "eventsource", "websocket"} else "UNKNOWN",
+                "method": request.method if request.method in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "UNKNOWN",
+                "source_path": source["sanitized_path"],
+                "target_path": destination.get("sanitized_path"),
+                "source_host_class": source["host_class"],
+                "target_host_class": destination.get("host_class"), "http_status": status,
+            })
         try:
             main_navigation = request.is_navigation_request() and request.frame.parent_frame is None
         except Exception:
@@ -100,13 +128,13 @@ class RequestBoundary:
                 return
             location = response.headers.get("location")
             if not location or any(ord(c) < 32 for c in location):
-                self._reject(route, "REDIRECT_LOCATION_INVALID")
+                self._reject(route, "REDIRECT_LOCATION_INVALID", status=response.status)
                 return
             target = urljoin(request.url, location)
             parsed = urlsplit(target)
             if (parsed.scheme not in {"http", "https"} or not parsed.hostname
                     or parsed.username or parsed.password or parsed.port == 0):
-                self._reject(route, "REDIRECT_LOCATION_INVALID")
+                self._reject(route, "REDIRECT_LOCATION_INVALID", status=response.status)
                 return
             method = request.method.upper()
             if (response.status == 303 and method != "HEAD") or (response.status in {301, 302} and method == "POST"):
@@ -118,13 +146,13 @@ class RequestBoundary:
                 guard._handle_route(decision)
                 allowed = allowed and decision.allowed
             if not allowed:
-                self._reject(route, "REDIRECT_MUTATION_DENIED")
+                self._reject(route, "REDIRECT_MUTATION_DENIED", target=target, status=response.status)
                 return
             if signed and not policy._host_allowed(target):
-                self._reject(route, "REDIRECT_ORIGIN_DENIED")
+                self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
                 return
             if method not in {"GET", "HEAD"} or not request.is_navigation_request():
-                self._reject(route, "REDIRECT_UNSUPPORTED")
+                self._reject(route, "REDIRECT_UNSUPPORTED", target=target, status=response.status)
                 return
             try:
                 frame = request.frame
@@ -133,11 +161,11 @@ class RequestBoundary:
                 # Associate it with the single new Page after returning 204.
                 frame = None
             if frame is not None and frame.parent_frame is not None:
-                self._reject(route, "REDIRECT_UNSUPPORTED")
+                self._reject(route, "REDIRECT_UNSUPPORTED", target=target, status=response.status)
                 return
             page = frame.page if frame is not None else None
             if page in self.pending:
-                self._reject(route, "REDIRECT_NAVIGATION_CONFLICT")
+                self._reject(route, "REDIRECT_NAVIGATION_CONFLICT", target=target, status=response.status)
                 return
             self.pending[page] = target
             # A 204 ends this navigation without a Chromium error-page race.
@@ -200,10 +228,10 @@ class RequestBoundary:
             except Exception:
                 if not self.pending:
                     if len(self.failures) > previous_errors:
-                        raise RequestBoundaryError(self.failures[-1]) from None
+                        raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None) from None
                     raise
             if len(self.failures) > previous_errors:
-                raise RequestBoundaryError(self.failures[-1])
+                raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None)
             candidates = [p for p in self.pending if p is page or p not in known_pages]
             if not candidates:
                 return result

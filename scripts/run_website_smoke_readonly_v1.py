@@ -116,6 +116,7 @@ def run_viewport(
                     raise PartialReadonlyViewportFailure(runner, runtime_meta, exc) from None
                 raise
         finally:
+            runtime_meta.update(runtime.metadata())
             if guard is not None:
                 guard.detach()
 
