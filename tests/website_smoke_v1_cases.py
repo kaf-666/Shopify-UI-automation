@@ -919,6 +919,7 @@ class WebsiteSmokeV1Runner:
         """
         drawer = self.flow.state["drawer"]
         checkout = CheckoutPage(self.page, self.site_config, self.viewport)
+        checkout.observe_cart_sync()
         try:
             drawer.checkout()
             checkout.wait_checkout_context()
@@ -943,6 +944,12 @@ class WebsiteSmokeV1Runner:
                 "CHECKOUT_ORDER_SUMMARY_NOT_AVAILABLE",
                 f"{type(exc).__name__}: {exc}",
             ) from exc
+
+        # Shopify Checkout can still be sending its persisted Proposal sync.
+        # Wait for it before final cleanup so it cannot restore the cart after
+        # /cart/clear.js. Timeouts are diagnostic only: do not fail the
+        # business case and do not weaken the cleanup assertion.
+        cart_sync = checkout.wait_cart_sync()
 
         # 商品一致性：身份（P0）+ 数量（P0）+ 变体（P1，可读取时验证）
         checkout_title = checkout.get_product_title(0)
@@ -988,7 +995,7 @@ class WebsiteSmokeV1Runner:
         price = checkout.get_product_price(0)
         subtotal = checkout.get_subtotal()
         return (
-            f"checkout_context=True core=True order_summary=True "
+            f"checkout_context=True core=True order_summary=True cart_sync={cart_sync} "
             f"product=match quantity={qty_detail} color_match={color_ok} size_match={size_ok} "
             f"price={price} subtotal={subtotal}{title_note}"
         )
