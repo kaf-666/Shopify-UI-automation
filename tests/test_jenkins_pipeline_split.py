@@ -1,7 +1,6 @@
 """Fixed Jenkins entries and their shared adapter preserve production boundaries."""
 from pathlib import Path
 import re
-import subprocess
 
 import pytest
 from scripts.run_smoke_ci import Target
@@ -16,10 +15,6 @@ ENTRIES = [(site, suite, f"Jenkinsfile.{mode}{suffix}")
 
 def entry(path):
     return (PROJECT_ROOT / path).read_text(encoding="utf-8")
-
-
-def baseline(path):
-    return subprocess.check_output(["git", "show", f"39982f9:{path}"], cwd=PROJECT_ROOT).decode("utf-8")
 
 
 @pytest.mark.parametrize("site,suite,path", ENTRIES)
@@ -40,14 +35,20 @@ def test_fixed_entry_matches_profile_credentials_and_does_not_expose_site_parame
 
 @pytest.mark.parametrize("site,suite,path", ENTRIES)
 def test_entry_keeps_parameters_schedule_stage_names_and_operational_options(site, suite, path):
-    text, old = entry(path), baseline(path)
-    # Existing user/job controls are an interface, including Lavetir's optional diagnostic.
-    for source in [text, old]:
-        assert "choices: ['both', 'desktop', 'mobile']" in source
-        assert "Default target is both." in source
-    assert re.findall(r"name: '([^']+)'", text) == re.findall(r"name: '([^']+)'", old)
-    assert re.findall(r"cron\('([^']+)'\)", text) == re.findall(r"cron\('([^']+)'\)", old)
-    assert re.findall(r"stage\('([^']+)'\)", text) == re.findall(r"stage\('([^']+)'\)", old)
+    text = entry(path)
+    diagnostic = site == "lavetir" and "readonly" in path
+    assert "choices: ['both', 'desktop', 'mobile']" in text
+    assert "Default target is both." in text
+    assert re.findall(r"name: '([^']+)'", text) == ["SMOKE_VIEWPORT"] + (["VARIANT_DIAGNOSTIC"] if diagnostic else [])
+    assert re.findall(r"cron\('([^']+)'\)", text) == (["H H/4 * * *"] if diagnostic else [])
+    expected = ["Checkout", "Environment", "Install Dependencies", "Prepare Run",
+                "Install Playwright Browsers", "Static Validation", "Runtime Contract",
+                "Site Access" if diagnostic else "Signed Request / Site Access"]
+    if diagnostic:
+        expected.append("Variant Stability Diagnostic")
+    expected += ["Website Smoke Readonly V1" if "readonly" in path else "Website Smoke V1",
+                 "Secret Leakage Check", "Result Validation"]
+    assert re.findall(r"stage\('([^']+)'\)", text) == expected
     for option in ["agent any", "skipDefaultCheckout(true)", "disableConcurrentBuilds()",
                    "timestamps()", "timeout(time: 60, unit: 'MINUTES')",
                    "buildDiscarder(logRotator(numToKeepStr: '25', artifactNumToKeepStr: '25'))"]:
@@ -93,12 +94,13 @@ def test_adapter_keeps_both_platforms_and_does_not_interpolate_user_parameters_i
     assert "pip install --upgrade" not in ADAPTER
 
 
-def test_original_jenkinsfile_and_manual_integration_are_unchanged():
-    for name in ["Jenkinsfile", "Jenkinsfile.smoke-integration-manual"]:
-        # Compare Git's canonical bytes, respecting checkout CRLF filters.
-        actual = subprocess.check_output(["git", "hash-object", "--path", name, name], cwd=PROJECT_ROOT)
-        expected = subprocess.check_output(["git", "rev-parse", f"HEAD:{name}"], cwd=PROJECT_ROOT)
-        assert actual == expected
+def test_manual_integration_keeps_explicit_identity_and_no_timer():
+    manual = entry("Jenkinsfile.smoke-integration-manual")
+    assert "EXPECTED_SHA" in manual and "Manual Trigger Gate" in manual
+    assert not re.search(r"cron\s*\(|pollSCM\s*\(", manual)
     text = entry("Jenkinsfile")
+    assert "LEGACY_PIPELINE_DISABLED" in text
+    assert "archiveArtifacts" not in text and "record_stability" not in text
+    assert "credentials(" not in text and "cron(" not in text
     assert "customWorkspace" not in text
     assert not re.search(r"(?<!\w)ws\s*\(", text)

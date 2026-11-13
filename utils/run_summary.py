@@ -5,8 +5,10 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote
 
 from utils.errors import sanitize_message
+from utils.mutation_fingerprint import sanitize_pathname
 from utils.run_context import ordinary_files
 from utils.safe_artifact_write import write_run_json, write_run_text
+from utils.smoke_case_contract import READONLY_CASE_IDS
 
 STEPS = ("prepare", "static", "runtime", "access", "smoke", "secret", "schema")
 CSS = """body{font:16px/1.5 system-ui,sans-serif;max-width:1150px;margin:32px auto;padding:0 20px;color:#18212f;background:#f8fafc}h1,h2{line-height:1.2}h2{margin-top:28px}table{border-collapse:collapse;table-layout:fixed;width:100%;background:white}th,td{text-align:left;border:1px solid #ccd5df;padding:8px;vertical-align:top;overflow-wrap:anywhere}th{background:#e8eef5}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#eef2f6;padding:12px}a{color:#0759a5}dl{display:grid;grid-template-columns:230px 1fr;gap:5px 16px}dt{font-weight:650}dd{margin:0;overflow-wrap:anywhere}.notice{border-left:4px solid #58718d;padding:12px;background:#e8eef5}.FAIL,.BLOCKED{font-weight:bold;color:#9c2727}.PASS{font-weight:bold;color:#096442}summary{cursor:pointer;padding:8px 0}code{overflow-wrap:anywhere}@media(max-width:650px){body{margin:16px auto}table{font-size:13px}th,td{padding:5px}dl{grid-template-columns:1fr}dd{margin-bottom:8px}}"""
@@ -69,10 +71,16 @@ def build_summary(result, run_root, *, suite, context=None, environ=None):
                          "capture_error": text(case["evidence_capture_error"]) if case.get("evidence_capture_error") else None,
                          "evidence_status": "RECORDED" if evidence else "NOT_RECORDED",
                          "evidence": evidence})
+        raw_violations = vp.get("readonly_mutation_violations")
+        violations = [{"method": item.get("method") if item.get("method") in {"POST", "PUT", "PATCH", "DELETE"} else "UNKNOWN",
+                       "path": sanitize_pathname(item.get("path")),
+                       "case_id": item.get("case_id") if item.get("case_id") in READONLY_CASE_IDS else None}
+                      for item in raw_violations if isinstance(item, dict)] if isinstance(raw_violations, list) else []
         viewports.append({"viewport": vp["viewport"], "status": vp["status"],
                           "partial": bool(vp.get("partial")), "counts": dict(vp["summary"]),
                           "pre_clean": vp.get("pre_clean"), "cleanup": vp.get("cleanup"),
-                          "mutation_summary": vp.get("mutation_summary"), "cases": rows})
+                          "mutation_summary": vp.get("mutation_summary"),
+                          "readonly_mutation_violations": violations, "cases": rows})
     return {"version": 1, "identity": identity, "scope": "CI" if context else "LOCAL",
             "result_validity": "VALIDATED_CURRENT_RUN" if context else "LOCAL_UNVALIDATED",
             "phase": "PRE_ARCHIVE" if context else "SMOKE_COMPLETE",
@@ -132,9 +140,10 @@ def render_html(model):
                            "pre_clean": (vp["pre_clean"] or {}).get("status", "NOT_RECORDED"),
                            "cleanup": (vp["cleanup"] or {}).get("status", "NOT_RECORDED"),
                            "cleanup_detail": (vp["cleanup"] or {}).get("detail", "NOT_RECORDED"),
-                           "mutation_status": (vp["mutation_summary"] or {}).get("status", "NOT_APPLICABLE")}),
+                           "mutation_status": ("READONLY_MUTATION_VIOLATION" if vp["readonly_mutation_violations"]
+                                               else (vp["mutation_summary"] or {}).get("status", "NOT_APPLICABLE"))}),
                   '<details><summary>Lifecycle / audit detail</summary><pre>' + e(json.dumps(
-                      {k: vp[k] for k in ("pre_clean", "cleanup", "mutation_summary")}, ensure_ascii=False, indent=2)) + '</pre></details>']
+                      {k: vp[k] for k in ("pre_clean", "cleanup", "mutation_summary", "readonly_mutation_violations")}, ensure_ascii=False, indent=2)) + '</pre></details>']
         rows = []
         for case in vp["cases"]:
             diagnostics = '<p>Diagnostic: NOT_RECORDED</p>'

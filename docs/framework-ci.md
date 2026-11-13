@@ -2,15 +2,16 @@
 
 Pipeline: `Jenkinsfile.framework-ci`.
 
-Job: [Framework - Offline Regression](https://testing.lightingrid.com/job/Monitoring/job/Shopify/job/UI%20automation/job/Framework%20-%20Offline%20Regression/).
+Job: `Framework - Offline Regression` in the configured internal Jenkins folder.
+The deployment URL and service-account ownership are managed outside this public repository.
 
 The GitHub Branch Source discovers repository branches without open PRs, and
 origin PRs merged with their target branch. Fork discovery is disabled. Jenkins
 deduplicates SCM revisions; each child job aborts its previous running build
 when a new build starts. Test execution has no storefront credentials.
 
-The repository webhook sends push and pull_request events to
-`https://testing.lightingrid.com/github-webhook/` with TLS verification enabled.
+The repository webhook sends push and pull_request events to the configured
+Jenkins `/github-webhook/` endpoint with TLS verification enabled.
 Its initial ping was confirmed with HTTP 200 on 2026-10-15. Events drive GitHub
 Branch Source discovery; there is no duplicate per-branch polling schedule.
 
@@ -62,8 +63,8 @@ the production deadline behavior is unchanged. Local regression has 806 passed
 and 3 existing Windows symlink-permission skips. Linux skips two Windows-only
 filesystem tests instead.
 
-GitHub notifications use the existing `github-kaf-666` SCM credential. Its owner
-enabled this repository's Commit statuses read/write permission on 2026-10-15;
+GitHub notifications use the configured SCM credential. Its owner enabled this
+repository's Commit statuses read/write permission on 2026-10-15;
 no token is stored in source or passed to the test environment. Status round
 trip was verified after the initial HTTP 403 was resolved: PR-2 build #5
 reported pending, then a non-success status for an intentional failing test,

@@ -36,6 +36,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from pages.base_page import BasePage
 from tests.website_smoke_v1_cases import WebsiteSmokeV1Runner
+from utils.smoke_case_contract import WEBSITE_CASE_IDS
 from utils.artifacts import (
     artifact_display_path,
     canonical_site_name,
@@ -58,6 +59,7 @@ from utils.result import (
 from utils.readonly_mutation_guard import (
     TransactionalMutationPolicy,
     merge_transactional_mutation_summaries,
+    missing_transactional_mutation_summary,
 )
 from utils.mutation_fingerprint import format_mutation_fingerprint_report
 from utils.site_config_validator import WEBSITE_SMOKE_V1, validate_site_config
@@ -77,18 +79,17 @@ def _runner_mutation_summary(runner) -> dict:
     method = getattr(runner, "mutation_summary", None)
     if callable(method):
         value = method()
-        if isinstance(value, dict):
+        if (isinstance(value, dict) and value.get("mode") == "TRANSACTIONAL_SAFE"
+                and value.get("status") in {"PASS", "FAIL"}
+                and value.get("audit_status") in (None, "MISSING")
+                and all(type(value.get(key)) is int and value[key] >= 0 for key in (
+                    "expected_mutation", "unexpected_mutation", "high_risk_mutation", "blocked_mutation"))
+                and isinstance(value.get("by_path"), list)
+                and (value.get("audit_status") == "MISSING" or value["status"] == (
+                    "FAIL" if value["unexpected_mutation"] or value["high_risk_mutation"] else "PASS"))
+                and (value.get("audit_status") != "MISSING" or value["status"] == "FAIL")):
             return value
-    return {
-        "mode": "TRANSACTIONAL_SAFE",
-        "status": "PASS",
-        "expected_mutation": 0,
-        "known_blocked_side_effect": 0,
-        "unexpected_mutation": 0,
-        "high_risk_mutation": 0,
-        "blocked_mutation": 0,
-        "by_path": [],
-    }
+    return missing_transactional_mutation_summary()
 
 
 def _traffic_first_party_hosts(site_config: dict, base_url: str) -> tuple[str, ...]:
@@ -123,7 +124,9 @@ class PartialViewportResult(ViewportResult):
 def _build_viewport_result(vp, results, runner, metadata, started_at, started, *, partial=False):
     counts = count_statuses(results)
     mutation = _runner_mutation_summary(runner)
-    passed = (not partial and counts["FAIL"] == counts["BLOCKED"] == 0
+    passed = (not partial and tuple(getattr(case, "case_id", None) for case in results) == tuple(WEBSITE_CASE_IDS)
+              and counts["PASS"] == len(WEBSITE_CASE_IDS)
+              and counts["FAIL"] == counts["BLOCKED"] == 0
               and runner.pre_clean_status == runner.cleanup_status == "PASS"
               and mutation.get("status") == "PASS")
     cls = PartialViewportResult if partial else ViewportResult
@@ -181,6 +184,9 @@ def run_viewport(
         )
         try:
             results = runner.run_all()
+            from utils.request_boundary import assert_request_boundary_clean, complete_request_navigation
+            complete_request_navigation(runtime.context)
+            assert_request_boundary_clean(runtime.context)
         except Exception as exc:
             raise PartialViewportFailure(runner, runtime_meta, exc) from None
         return results, runner, runtime_meta
@@ -211,8 +217,6 @@ def run_viewport(
             except Exception:
                 runner.cleanup_status = "FAIL"
                 runner.cleanup_error = "CLEANUP_AUDIT_WRITE_FAILED"
-        if mutation_policy is not None:
-            mutation_policy.detach()
         pending_failure = sys.exc_info()[0] is not None
         try:
             close_browser(runtime)
@@ -222,6 +226,10 @@ def run_viewport(
                     raise PartialViewportFailure(runner, runtime_meta, exc) from None
                 raise
             # A teardown error must not replace the already propagating failure.
+        finally:
+            runtime_meta.update(runtime.metadata())
+            if mutation_policy is not None:
+                mutation_policy.detach()
 
 
 def print_viewport(viewport: str, results: List, runner: Optional[WebsiteSmokeV1Runner] = None) -> None:
@@ -366,7 +374,7 @@ def _write_traffic_reduction(
         return
     try:
         path = artifact_dir / "traffic" / "blocking-summary.json"
-        write_results_json(policy.build_summary(), path)
+        write_run_json(policy.build_summary(), artifact_dir, "traffic/blocking-summary.json")
         print("Traffic Reduction Artifact:")
         print(f"{artifact_display_path(artifact_dir)}/traffic/{path.name}")
     except Exception as exc:
@@ -441,6 +449,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     traffic_reduction = create_traffic_reduction_policy(args.traffic_reduction)
 
+    from utils.suite_runner import register_fatal_context
+    register_fatal_context(artifact_dir=artifact_dir, run_id=run_id, site=site,
+                           suite="website_smoke_v1", base_url=base_url,
+                           viewports=vp_results, started_at=started_at, started=started,
+                           execution_context=context["identity"] if context else None)
     viewports = ["desktop", "mobile"] if args.viewport == "both" else [args.viewport]
 
     print(f"=== {site} Website Smoke V1 ===")

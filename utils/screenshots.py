@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+from utils.safe_artifact_write import write_run_bytes
 
 
 def capture_case_failure(
@@ -22,14 +23,12 @@ def capture_case_failure(
     优先整页截图，失败时回退为视口截图。
     """
     try:
-        vp_dir = Path(artifact_dir) / viewport
-        vp_dir.mkdir(parents=True, exist_ok=True)
         rel = f"{viewport}/{case_id}-failure.png"
-        path = vp_dir / f"{case_id}-failure.png"
         try:
-            page.screenshot(path=str(path), full_page=True)
+            data = page.screenshot(full_page=True)
         except Exception:
-            page.screenshot(path=str(path), full_page=False)
+            data = page.screenshot(full_page=False)
+        write_run_bytes(data, artifact_dir, rel)
         return rel
     except Exception:
         return None

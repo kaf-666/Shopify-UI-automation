@@ -8,10 +8,11 @@ registered earlier by the Signed Request policy remains in the chain.
 from __future__ import annotations
 
 from collections import Counter
+import posixpath
 import re
 import time
 from typing import Iterable, List, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from utils.localization_request_policy import (
     WEBREX_LOCALIZATION_REASON,
@@ -29,6 +30,7 @@ from utils.mutation_fingerprint import (
 
 CART_MUTATION_PATHS = frozenset(
     {
+        "/cart",
         "/cart/add",
         "/cart/add.js",
         "/cart/change",
@@ -138,12 +140,34 @@ class ReadonlyMutationGuard:
     def matches(cls, url: str, method: str = "GET") -> bool:
         """Return whether *method* and *url* identify a cart mutation."""
         normalized_method = str(method or "").upper()
-        return (
-            normalized_method in MUTATION_METHODS
-            and cls.normalize_path(url) in CART_MUTATION_PATHS
-        )
+        path = cls.normalize_path(url)
+        try:
+            path = unquote(path, errors="strict").replace("\\", "/")
+        except UnicodeDecodeError:
+            return normalized_method in MUTATION_METHODS and bool(
+                re.match(r"^/(?:[a-z]{2,3}(?:-[a-z]{2})?/)?cart(?:/|$)", path))
+        path = posixpath.normpath("/" + path.lstrip("/"))
+        # Shopify Markets may prefix cart routes with a language/region.
+        path = re.sub(r"^/[a-z]{2,3}(?:-[a-z]{2})?(?=/cart(?:/|$))", "", path)
+        # Nested escapes under cart are ambiguous; block rather than guessing
+        # whether a server or intermediary will decode another time.
+        ambiguous_cart = path.startswith("/cart/") and "%" in path
+        return normalized_method in MUTATION_METHODS and (path in CART_MUTATION_PATHS or ambiguous_cart)
 
     is_cart_mutation = matches
+
+    @classmethod
+    def canonical_cart_path(cls, url: str) -> Optional[str]:
+        """Return an unambiguous cart path; never authorize nested escapes."""
+        try:
+            path = unquote(cls.normalize_path(url), errors="strict").replace("\\", "/")
+        except UnicodeDecodeError:
+            return None
+        if "%" in path:
+            return None
+        path = posixpath.normpath("/" + path.lstrip("/"))
+        path = re.sub(r"^/[a-z]{2,3}(?:-[a-z]{2})?(?=/cart(?:/|$))", "", path)
+        return path if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS else None
 
     def set_scope(
         self,
@@ -161,7 +185,7 @@ class ReadonlyMutationGuard:
     def _handle_route(self, route) -> None:
         request = route.request
         method = str(getattr(request, "method", "") or "").upper()
-        path = self.normalize_path(getattr(request, "url", ""))
+        path = sanitize_pathname(self.normalize_path(getattr(request, "url", "")))
         if self.matches(getattr(request, "url", ""), method):
             self._violations.append(
                 {
@@ -189,6 +213,8 @@ class ReadonlyMutationGuard:
         """Attach after any existing route so non-matches fall back to it."""
         if self._attached:
             return
+        from utils.request_boundary import ensure_request_boundary
+        ensure_request_boundary(context).register_guard(self)
         context.route("**/*", self._handler)
         self._context = context
         self._attached = True
@@ -199,6 +225,8 @@ class ReadonlyMutationGuard:
             return
         try:
             self._context.unroute("**/*", self._handler)
+            from utils.request_boundary import ensure_request_boundary
+            ensure_request_boundary(self._context).remove_guard(self)
         except Exception:
             # Context disposal is still owned by BrowserRuntime; a closed
             # context makes unroute unnecessary.
@@ -492,6 +520,8 @@ class TransactionalMutationPolicy:
         if category == self.HIGH_RISK:
             return "HIGH_RISK_PRECEDENCE"
         if category == self.EXPECTED:
+            if ReadonlyMutationGuard.canonical_cart_path(url):
+                return "EXPECTED_CART_MUTATION"
             if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
                 return "EXPECTED_CART_MUTATION" if path.startswith("/cart") else "EXPECTED_TRANSACTIONAL_MUTATION"
             return "EXPECTED_TRANSACTIONAL_MUTATION"
@@ -526,7 +556,8 @@ class TransactionalMutationPolicy:
             return self.HIGH_RISK
         if self._is_known_blocked_wati_event(url, normalized_method, host, path):
             return self.KNOWN_BLOCKED_SIDE_EFFECT
-        if path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}:
+        if (path in EXPECTED_TRANSACTIONAL_MUTATION_PATHS or path in {"/checkout", "/checkouts"}
+                or ReadonlyMutationGuard.canonical_cart_path(url)):
             return self.EXPECTED
         if self._is_localization_context(url, normalized_method, host, path, request):
             return self.EXPECTED
@@ -691,6 +722,8 @@ class TransactionalMutationPolicy:
     def attach(self, context) -> None:
         if self._attached:
             return
+        from utils.request_boundary import ensure_request_boundary
+        ensure_request_boundary(context).register_guard(self)
         context.route("**/*", self._handler)
         self._context = context
         self._attached = True
@@ -700,6 +733,8 @@ class TransactionalMutationPolicy:
             return
         try:
             self._context.unroute("**/*", self._handler)
+            from utils.request_boundary import ensure_request_boundary
+            ensure_request_boundary(self._context).remove_guard(self)
         except Exception:
             pass
         finally:
@@ -786,10 +821,19 @@ class TransactionalMutationPolicy:
         return result
 
 
+def missing_transactional_mutation_summary() -> dict:
+    """Represent unavailable audit evidence without inventing mutation events."""
+    return {"mode": "TRANSACTIONAL_SAFE", "status": "FAIL", "audit_status": "MISSING",
+            "expected_mutation": 0, "known_blocked_side_effect": 0,
+            "unexpected_mutation": 0, "high_risk_mutation": 0,
+            "blocked_mutation": 0, "by_path": []}
+
+
 def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
     """Aggregate per-viewport policy summaries without exposing request data."""
 
     items = [summary for summary in summaries if isinstance(summary, dict)]
+    audit_missing = any(summary.get("audit_status") == "MISSING" for summary in items)
     by_fingerprint = {}
     expected = known_blocked = unexpected = high_risk = blocked = 0
     localization_diagnostics = []
@@ -908,7 +952,7 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
         paths.append(row)
     result = {
         "mode": "TRANSACTIONAL_SAFE",
-        "status": "PASS" if unexpected == 0 and high_risk == 0 else "FAIL",
+        "status": "PASS" if unexpected == 0 and high_risk == 0 and not audit_missing else "FAIL",
         "expected_mutation": expected,
         "known_blocked_side_effect": known_blocked,
         "unexpected_mutation": unexpected,
@@ -923,6 +967,8 @@ def merge_transactional_mutation_summaries(summaries: Iterable[dict]) -> dict:
                         for record in item.get("api_cleanup", {}).get("records", [])],
         },
     }
+    if audit_missing:
+        result["audit_status"] = "MISSING"
     if localization_diagnostics:
         result["localization_query_diagnostics"] = localization_diagnostics
     return result

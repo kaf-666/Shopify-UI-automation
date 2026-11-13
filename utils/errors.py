@@ -42,6 +42,14 @@ SENSITIVE_ENV_NAMES = (
 SIGNED_REQUEST_ENV_NAME_RE = re.compile(
     r"(?:^|_)SHOPIFY_SIGNATURE(?:_INPUT|_AGENT)?$", flags=re.IGNORECASE
 )
+SIGNED_REQUEST_BINDING_RE = re.compile(
+    r"\b(?:[A-Z][A-Z0-9_]*_)?SHOPIFY_SIGNATURE(?:_INPUT|_AGENT)?\b[\"']?\s*[:=]", re.IGNORECASE
+)
+
+
+def contains_sensitive_binding(text: str) -> bool:
+    """Recognize a credential assignment even when its value is absent from env."""
+    return bool(SIGNED_REQUEST_BINDING_RE.search(text))
 
 
 def sensitive_env_names(environ=None) -> tuple[str, ...]:
@@ -74,6 +82,12 @@ def sanitize_message(message: object) -> str:
     # 任意 URL userinfo 都不应出现在 Jenkins 日志中。
     text = re.sub(r"(https?://|socks5://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text, flags=re.I)
     text = re.sub(r"(https?://|socks5://)[^\s/@]+@", r"\1[REDACTED]@", text, flags=re.I)
+
+    # Navigation returns can append opaque session/auth parameters. Case
+    # details and Playwright exceptions must retain only the endpoint, even
+    # when the value is not an environment secret or the URL is truncated.
+    text = re.sub(r"(https?://[^\s'\"<>?#]+)[?#][^\s'\"<>]*",
+                  r"\1?[REDACTED_QUERY]", text, flags=re.I)
 
     # 避免 secret_file / 用户目录等本机绑定进入 results.json；不要把
     # 正常的 https:// URL 的斜杠误识别为本机路径。

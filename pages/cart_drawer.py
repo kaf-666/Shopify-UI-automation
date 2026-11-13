@@ -11,9 +11,11 @@ import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import expect
 
 from pages.base_page import BasePage
+from pages.home_page import HomePage
 
 DRAWER_OPEN_TIMEOUT_MS = 15_000
 
@@ -290,7 +292,8 @@ class CartDrawer(BasePage):
         btn = self.checkout_button()
         if not (btn.count() and btn.is_visible() and btn.is_enabled()):
             raise RuntimeError("standard checkout button not available")
-        btn.click()
+        from utils.request_boundary import run_navigation
+        run_navigation(self.page, btn.click)
 
     # ------------------------------------------------------------ 数量控件
     def quantity_input(self, index: int = 0):
@@ -325,6 +328,63 @@ class CartDrawer(BasePage):
             raise RuntimeError("quantity decrease button is disabled")
         before = self.get_item_quantity(index)
         self._click_quantity_control(btn, index, before)
+
+    def settle_quantity_promotion(self, timeout_ms: int = 15_000) -> bool:
+        """Dismiss a post-quantity promotion dialog and restore the drawer.
+
+        Some themes open a native <dialog> after an AJAX cart quantity update.
+        Opening that dialog moves focus out of the cart popover, which closes
+        the drawer; the theme also waits for the dialog before re-rendering the
+        drawer. Dismiss the real control, wait for the theme's promotion flow
+        to settle, then reopen the configured drawer so the updated quantity is
+        readable again.
+        """
+        selectors = self.page_config().get("selectors") or {}
+        if not selectors.get("promotion_gift_dismiss"):
+            return False
+
+        dismiss = self.locator("promotion_gift_dismiss").first
+        appeared = False
+        try:
+            self.page.wait_for_function(
+                """() => {
+                    if (document.querySelector('[data-promotion-gift-dialog][open]')) {
+                        return true;
+                    }
+                    return !window.promotionGift || !window.promotionGift.busy();
+                }""",
+                timeout=timeout_ms,
+            )
+        except PlaywrightTimeoutError:
+            pass
+
+        if dismiss.count() and dismiss.is_visible():
+            appeared = True
+            dismiss.click()
+            try:
+                expect(self.locator("promotion_gift_dismiss")).to_have_count(
+                    0, timeout=5_000
+                )
+            except PlaywrightTimeoutError:
+                pass
+            try:
+                self.page.wait_for_function(
+                    "() => !window.promotionGift || !window.promotionGift.busy()",
+                    timeout=5_000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+        self._reopen_drawer_if_closed()
+        return appeared
+
+    def _reopen_drawer_if_closed(self) -> None:
+        """Reopen the configured cart drawer after a promotion dialog closes."""
+        if self.is_open():
+            return
+        HomePage(self.page, self.site_config, self.viewport).cart_trigger().click()
+        self.wait_open()
+        self.wait_item()
 
     def _click_quantity_control(self, btn, index: int, before: str) -> None:
         """等待 change response，并记录不改变业务行为的数量时间线。"""
@@ -430,6 +490,7 @@ class CartDrawer(BasePage):
         finally:
             if before_handle is not None:
                 before_handle.dispose()
+        self.settle_quantity_promotion()
 
     def wait_quantity(self, index: int = 0, expected: int = 1, timeout_ms: int = 10_000) -> None:
         """等待第 index 个商品行数量 input 达到期望值。"""

@@ -45,7 +45,7 @@ pages:
           value: 'button[aria-label="Open navigation"]'
       cart:
         by: css
-        value: 'button[aria-label="Open cart"]'
+        value: 'button[aria-label="Open cart"]:visible'
 
   search:
     url: /search
@@ -57,7 +57,6 @@ pages:
     entry_strategy:
       desktop: direct_trigger
       mobile: navigation_drawer
-    blocking_overlay_wait_ms: 15000
     selectors:
       container:
         desktop:
@@ -205,6 +204,11 @@ pages:
       drawer_open:
         by: css
         value: '#slideout-ajax-cart:popover-open'
+      # The theme opens a native gift-choice dialog after quantity changes;
+      # decline it so the cart drawer can be reopened and assertions continue.
+      promotion_gift_dismiss:
+        by: css
+        value: '[data-promotion-gift-dialog][open] [data-gift-skip]'
       cart_item:
         by: css
         value: '.ajax-cart__cart-item:visible'

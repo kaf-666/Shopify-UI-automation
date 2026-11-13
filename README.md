@@ -8,14 +8,42 @@ supports two independent production contracts:
 | Full (`website_smoke_v1`) | 15 / 30 | Direct, Search and Browse purchase journeys; cart consistency, quantity and checkout entry | `scripts/run_website_smoke_v1.py` |
 | Readonly (`website_smoke_readonly_v1`) | 11 / 22 | Direct, Search and Browse readiness; legal variant selection and ATC availability | `scripts/run_website_smoke_readonly_v1.py` |
 
-Readonly never clicks ATC, writes/cleans the cart or enters checkout. Its network
-Mutation Guard aborts cart writes and reports `READONLY_MUTATION_VIOLATION`.
+Readonly never intentionally clicks ATC, writes/cleans the cart or enters checkout.
+Its network Mutation Guard aborts recognized cart writes, including forbidden
+redirect targets, and reports `READONLY_MUTATION_VIOLATION`.
 The structural `pre_clean` / `cleanup` values `readonly_not_required` do not mean
 cleanup ran. Full uses `TRANSACTIONAL_SAFE`: intended cart writes are audited;
-unexpected mutations fail the run, high-risk order/payment/account mutations
-are blocked, and final cleanup must verify the cart is empty. Full checks
+unexpected mutations fail the run, recognized high-risk order/payment/account
+mutations are blocked before sending, and final cleanup must verify the cart is empty. Full checks
 checkout entry only: no payment data, accelerated payment, order submission or
 real payment.
+
+Protected browser requests use a single-hop transport with automatic redirects
+and retries disabled. Redirect targets are checked before sending. Main-frame
+GET redirects (including POST-to-GET Checkout redirects) resume through the
+navigation coordinator. Validated script-initiated navigation completes before
+the next UI gesture or the end-of-suite barrier, without replaying that gesture.
+Redirected POST/PUT/PATCH/DELETE, subresource redirects,
+and other redirects outside the permitted signed HTTPS origin set fail closed with
+`REQUEST_BOUNDARY_FAILURE`. API cart reads/cleanup reject redirects separately.
+A verified same-origin locale form POST keeps its actual cookie updates; its
+matching return-page GET is blocked as a network failure and recorded
+as `LOCALIZATION_RETURN_READ_SUPPRESSED`, a non-gating side effect. Unknown forms,
+different return targets, and account/payment/cart-writing redirects still fail.
+An unsigned Google measurement POST-to-GET return in a child frame is also
+aborted and separately audited as `GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED`.
+This exact HTTPS provider/endpoint rule sends no follow-up request; unknown
+providers, paths and writing redirects still fail. The Google pagead
+viewthrough-to-1p family additionally requires an identical numeric ad ID.
+The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
+path: no signing, authorization, referral headers or cookies are sent; only 3xx
+responses returning to the same original storefront endpoint are accepted. Source
+query parameters must remain unchanged; bounded opaque additions stay in memory.
+Shop HTML
+is never rendered, and Shop is never added to the signing allowlist. Unknown
+endpoints, different return URLs, loops and terminal HTML responses fail closed.
+The local Chromium/WebKit regression uses synthetic HTTP(S) servers and dummy
+credentials; candidate Jenkins and live storefront acceptance are separate gates.
 
 ## Runtime and installation
 
@@ -43,8 +71,9 @@ existing credentials into the process environment or Jenkins credentials binding
 | Shirees | `SHIREES_US_SHOPIFY_` |
 
 Each prefix requires `SIGNATURE`, `SIGNATURE_INPUT`, `SIGNATURE_AGENT`. Values,
-cookies and signing keys must never be committed or printed. Headers are injected
-only for the exact hosts in `configs/sites/<site>.yaml`. Proxy defaults to off;
+cookies and signing keys must never be committed or printed. Initial requests are
+signed only for the exact HTTPS hosts in `configs/sites/<site>.yaml`; protected
+redirects are handled by the boundary described above. Proxy defaults to off;
 optional settings are `SHOPIFY_PROXY_SERVER`, `SHOPIFY_PROXY_USERNAME`,
 `SHOPIFY_PROXY_PASSWORD`, and `SHOPIFY_PROXY_ENABLED`. Keep values external.
 Profiles declare suite capabilities, navigation and supported product options;
@@ -160,8 +189,9 @@ All expose `SMOKE_VIEWPORT=both|desktop|mobile`; each binds only its own three
 credential IDs above. Lavetir Readonly alone defines source cron and optional
 `VARIANT_DIAGNOSTIC=false`; the other schedules are job UI configuration. A
 variant diagnostic failure is UNSTABLE and does not replace the formal result.
-`Jenkinsfile` and `Jenkinsfile.smoke-integration-manual` remain separate legacy
-compatibility entries. Old pilot descriptions do not define current schedules.
+The plain `Jenkinsfile` is retired and fails with `LEGACY_PIPELINE_DISABLED`;
+migrate jobs to a fixed site entry above. `Jenkinsfile.smoke-integration-manual`
+remains a separate manual legacy pilot. Old pilot descriptions do not define current schedules.
 
 The six thin entries load `ci/smoke_pipeline.groovy` and delegate fixed steps to
 `scripts/run_smoke_ci.py`: checkout → environment/dependencies → prepare → browsers
@@ -195,6 +225,8 @@ authoritative; `artifacts/website-smoke-v1/<site>/stability-history.jsonl` is an
 ignored workspace cache updated only after archive acknowledgement (idempotent).
 History remains separate from current summaries and isolated by site/suite/commit
 baseline. Missing cache is not a current-run failure.
+`record_stability.py` requires an explicit results path; Jenkins invocations also
+require the matching run context. Legacy jobs without a run context must migrate.
 
 ```powershell
 python scripts/summarize_stability.py --site mondressy --last 10

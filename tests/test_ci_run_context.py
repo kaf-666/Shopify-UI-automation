@@ -59,6 +59,51 @@ def acknowledge(context):
     return publication.main(["--run-context", context["context_path"], "--acknowledge"])
 
 
+def test_stability_rejects_implicit_latest_and_jenkins_without_context(monkeypatch, tmp_path):
+    context = prepare(monkeypatch, tmp_path)
+    root = save_current(context, tmp_path)
+    assert record_stability.main(["--artifacts-root", str(root.parent)]) == 1
+    assert record_stability.main(["--results", str(root / "results.json")]) == 1
+    assert not (root.parent / "stability-history.jsonl").exists()
+    assert not (root / "stability_record.json").exists()
+
+
+def test_stability_rejects_an_explicit_missing_result(monkeypatch, tmp_path):
+    for key in ("JOB_NAME", "BUILD_NUMBER", "JENKINS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    assert record_stability.main(["--results", str(tmp_path / "missing.json")]) == 1
+
+
+def test_local_stability_preserves_result_identity_instead_of_ambient_commit(monkeypatch, tmp_path):
+    context = prepare(monkeypatch, tmp_path)
+    root = save_current(context, tmp_path)
+    for key in ("JOB_NAME", "BUILD_NUMBER", "JENKINS_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("GIT_COMMIT_SHA", "a" * 40)
+    args = ["--results", str(root / "results.json"), "--artifacts-root", str(root.parent.parent)]
+    assert record_stability.main([*args, "--commit-sha", "a" * 40]) == 1
+    assert not (root / "stability_record.json").exists()
+    assert record_stability.main(args) == 0
+    record = json.loads((root / "stability_record.json").read_text())
+    assert record["commit_sha"] == "b" * 40 and record["build_number"] == 102
+
+
+def test_ineligible_record_is_archived_but_not_added_to_history(monkeypatch, tmp_path):
+    context = prepare(monkeypatch, tmp_path)
+    root = save_current(context, tmp_path)
+    build_record = publication.build_stability_record
+
+    def ineligible(*args, **kwargs):
+        return {**build_record(*args, **kwargs), "eligible": False}
+
+    monkeypatch.setattr(publication, "build_stability_record", ineligible)
+    assert publish(context) == 0
+    assert acknowledge(context) == 0
+    snapshot = tmp_path / context["publish_dir"] / context["identity"]["run_id"]
+    assert json.loads((snapshot / "stability_record.json").read_text())["eligible"] is False
+    assert not (root.parent / "stability-history.jsonl").exists()
+
+
 @pytest.mark.parametrize("site", ["mondressy", "lavetir", "shirees"])
 @pytest.mark.parametrize("suite", list(runs.SUITE_ROOTS))
 def test_publication_contains_only_this_run_and_history_requires_archive_ack(monkeypatch, tmp_path, site, suite):
