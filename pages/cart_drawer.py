@@ -389,7 +389,11 @@ class CartDrawer(BasePage):
         """Reopen the configured cart drawer after a promotion dialog closes."""
         if self.is_open():
             return
-        HomePage(self.page, self.site_config, self.viewport).cart_trigger().click()
+        trigger = HomePage(self.page, self.site_config, self.viewport).cart_trigger()
+        # The mobile header trigger can remain outside WebKit's viewport after
+        # the native dialog closes. This is a recovery step rather than a
+        # primary user navigation, so use the control's own click path.
+        trigger.evaluate("element => element.click()")
         self.wait_open()
         self.wait_item()
 
