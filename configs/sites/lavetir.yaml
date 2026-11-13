@@ -48,14 +48,18 @@ pages:
       search:
         desktop:
           by: css
-          value: "a.js-search-header:not(.medium-up--hide)"
+          value: "a.js-search-header:visible"
           stability: HIGH
-          notes: Verified desktop search trigger; excludes the mobile-only duplicate
+          notes: >-
+            Header renders identical desktop/mobile triggers; the responsive
+            class now lives on the wrapper, so select the actually visible one.
         mobile:
           by: css
-          value: "a.js-search-header.medium-up--hide"
+          value: "a.js-search-header:visible"
           stability: HIGH
-          notes: Verified mobile search trigger; excludes the desktop-only duplicate
+          notes: >-
+            Header renders identical desktop/mobile triggers; the responsive
+            class now lives on the wrapper, so select the actually visible one.
 
       cart:
         by: css

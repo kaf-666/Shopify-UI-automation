@@ -87,10 +87,12 @@ def test_query_policy_does_not_admit_another_origin_route_or_fragment(page, url)
     assert "private-value" not in serialized and "private-fragment" not in serialized
 
 
-@pytest.mark.parametrize("selector", ["h1", "header", "a.js-search-header.medium-up--hide"])
+@pytest.mark.parametrize("selector", ["h1", "header", "a.js-search-header"])
 def test_root_query_requires_visible_configured_home_controls(page, selector):
     current = search(page, "https://www.lavetir.com/?token=private-value")
-    page.locator(selector).evaluate("element => element.style.display='none'")
+    page.locator(selector).evaluate_all(
+        "elements => elements.forEach(element => element.style.display='none')"
+    )
     with pytest.raises(RuntimeError, match="^Search session can only be opened from Home$"):
         current.ensure_search_session_open()
     assert page.evaluate("window.clicks") == 0
