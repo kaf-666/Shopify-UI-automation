@@ -85,10 +85,10 @@ def test_lavetir_search_trigger_is_resolved_per_viewport() -> None:
     mobile = HomePage(None, LAVETIR, "mobile")
 
     assert desktop.resolve_selector("search")["value"] == (
-        "a.js-search-header:not(.medium-up--hide)"
+        "a.js-search-header:visible"
     )
     assert mobile.resolve_selector("search")["value"] == (
-        "a.js-search-header.medium-up--hide"
+        "a.js-search-header:visible"
     )
 
 
