@@ -40,9 +40,14 @@ def _shirees_config():
     return config
 
 
-def _set_promotion_page(page):
+def _set_promotion_page(page, *, cover_dialog=False):
+    overlay = (
+        '<div style="position:absolute;inset:0;z-index:10"></div>'
+        if cover_dialog
+        else ""
+    )
     page.set_content(
-        """
+        f"""
         <base href="https://example.test/">
         <button id="cart-trigger"
                 onclick="document.querySelector('#drawer').classList.add('open')">
@@ -56,21 +61,22 @@ def _set_promotion_page(page):
                       const input = this.parentElement.querySelector('.qty');
                       input.value = '2';
                       window.__giftBusy = true;
-                      fetch('/cart/change.js', {
+                      fetch('/cart/change.js', {{
                         method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: '{}'
-                      });
-                      setTimeout(() => {
+                        headers: {{'Content-Type': 'application/json'}},
+                        body: '{{}}'
+                      }});
+                      setTimeout(() => {{
                         document.querySelector('#drawer').classList.remove('open');
                         document.querySelector('[data-promotion-gift-dialog]').showModal();
-                      }, 100);
+                      }}, 100);
                     ">+</button>
             <button class="minus"
                     onclick="this.parentElement.querySelector('.qty').value = '1'">-</button>
           </div>
         </aside>
-        <dialog data-promotion-gift-dialog>
+        <dialog data-promotion-gift-dialog style="position:relative">
+          {overlay}
           <button data-gift-skip
                   onclick="this.closest('dialog').close()">No, thanks</button>
         </dialog>
@@ -103,6 +109,24 @@ def test_promotion_gift_dialog_is_dismissed_and_drawer_reopened(page):
     assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
     assert page.locator("#drawer.open").count() == 1
     assert page.locator(".item .qty").input_value() == "1"
+
+
+def test_promotion_gift_click_falls_back_when_pointer_is_intercepted(page):
+    _set_promotion_page(page, cover_dialog=True)
+    page.evaluate(
+        """() => {
+          window.__giftBusy = true;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 100);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
 
 
 def test_increase_quantity_handles_promotion_gift_after_change(page):
