@@ -360,7 +360,14 @@ class CartDrawer(BasePage):
 
         if dismiss.count() and dismiss.is_visible():
             appeared = True
-            dismiss.click()
+            try:
+                dismiss.click(timeout=3_000)
+            except PlaywrightTimeoutError:
+                # WebKit can report the native modal backdrop as <html>
+                # intercepting pointer events even though the real control is
+                # visible and enabled. Dispatch the control's own click path
+                # instead of retrying a blocked pointer action for 30 seconds.
+                dismiss.evaluate("element => element.click()")
             try:
                 expect(self.locator("promotion_gift_dismiss")).to_have_count(
                     0, timeout=5_000
