@@ -129,6 +129,28 @@ def test_promotion_gift_click_falls_back_when_pointer_is_intercepted(page):
     assert page.locator("#drawer.open").count() == 1
 
 
+def test_promotion_gift_reopens_offscreen_cart_trigger(page):
+    _set_promotion_page(page)
+    page.eval_on_selector(
+        "#cart-trigger",
+        "element => { element.style.position = 'fixed'; element.style.left = '-10000px'; }",
+    )
+    page.evaluate(
+        """() => {
+          window.__giftBusy = true;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 100);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+
+
 def test_increase_quantity_handles_promotion_gift_after_change(page):
     _set_promotion_page(page)
 
