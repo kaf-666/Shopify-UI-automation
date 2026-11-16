@@ -15,7 +15,9 @@ DOM 说明：Shopify Checkout 使用 hash class，不稳定；
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from urllib.parse import urlparse
 
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -24,10 +26,74 @@ from playwright.sync_api import expect
 from pages.base_page import BasePage
 
 
+class _CheckoutProposalTracker:
+    """Track Shopify Checkout's persisted ``Proposal`` requests without payloads.
+
+    The checkout page can post a ``Proposal`` GraphQL request after the cart
+    has been cleared. If the request lands after ``/cart/clear.js`` it can
+    restore the cart line. This tracker lets the checkout case wait for that
+    sync to settle before the final cleanup runs.
+    """
+
+    @staticmethod
+    def _is_proposal(request) -> bool:
+        try:
+            if "/graphql/persisted" not in str(getattr(request, "url", "")):
+                return False
+            payload = getattr(request, "post_data", None)
+            if isinstance(payload, str):
+                payload = json.loads(payload)
+            if not isinstance(payload, dict):
+                return False
+            return payload.get("operationName") == "Proposal"
+        except Exception:
+            return False
+
+    def __init__(self) -> None:
+        self.seen = 0
+        self.pending = 0
+        self.done = 0
+        self.last_event = time.monotonic()
+
+    def on_request(self, request) -> None:
+        if not self._is_proposal(request):
+            return
+        self.seen += 1
+        self.pending += 1
+        self.last_event = time.monotonic()
+
+    def on_response(self, response) -> None:
+        try:
+            request = response.request
+        except Exception:
+            return
+        if not self._is_proposal(request):
+            return
+        if self.pending > 0:
+            self.pending -= 1
+        else:
+            # The observer may have been attached after the request was sent.
+            self.seen += 1
+        self.done += 1
+        self.last_event = time.monotonic()
+
+    def settled(self, now: float | None = None, quiet_seconds: float = 1.5) -> bool:
+        now = time.monotonic() if now is None else now
+        return (
+            self.seen > 0
+            and self.pending == 0
+            and (now - self.last_event) >= quiet_seconds
+        )
+
+
 class CheckoutPage(BasePage):
     """Checkout 落地页对象：上下文判定、核心 UI 存在性与商品摘要读取。"""
 
     PAGE_NAME = "checkout"
+
+    def __init__(self, page, site_config: dict | None = None, viewport: str = "desktop"):
+        super().__init__(page, site_config, viewport)
+        self._proposal_tracker: _CheckoutProposalTracker | None = None
 
     _CELL_SNAPSHOT_JS = r"""
         cells => cells.map(cell => {
@@ -266,3 +332,53 @@ class CheckoutPage(BasePage):
             raise TimeoutError(
                 f"checkout context not reached (url={self.page.url[:120]})"
             ) from exc
+
+    # ---------------------------------------------------- Checkout cart sync
+    def observe_cart_sync(self) -> None:
+        """Attach a bounded observer for Shopify Checkout's ``Proposal`` sync.
+
+        Call before clicking the checkout button so the initial request is not
+        missed. The observer stores only operation names and counters; request
+        and response payloads are never persisted.
+        """
+        if self._proposal_tracker is not None:
+            return
+        if not hasattr(self.page, "on"):
+            return
+        tracker = _CheckoutProposalTracker()
+        try:
+            self.page.on("request", tracker.on_request)
+            self.page.on("response", tracker.on_response)
+        except Exception:
+            return
+        self._proposal_tracker = tracker
+
+    def wait_cart_sync(self, timeout_ms: int = 8_000, quiet_ms: int = 1_500) -> str:
+        """Wait until observed checkout ``Proposal`` requests have settled.
+
+        Returns ``SETTLED`` when a Proposal request was seen, none are pending,
+        and the quiet window elapsed. Returns ``NOT_OBSERVED`` if no Proposal
+        request was seen before the timeout. ``TIMEOUT_PENDING`` /
+        ``TIMEOUT_SEEN`` indicate a bounded diagnostic timeout; callers should
+        not turn these into a business failure or a cleanup PASS.
+        """
+        if self._proposal_tracker is None:
+            return "UNAVAILABLE"
+        timeout_seconds = max(0, int(timeout_ms)) / 1000.0
+        quiet_seconds = max(0, int(quiet_ms)) / 1000.0
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            tracker = self._proposal_tracker
+            now = time.monotonic()
+            if tracker.seen > 0 and tracker.pending == 0 and (
+                now - tracker.last_event
+            ) >= quiet_seconds:
+                return "SETTLED"
+            if now >= deadline:
+                if tracker.seen == 0:
+                    return "NOT_OBSERVED"
+                return "TIMEOUT_PENDING" if tracker.pending else "TIMEOUT_SEEN"
+            try:
+                self.page.wait_for_timeout(100)
+            except Exception:
+                return "UNAVAILABLE"
