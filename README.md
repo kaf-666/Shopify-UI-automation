@@ -35,11 +35,11 @@ aborted and separately audited as `GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED`.
 This exact HTTPS provider/endpoint rule sends no follow-up request; unknown
 providers, paths and writing redirects still fail. The Google pagead
 viewthrough-to-1p family additionally requires an identical numeric ad ID.
-During intentional browser disposal, in-flight passive asset reads and the exact
+During intentional browser disposal, in-flight passive asset reads, the exact
 first-party Shopify Monorail telemetry POST
-(`/.well-known/shopify/monorail/unstable/produce_batch`) plus a third-party
-analytics fetch POST to `/events` may be canceled without gating the run;
-navigation, business XHR/fetch and writes remain gating.
+(`/.well-known/shopify/monorail/unstable/produce_batch`) and third-party
+fetch/xhr POST monitoring traffic may be canceled without gating the run;
+first-party navigation, business XHR/fetch and writes remain gating.
 The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
 path: no signing, authorization, referral headers or cookies are sent; only 3xx
 responses returning to the same original storefront endpoint are accepted. Source
