@@ -192,6 +192,26 @@ def test_ensure_drawer_ready_recovers_after_a_late_dialog(page):
     assert page.locator("#drawer.open").count() == 1
 
 
+def test_settle_waits_for_item_after_a_dialog_rerender(page):
+    _set_promotion_page(page)
+    page.evaluate(
+        """() => {
+          const item = document.querySelector('.item');
+          const parent = item.parentElement;
+          setTimeout(() => {
+            item.remove();
+            setTimeout(() => parent.appendChild(item), 1300);
+          }, 50);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    drawer.settle_quantity_promotion(timeout_ms=3_000)
+
+    assert page.locator("#drawer.open").count() == 1
+    assert page.locator(".item").count() == 1
+
+
 def test_increase_quantity_handles_promotion_gift_after_change(page):
     _set_promotion_page(page)
 

@@ -457,6 +457,16 @@ class CartDrawer(BasePage):
                 pass
 
         self._reopen_drawer_if_closed()
+        if self.is_open():
+            # The theme can briefly replace the drawer contents while a
+            # promotion dialog closes. Wait for the item row before the next
+            # quantity/read operation observes an apparently empty drawer.
+            try:
+                self.wait_item(timeout=5_000)
+            except Exception:
+                raise RuntimeError(
+                    "cart item not rendered after promotion settle"
+                ) from None
         return appeared
 
     def _reopen_drawer_if_closed(self) -> None:
@@ -579,6 +589,9 @@ class CartDrawer(BasePage):
 
     def wait_quantity(self, index: int = 0, expected: int = 1, timeout_ms: int = 10_000) -> None:
         """等待第 index 个商品行数量 input 达到期望值。"""
+        # A promotion dialog can replace the drawer after the change response;
+        # recover before resolving the quantity input for the assertion.
+        self.ensure_drawer_ready()
         expect(self.quantity_input(index)).to_have_value(str(expected), timeout=timeout_ms)
         diagnostics = getattr(self, "_quantity_diagnostics", None) or []
         if diagnostics:
