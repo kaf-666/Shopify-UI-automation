@@ -21,6 +21,10 @@ MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
 PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest", "texttrack"}
+# Shopify's first-party Monorail endpoint is telemetry, not a business write.
+# A driver cancellation while fulfilling its response after an intentional
+# close must not turn a passed suite into a runtime failure.
+CLOSING_TELEMETRY_POST_PATHS = frozenset({"/.well-known/shopify/monorail/unstable/produce_batch"})
 MEASUREMENT_HOSTS = {"google.com", "www.google.com", "www.googleadservices.com"}
 STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
 
@@ -178,6 +182,7 @@ class RequestBoundary:
         self.transport_errors = []
         self.closing_cancellation_count = 0
         self.closing_passive_read_cancellation_count = 0
+        self.closing_telemetry_post_cancellation_count = 0
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -234,7 +239,8 @@ class RequestBoundary:
                 "bridge_events": [dict(event) for event in self.bridge_events],
                 "transport_errors": [dict(event) for event in self.transport_errors],
                 "closing_cancellation_count": self.closing_cancellation_count,
-                "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count}
+                "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count,
+                "closing_telemetry_post_cancellation_count": self.closing_telemetry_post_cancellation_count}
 
     def _anonymous_shop_return(self, route, target):
         """Read only the fixed bridge, returning only to the source endpoint.
@@ -457,6 +463,7 @@ class RequestBoundary:
             # generic driver Error. These GET/HEAD resources are no longer used
             # after the suite barrier. Navigation, XHR and writes stay gating.
             passive_read = False
+            telemetry_post = False
             if self.closing and isinstance(exc, PlaywrightError):
                 try:
                     passive_read = (request.method in {"GET", "HEAD"}
@@ -464,10 +471,23 @@ class RequestBoundary:
                                     and not request.is_navigation_request())
                 except Exception:
                     pass
+                try:
+                    telemetry_post = (
+                        request.method == "POST"
+                        and request.resource_type in {"fetch", "xhr"}
+                        and not request.is_navigation_request()
+                        and urlsplit(request.url).path in CLOSING_TELEMETRY_POST_PATHS
+                        and policy is not None
+                        and policy._host_allowed(request.url)
+                    )
+                except Exception:
+                    telemetry_post = False
             if self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
-                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"} or passive_read):
+                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}
+                    or passive_read or telemetry_post):
                 self.closing_cancellation_count += 1
                 self.closing_passive_read_cancellation_count += int(passive_read)
+                self.closing_telemetry_post_cancellation_count += int(telemetry_post)
             else:
                 self.failures.append("REQUEST_TRANSPORT_FAILED")
                 if len(self.transport_errors) < 100:
