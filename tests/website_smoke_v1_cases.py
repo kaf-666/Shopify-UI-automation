@@ -900,6 +900,8 @@ class WebsiteSmokeV1Runner:
                 )
         except FlowError:
             raise
+        except IndexError as exc:
+            raise FlowError("CART_ITEM_NOT_FOUND", str(exc)) from exc
         except RuntimeError as exc:
             raise FlowError("CART_QUANTITY_INCREASE_FAILURE", str(exc)) from exc
         except TimeoutError as exc:
