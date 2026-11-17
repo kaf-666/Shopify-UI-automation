@@ -148,6 +148,46 @@ def test_telemetry_cancellation_requires_configured_first_party_host():
         boundary.assert_clean()
 
 
+def test_third_party_events_cancellation_is_ignored_only_during_close():
+    boundary, route = _monorail_route(
+        url="https://analytics.invalid/events", first_party=False
+    )
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
+
+    boundary, route = _monorail_route(
+        url="https://analytics.invalid/events", first_party=False, closing=False
+    )
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
+def test_third_party_events_rule_does_not_allow_first_party_or_other_paths():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/events", first_party=True
+    )
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+    boundary, route = _monorail_route(
+        url="https://analytics.invalid/other", first_party=False
+    )
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
+def test_telemetry_cancellation_without_policy_remains_gating():
+    boundary, route = _monorail_route(url="https://analytics.invalid/events", first_party=False)
+    boundary.access_policy = None
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
 def test_telemetry_cancellation_does_not_erase_prior_safety_denial():
     boundary, route = _monorail_route()
     boundary.failures.append("REDIRECT_MUTATION_DENIED")
