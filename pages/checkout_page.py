@@ -215,6 +215,23 @@ class CheckoutPage(BasePage):
         """
         expect(self.contact_section()).to_be_visible(timeout=timeout_ms)
 
+    def wait_order_summary(self, timeout_ms: int = 15_000) -> None:
+        """Wait until the checkout order summary has rendered.
+
+        Contact and order summary are separate React subtrees and can hydrate
+        at different times. A one-shot read immediately after contact became
+        visible can observe neither the summary text nor its role=cell rows.
+        """
+        deadline = time.monotonic() + max(0, int(timeout_ms)) / 1000.0
+        while True:
+            if self.has_order_summary() or self._cells().count() > 0:
+                return
+            now = time.monotonic()
+            if now >= deadline:
+                raise TimeoutError("checkout order summary did not appear")
+            remaining_ms = max(1, int((deadline - now) * 1000))
+            self.page.wait_for_timeout(min(100, remaining_ms))
+
     def ensure_order_summary_visible(self) -> None:
         """必要时通过真实 UI 展开 Order Summary（移动端默认折叠）。
 

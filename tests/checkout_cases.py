@@ -221,6 +221,10 @@ class CheckoutCaseRunner:
             checkout.wait_checkout_settled()
         except TimeoutError as exc:
             raise FlowError("CHECKOUT_CONTEXT_NOT_REACHED", str(exc)) from exc
+        try:
+            checkout.wait_order_summary()
+        except TimeoutError as exc:
+            raise FlowError("CHECKOUT_ORDER_SUMMARY_NOT_AVAILABLE", str(exc)) from exc
         sections = checkout.core_sections_present()
         if not sections["root"]:
             raise FlowError("CHECKOUT_CORE_NOT_AVAILABLE", "checkout root missing")
@@ -244,6 +248,7 @@ class CheckoutCaseRunner:
         checkout = self.state["checkout"]
         try:
             checkout.wait_checkout_settled()
+            checkout.wait_order_summary()
             checkout.ensure_order_summary_visible()
         except Exception as exc:
             raise FlowError(

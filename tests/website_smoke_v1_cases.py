@@ -928,6 +928,10 @@ class WebsiteSmokeV1Runner:
             raise FlowError("CHECKOUT_NAVIGATION_FAILURE", str(exc)) from exc
         except TimeoutError as exc:
             raise FlowError("CHECKOUT_CONTEXT_NOT_REACHED", str(exc)) from exc
+        try:
+            checkout.wait_order_summary()
+        except TimeoutError as exc:
+            raise FlowError("CHECKOUT_ORDER_SUMMARY_NOT_AVAILABLE", str(exc)) from exc
         sections = checkout.core_sections_present()
         if not sections["root"]:
             raise FlowError("CHECKOUT_CORE_NOT_AVAILABLE", "checkout root missing")
