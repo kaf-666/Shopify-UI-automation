@@ -25,10 +25,10 @@ PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest
 # A driver cancellation while fulfilling its response after an intentional
 # close must not turn a passed suite into a runtime failure.
 CLOSING_TELEMETRY_POST_PATHS = frozenset({"/.well-known/shopify/monorail/unstable/produce_batch"})
-# Third-party analytics SDKs commonly use a fetch POST to /events. These are
-# monitoring events, not storefront writes; an in-flight response canceled by
-# intentional close is safe to count. First-party /events still gate.
-CLOSING_THIRD_PARTY_TELEMETRY_PATHS = frozenset({"/events"})
+# Third-party fetch/xhr POSTs observed in these suites are analytics, conversion
+# and logging traffic (Google, Bing, Meta, Clarity, OTLP, Monorail, PayPal
+# logger, popup/variant apps). During intentional close their responses can be
+# canceled by the driver; first-party writes and navigations still gate.
 MEASUREMENT_HOSTS = {"google.com", "www.google.com", "www.googleadservices.com"}
 STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
 
@@ -484,8 +484,8 @@ class RequestBoundary:
                         and request.resource_type in {"fetch", "xhr"}
                         and not request.is_navigation_request()
                         and (
-                            (first_party and path in CLOSING_TELEMETRY_POST_PATHS)
-                            or (not first_party and path in CLOSING_THIRD_PARTY_TELEMETRY_PATHS)
+                            not first_party
+                            or path in CLOSING_TELEMETRY_POST_PATHS
                         )
                     )
                 except Exception:

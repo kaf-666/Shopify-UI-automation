@@ -141,11 +141,11 @@ def test_telemetry_cancellation_rule_is_narrow(url, method, resource_type):
         boundary.assert_clean()
 
 
-def test_telemetry_cancellation_requires_configured_first_party_host():
+def test_third_party_monorail_is_covered_by_the_generic_telemetry_rule():
     boundary, route = _monorail_route(first_party=False)
     boundary._handle_route(route)
-    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
-        boundary.assert_clean()
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
 
 
 def test_third_party_events_cancellation_is_ignored_only_during_close():
@@ -164,7 +164,16 @@ def test_third_party_events_cancellation_is_ignored_only_during_close():
         boundary.assert_clean()
 
 
-def test_third_party_events_rule_does_not_allow_first_party_or_other_paths():
+def test_third_party_metrics_cancellation_is_also_ignored_during_close():
+    boundary, route = _monorail_route(
+        url="https://otlp.invalid/v1/metrics", first_party=False
+    )
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
+
+
+def test_third_party_telemetry_rule_does_not_allow_first_party_or_other_methods():
     boundary, route = _monorail_route(
         url="https://store.invalid/events", first_party=True
     )
@@ -173,7 +182,8 @@ def test_third_party_events_rule_does_not_allow_first_party_or_other_paths():
         boundary.assert_clean()
 
     boundary, route = _monorail_route(
-        url="https://analytics.invalid/other", first_party=False
+        url="https://analytics.invalid/events", first_party=False,
+        resource_type="document",
     )
     boundary._handle_route(route)
     with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
