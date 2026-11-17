@@ -106,8 +106,9 @@ def acknowledge_publication(context, *, workspace=None):
         record = json.loads((publication_root / identity["run_id"] / "stability_record.json").read_text(encoding="utf-8"))
         if record.get("execution_context") != identity:
             raise RunContextError("STABILITY_IDENTITY_MISMATCH")
-        history = confined_path(f"{Path(context['run_dir']).parent.as_posix()}/{HISTORY_FILENAME}", workspace)
-        write_history_record(history, record)
+        if record.get("eligible") is True:
+            history = confined_path(f"{Path(context['run_dir']).parent.as_posix()}/{HISTORY_FILENAME}", workspace)
+            write_history_record(history, record)
     context["state"] = "PUBLISHED"
     save_context(context, workspace=workspace)
     print("CI publication: ACKNOWLEDGED")

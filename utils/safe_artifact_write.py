@@ -8,12 +8,19 @@ POSIX is outside this trust boundary; resolve alone is not a TOCTOU defence.
 import ctypes
 import json
 import os
+import re
 import stat
 import uuid
 from contextlib import contextmanager, ExitStack
 from pathlib import Path, PureWindowsPath
 
 from utils.result import ResultWriteError
+
+TEXT_PATHS = {"summary.html", "summary.css", "traffic/requests.jsonl", "traffic/summary.txt"}
+JSON_PATHS = {"results.json", "desktop/cart-cleanup.json", "mobile/cart-cleanup.json",
+              "run_context.json", "stability_record.json", "publication.json", "summary.json",
+              "traffic/summary.json", "traffic/blocking-summary.json"}
+EVIDENCE_PATH = re.compile(r"(?:desktop|mobile)/[A-Z0-9][A-Z0-9-]{0,99}-failure\.png")
 
 
 def _ordinary(path, *, directory=False):
@@ -53,24 +60,30 @@ def write_run_json(data, run_root, relative):
 
 
 def write_run_text(text, run_root, relative):
-    if relative not in {"summary.html", "summary.css"} or not isinstance(text, str):
+    if relative not in TEXT_PATHS or not isinstance(text, str):
         raise ResultWriteError("ARTIFACT_WRITE_REJECTED")
     _write_run(text, run_root, relative, text_mode=True)
 
 
-def _write_run(data, run_root, relative, *, text_mode=False):
+def write_run_bytes(data, run_root, relative):
+    if not isinstance(relative, str) or not EVIDENCE_PATH.fullmatch(relative) or not isinstance(data, bytes):
+        raise ResultWriteError("ARTIFACT_WRITE_REJECTED")
+    _write_run(data, run_root, relative, binary_mode=True)
+
+
+def _write_run(data, run_root, relative, *, text_mode=False, binary_mode=False):
     """Reject linked roots/parents/targets; update ordinary files atomically."""
     try:
         rel = Path(relative)
         win = PureWindowsPath(relative)
         if (not isinstance(relative, str) or rel.is_absolute() or win.is_absolute()
                 or win.drive or "\\" in relative or ".." in rel.parts
-                or relative not in {"results.json", "desktop/cart-cleanup.json",
-                                    "mobile/cart-cleanup.json", "run_context.json",
-                                    "stability_record.json", "publication.json", "summary.json",
-                                    "summary.html", "summary.css"}
-                or (relative in {"summary.html", "summary.css"}) != text_mode):
+                or not ((text_mode and relative in TEXT_PATHS)
+                        or (binary_mode and EVIDENCE_PATH.fullmatch(relative))
+                        or (not text_mode and not binary_mode and relative in JSON_PATHS))):
             raise ValueError
+        payload = (data if binary_mode else (data if text_mode else json.dumps(
+            data, ensure_ascii=False, indent=2)).encode("utf-8"))
         root = Path(run_root).absolute()
         with ExitStack() as stack:
             if os.name == "nt":
@@ -95,11 +108,8 @@ def _write_run(data, run_root, relative, *, text_mode=False):
                         pass
                 stack.callback(remove_temporary)
                 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    if text_mode:
-                        stream.write(data)
-                    else:
-                        json.dump(data, stream, ensure_ascii=False, indent=2)
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(payload)
                     stream.flush()
                     os.fsync(stream.fileno())
                 if os.path.lexists(target):
@@ -130,11 +140,8 @@ def _write_run(data, run_root, relative, *, text_mode=False):
                 fd = os.open(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                              | os.O_NOFOLLOW, 0o600, dir_fd=directory_fd)
                 try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                        if text_mode:
-                            stream.write(data)
-                        else:
-                            json.dump(data, stream, ensure_ascii=False, indent=2)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(payload)
                         stream.flush()
                         os.fsync(stream.fileno())
                     os.replace(temporary_name, name, src_dir_fd=directory_fd,

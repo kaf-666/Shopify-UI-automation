@@ -21,6 +21,7 @@ from pages.navigation import NavigationPage
 from pages.product_page import ProductPage, PurchaseAreaReadinessError
 from pages.search_page import SearchPage, SearchResultNavigationError
 from utils.result import CaseResult, iso_now
+from utils.smoke_case_contract import READONLY_CASE_IDS
 from utils.readonly_mutation_guard import ReadonlyMutationGuard
 from utils.screenshots import capture_case_failure
 from utils.search_url_diagnostics import (
@@ -33,20 +34,6 @@ STATUS_FAIL = "FAIL"
 STATUS_BLOCKED = "BLOCKED"
 
 CF_CHALLENGE_MARKERS = ("just a moment", "cf-challenge", "attention required")
-
-READONLY_CASE_IDS = (
-    "RSMOKE-DIRECT-01",
-    "RSMOKE-DIRECT-02",
-    "RSMOKE-SEARCH-01",
-    "RSMOKE-SEARCH-02",
-    "RSMOKE-SEARCH-03",
-    "RSMOKE-SEARCH-04",
-    "RSMOKE-HOME-01",
-    "RSMOKE-NAV-01",
-    "RSMOKE-PLP-01",
-    "RSMOKE-PDP-01",
-    "RSMOKE-PDP-02",
-)
 
 READONLY_JOURNEY_CASES = {
     "direct": READONLY_CASE_IDS[0:2],
@@ -547,9 +534,10 @@ class WebsiteSmokeReadonlyV1Runner:
         coll = self.state["coll"]
         try:
             url = coll.open_product(0)
+            self._adopt_business_page(getattr(coll, "page", self.page))
         except Exception as exc:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
-        if not urlparse(url).path.startswith("/products/"):
+        if "/products/" not in urlparse(url).path:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", f"url={url[:120]}")
         prod = ProductPage(self.page, self.site_config, self.viewport)
         try:

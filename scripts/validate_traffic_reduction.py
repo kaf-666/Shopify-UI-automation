@@ -172,7 +172,13 @@ def validate_routing_composition() -> tuple[dict[str, bool], dict, list[dict]]:
         enabled_observed_start = len(server.observed)  # type: ignore[attr-defined]
         context = browser.new_context()
         page = context.new_page()
-        signed_policy = SignedRequestPolicy(
+        class LocalFixtureSignedPolicy(SignedRequestPolicy):
+            def _host_allowed(self, url):
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                return parsed.scheme == "http" and parsed.hostname == "127.0.0.1"
+
+        signed_policy = LocalFixtureSignedPolicy(
             SIGNATURE_FIXTURES,
             ["127.0.0.1"],
             source="offline-fixture",

@@ -145,6 +145,8 @@ def _validate_access(config: Mapping[str, Any], *, base_url: str) -> str:
     if mode == "none":
         return mode
 
+    if urlparse(base_url).scheme != "https":
+        _fail("INVALID_ACCESS_CONFIG", "signed_request requires an HTTPS base_url")
     _validate_allowed_hosts(access.get("allowed_hosts"), base_url=base_url)
     source = _required_text(access, "source", category="INVALID_ACCESS_CONFIG").lower()
     if source not in {"env", "environment", "file", "secret_file", "env_or_file", "environment_or_file"}:

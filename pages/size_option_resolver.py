@@ -490,14 +490,34 @@ class SizeOptionResolver:
             state["size_probe_status"] = "NATIVE_PROBE_ERROR"
         return state
 
-    def first_available_value(self) -> str:
-        normal = self.normal_available_options()
-        for option in normal:
-            if not option.selected:
-                return option.value
-        if normal:
-            return normal[0].value
-        raise RuntimeError("No available normal size option to select")
+    def first_available_value(self, timeout_ms: int = SIZE_SELECTION_CONVERGENCE_TIMEOUT_MS) -> str:
+        # Readiness and this scan are separate DOM tasks. A theme can replace
+        # or temporarily disable the group between them. Wait before choosing,
+        # without clicking any control or changing the requested product.
+        deadline = None
+        options = []
+        while True:
+            try:
+                options = self.options()
+            except SizeGroupNotFoundError:
+                options = []
+            normal = [option for option in options if option.available and not option.custom_size]
+            for option in normal:
+                if not option.selected:
+                    return option.value
+            if normal:
+                return normal[0].value
+            if deadline is None:
+                # The first existing scan can itself take time under renderer
+                # load; reserve the retry budget only after it proves empty.
+                deadline = time.monotonic() + max(0, timeout_ms) / 1000
+            if time.monotonic() >= deadline:
+                break
+            self.page.wait_for_timeout(min(SIZE_SELECTION_POLL_INTERVAL_MS,
+                                           max(1, int((deadline-time.monotonic())*1000))))
+        raise RuntimeError("No available normal size option to select "
+                           f"model={options[0].model if options else 'UNKNOWN'} "
+                           f"option_total={len(options)} available_count={sum(o.available for o in options)}")
 
     def _current_selection_state(self, requested_value: str) -> dict[str, Any]:
         """Read selection metadata from the current DOM only.

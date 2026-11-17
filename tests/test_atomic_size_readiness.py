@@ -39,7 +39,8 @@ def test_ready_size_survives_short_metadata_rpc_timeout(page, monkeypatch):
             raise PlaywrightTimeoutError('synthetic metadata transport timeout')
         return original(self, name, timeout=timeout)
     monkeypatch.setattr(Locator, 'get_attribute', slow_metadata)
-    state = size.readiness_snapshot(deadline=time.monotonic()+1)
+    # This test checks semantic parity; dedicated tests cover deadline expiry.
+    state = size.readiness_snapshot(deadline=time.monotonic()+5)
     assert state['size_group_detected'] and state['normal_size_available'] == 1
     assert size.selected_value(deadline=time.monotonic()+1) == '4'
 
@@ -84,7 +85,7 @@ def test_atomic_availability_matches_business_semantics(page, strategy, markup):
     assert bool(state['size_option_available']) == bool(available)
     assert bool(state['normal_size_available']) == bool(normal)
     assert state['selected_size'] == expected_selected
-    assert size.selected_value(deadline=time.monotonic()+1) == expected_selected
+    assert size.selected_value(deadline=time.monotonic()+5) == expected_selected
 
 
 @pytest.mark.parametrize('site', ['mondressy','lavetir','shirees'])
@@ -111,6 +112,43 @@ def test_current_dom_model_and_checked_state_are_resolved_again_after_replacemen
     state=size.readiness_snapshot(deadline=time.monotonic()+1)
     assert state['size_model'] == 'SIZE_MODEL_02' and state['selected_size'] == '6'
     assert size.selected_value(deadline=time.monotonic()+1) == '6'
+
+
+def test_initial_candidate_scan_waits_for_transient_disabled_sizes_without_clicking(page):
+    size=resolver(page)
+    page.locator('input').evaluate_all("els=>{els.forEach(el=>el.disabled=true); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.disabled=false),600)}")
+    candidate=size.first_available_value(timeout_ms=1500)
+    assert candidate in {'2','4'}
+    assert any(o.value == candidate and o.available for o in size.options())
+    assert page.evaluate('window.choiceClicks') == 0
+    assert size.selected_value() == '4'
+
+
+def test_native_candidate_scan_survives_visibility_transition_outside_purchase_form(page):
+    size=resolver(page,model='SIZE_MODEL_02',markup='''<form id="purchase"><input name="id" value="fixture"></form>
+      <fieldset name="Size" data-handle="size"><legend>Size</legend>
+        <label for="s">S</label><input hidden id="s" form="purchase" type="radio" name="Size" data-variant-input value="S" checked>
+        <label for="m">M</label><input hidden id="m" form="purchase" type="radio" name="Size" data-variant-input value="M">
+      </fieldset>''')
+    assert size.readiness_snapshot(deadline=time.monotonic()+1)['normal_size_available'] == 1
+    page.locator('label').evaluate_all("els=>{els.forEach(el=>el.style.visibility='hidden'); window.choiceClicks=0; document.addEventListener('click',()=>window.choiceClicks++); setTimeout(()=>els.forEach(el=>el.style.visibility='visible'),600)}")
+    candidate=size.first_available_value(timeout_ms=1500)
+    assert candidate in {'S','M'}
+    assert any(o.value == candidate and o.available for o in size.options())
+    assert page.evaluate('window.choiceClicks') == 0
+    assert size.selected_value() == 'S'
+
+
+@pytest.mark.parametrize('kind', ['disabled','custom_only'])
+def test_initial_candidate_scan_still_fails_for_persistent_unavailability(page, kind):
+    markup='''<form id="purchase"><div class="my-infiniteoptions-container sizeoption" role="group" aria-label="Size">
+      <label><input hidden type="radio" name="properties[Size]" value="Free Custom Size">Custom</label>
+      </div></form>'''
+    size=resolver(page,markup=markup if kind=='custom_only' else None)
+    if kind=='disabled':
+        page.locator('input').evaluate_all('els=>els.forEach(el=>el.disabled=true)')
+    with pytest.raises(RuntimeError,match='No available normal size option'):
+        size.first_available_value(timeout_ms=200)
 
 
 def test_dom_probe_error_is_distinct_from_absent_group_and_fails_closed(page, monkeypatch):

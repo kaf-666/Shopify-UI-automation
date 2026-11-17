@@ -18,6 +18,11 @@ from pages.base_page import BasePage
 from pages.home_page import HomePage
 
 DRAWER_OPEN_TIMEOUT_MS = 15_000
+# Themes can schedule the promotion dialog one or more frames after the cart
+# change response. Observe one bounded grace window before deciding that no
+# dialog will appear; this is not a fixed sleep on sites without the selector.
+PROMOTION_GIFT_APPEARANCE_GRACE_MS = 1_000
+PROMOTION_GIFT_POLL_MS = 50
 
 
 class CartDrawer(BasePage):
@@ -289,10 +294,12 @@ class CartDrawer(BasePage):
 
     def checkout(self) -> None:
         """通过抽屉内标准 Checkout 控件进入 Shopify Checkout（真实 UI 点击）。"""
+        self.ensure_drawer_ready()
         btn = self.checkout_button()
         if not (btn.count() and btn.is_visible() and btn.is_enabled()):
             raise RuntimeError("standard checkout button not available")
-        btn.click()
+        from utils.request_boundary import run_navigation
+        run_navigation(self.page, btn.click)
 
     # ------------------------------------------------------------ 数量控件
     def quantity_input(self, index: int = 0):
@@ -312,6 +319,7 @@ class CartDrawer(BasePage):
 
     def increase_quantity(self, index: int = 0) -> None:
         """真实 UI 点击 + 并等待数量更新请求完成与 DOM 变化。"""
+        self.ensure_drawer_ready()
         btn = self.quantity_increase_button(index)
         if not (btn.count() and btn.is_visible() and btn.is_enabled()):
             raise RuntimeError("quantity increase button not available")
@@ -320,6 +328,7 @@ class CartDrawer(BasePage):
 
     def decrease_quantity(self, index: int = 0) -> None:
         """真实 UI 点击 - 并等待数量更新请求完成与 DOM 变化。"""
+        self.ensure_drawer_ready()
         btn = self.quantity_decrease_button(index)
         if not (btn.count() and btn.is_visible()):
             raise RuntimeError("quantity decrease button not available")
@@ -328,7 +337,58 @@ class CartDrawer(BasePage):
         before = self.get_item_quantity(index)
         self._click_quantity_control(btn, index, before)
 
-    def settle_quantity_promotion(self, timeout_ms: int = 15_000) -> bool:
+    def _promotion_dialog_visible(self) -> bool:
+        selectors = self.page_config().get("selectors") or {}
+        if not selectors.get("promotion_gift_dismiss"):
+            return False
+        try:
+            dismiss = self.locator("promotion_gift_dismiss").first
+            return bool(dismiss.count() and dismiss.is_visible())
+        except Exception:
+            return False
+
+    def _promotion_busy(self) -> bool:
+        """Read the theme's optional busy flag without requiring it to exist."""
+        try:
+            return bool(
+                self.page.evaluate(
+                    """() => !!(window.promotionGift
+                        && typeof window.promotionGift.busy === 'function'
+                        && window.promotionGift.busy())"""
+                )
+            )
+        except Exception:
+            return False
+
+    def ensure_drawer_ready(self) -> None:
+        """Dismiss an outstanding promotion and make the drawer usable again.
+
+        The theme may open its gift dialog asynchronously after the cart change
+        response. A late dialog can close an otherwise healthy drawer, so every
+        quantity/checkout interaction re-checks this recovery condition instead
+        of assuming the previous settle finished before the dialog was shown.
+        """
+        selectors = self.page_config().get("selectors") or {}
+        if selectors.get("promotion_gift_dismiss"):
+            # Observe the same bounded grace window used after a quantity
+            # change. This catches a dialog scheduled by the previous operation
+            # as well as one that is already open.
+            self.settle_quantity_promotion()
+            return
+        if not selectors.get("drawer_open"):
+            # Minimal synthetic/legacy profiles can exercise this Page Object
+            # without a drawer open-state selector.
+            return
+        if self.is_open():
+            return
+        self._reopen_drawer_if_closed()
+
+    def settle_quantity_promotion(
+        self,
+        timeout_ms: int = 15_000,
+        *,
+        appearance_grace_ms: int = PROMOTION_GIFT_APPEARANCE_GRACE_MS,
+    ) -> bool:
         """Dismiss a post-quantity promotion dialog and restore the drawer.
 
         Some themes open a native <dialog> after an AJAX cart quantity update.
@@ -337,6 +397,11 @@ class CartDrawer(BasePage):
         drawer. Dismiss the real control, wait for the theme's promotion flow
         to settle, then reopen the configured drawer so the updated quantity is
         readable again.
+
+        A dialog may be scheduled after the cart change response, while its
+        optional ``window.promotionGift.busy()`` flag is already false. The
+        bounded grace window below observes that scheduling gap; it is not a
+        fixed delay on themes without a promotion selector.
         """
         selectors = self.page_config().get("selectors") or {}
         if not selectors.get("promotion_gift_dismiss"):
@@ -344,21 +409,31 @@ class CartDrawer(BasePage):
 
         dismiss = self.locator("promotion_gift_dismiss").first
         appeared = False
-        try:
-            self.page.wait_for_function(
-                """() => {
-                    if (document.querySelector('[data-promotion-gift-dialog][open]')) {
-                        return true;
-                    }
-                    return !window.promotionGift || !window.promotionGift.busy();
-                }""",
-                timeout=timeout_ms,
-            )
-        except PlaywrightTimeoutError:
-            pass
+        started = time.monotonic()
+        deadline = started + max(0, int(timeout_ms)) / 1000.0
+        grace_deadline = started + max(0, int(appearance_grace_ms)) / 1000.0
+        while True:
+            try:
+                if dismiss.count() and dismiss.is_visible():
+                    appeared = True
+                    break
+            except Exception:
+                pass
+            now = time.monotonic()
+            if now >= deadline:
+                break
+            if self._promotion_busy():
+                # Busy means the theme is still processing; after it clears,
+                # observe the grace window again for a scheduled dialog.
+                grace_deadline = max(
+                    grace_deadline, now + max(0, int(appearance_grace_ms)) / 1000.0
+                )
+            elif now >= grace_deadline:
+                break
+            remaining_ms = max(1, int((min(deadline, grace_deadline) - now) * 1000))
+            self.page.wait_for_timeout(min(PROMOTION_GIFT_POLL_MS, remaining_ms))
 
-        if dismiss.count() and dismiss.is_visible():
-            appeared = True
+        if appeared:
             try:
                 dismiss.click(timeout=3_000)
             except PlaywrightTimeoutError:

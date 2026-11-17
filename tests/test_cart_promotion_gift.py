@@ -40,7 +40,7 @@ def _shirees_config():
     return config
 
 
-def _set_promotion_page(page, *, cover_dialog=False):
+def _set_promotion_page(page, *, cover_dialog=False, dialog_delay_ms=100):
     overlay = (
         '<div style="position:absolute;inset:0;z-index:10"></div>'
         if cover_dialog
@@ -69,7 +69,7 @@ def _set_promotion_page(page, *, cover_dialog=False):
                       setTimeout(() => {{
                         document.querySelector('#drawer').classList.remove('open');
                         document.querySelector('[data-promotion-gift-dialog]').showModal();
-                      }}, 100);
+                      }}, {int(dialog_delay_ms)});
                     ">+</button>
             <button class="minus"
                     onclick="this.parentElement.querySelector('.qty').value = '1'">-</button>
@@ -147,6 +147,47 @@ def test_promotion_gift_reopens_offscreen_cart_trigger(page):
     drawer = CartDrawer(page, _shirees_config(), "desktop")
 
     assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+
+
+def test_late_promotion_dialog_is_observed_when_busy_is_already_idle(page):
+    _set_promotion_page(page)
+    page.evaluate(
+        """() => {
+          window.__giftBusy = false;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 400);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+
+
+def test_ensure_drawer_ready_recovers_after_a_late_dialog(page):
+    _set_promotion_page(page)
+    page.evaluate(
+        """() => {
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 400);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    # Models the old behavior: the first settle can finish before the dialog is
+    # scheduled, so the next interaction must recover on its own.
+    assert drawer.settle_quantity_promotion(
+        timeout_ms=300, appearance_grace_ms=0
+    ) is False
+    drawer.ensure_drawer_ready()
+
     assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
     assert page.locator("#drawer.open").count() == 1
 

@@ -1,0 +1,593 @@
+"""Single-hop transport and public-API navigation coordination.
+
+Protected redirects are never handed back to the browser. Main-frame GET
+navigation is resumed outside route callbacks; other redirects fail closed.
+Only fixed error codes and sanitized endpoint diagnostics leave this module.
+Raw URLs, headers and bodies stay in memory.
+"""
+from __future__ import annotations
+
+import time
+import json
+import re
+from playwright.sync_api import Error as PlaywrightError
+from weakref import WeakSet
+from urllib.parse import urljoin, urlsplit, urldefrag, parse_qsl
+from utils.mutation_fingerprint import safe_endpoint_fingerprint
+from utils.localization_request_policy import is_verified_localization_return
+
+
+MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+REDIRECTS = {301, 302, 303, 307, 308}
+SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
+PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest", "texttrack"}
+MEASUREMENT_HOSTS = {"google.com", "www.google.com", "www.googleadservices.com"}
+STOREFRONT_READ_PATH = re.compile(r"/(?:|search/?|products/[A-Za-z0-9-]+/?|collections/[A-Za-z0-9-]+(?:/products/[A-Za-z0-9-]+)?/?)")
+
+
+def transport_error_kind(exc):
+    """Fixed diagnostics only; exception text can contain an opaque URI."""
+    if not isinstance(exc, PlaywrightError):
+        return "NON_PLAYWRIGHT_ERROR"
+    message = str(exc)
+    for text, kind in (("Request context disposed", "REQUEST_CONTEXT_DISPOSED"),
+                       ("Target page, context or browser has been closed", "TARGET_CLOSED"),
+                       ("Context closed", "CONTEXT_CLOSED")):
+        if text in message:
+            return kind
+    return "OTHER_PLAYWRIGHT_ERROR"
+
+
+def _measurement_endpoint(url, paths):
+    try:
+        parsed = urlsplit(url)
+        return (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname in MEASUREMENT_HOSTS
+                and parsed.port in {None,443} and not parsed.username and not parsed.password
+                and not parsed.fragment and parsed.path in paths
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except (ValueError,TypeError):
+        return False
+
+
+def _conversion_endpoint(url, role):
+    """Return a fixed family and in-memory ad ID; never export the ID."""
+    paths = {"/measurement/conversion"} if role == "source" else {"/measurement/1p-conversion/"}
+    if _measurement_endpoint(url, paths):
+        return ("measurement", "")
+    try:
+        parsed = urlsplit(url)
+        hosts = MEASUREMENT_HOSTS | ({"googleads.g.doubleclick.net"} if role == "source" else set())
+        kind = "viewthroughconversion" if role == "source" else "1p-conversion"
+        match = re.fullmatch(r"/pagead/" + kind + r"/([0-9]{5,20})/", parsed.path)
+        if (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname in hosts
+                and parsed.port in {None,443} and not parsed.username and not parsed.password
+                and not parsed.fragment and match
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url)):
+            return ("pagead", match[1])
+    except (ValueError,TypeError):
+        pass
+    return None
+
+
+def is_verified_conversion_return(request, status, target):
+    """Recognize only a discarded Google measurement read, never send it."""
+    try:
+        source_endpoint = _conversion_endpoint(request.url, "source")
+        return (source_endpoint is not None and request.method == "POST" and status in {302,303}
+                and request.resource_type in {"xhr","fetch"} and not request.is_navigation_request()
+                and request.frame.parent_frame is not None
+                and _conversion_endpoint(target, "target") == source_endpoint)
+    except Exception:
+        return False
+
+
+def is_verified_private_click_return(request, status, target):
+    """Discard a narrowly identified measurement read without sending it."""
+    try:
+        source = urlsplit(request.url)
+        dest = urlsplit(target)
+        return (request.method == "POST" and status in {302, 303}
+                and request.resource_type in {"xhr", "fetch"}
+                and not request.is_navigation_request() and request.frame.parent_frame is not None
+                and _conversion_endpoint(request.url, "target") is not None
+                and source.scheme == dest.scheme == "https" and source.hostname == dest.hostname
+                and dest.hostname in MEASUREMENT_HOSTS and dest.port in {None, 443}
+                and not dest.username and not dest.password and not dest.fragment
+                and re.fullmatch(r"/\.well-known/private-click-measurement/trigger-attribution/[0-9]{2}/[0-9]{2}", dest.path) is not None
+                and len(target) <= 16384 and not any(ord(c) <= 32 or ord(c) == 127 for c in target))
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def is_shop_bridge_target(url):
+    """The observed Shop anonymous redirect endpoint; never a signing host."""
+    try:
+        parsed = urlsplit(url)
+        return (len(url) <= 16384 and parsed.scheme == "https" and parsed.hostname == "shop.app"
+                and parsed.port in {None, 443} and not parsed.username and not parsed.password
+                and parsed.path == "/accounts/sur" and not parsed.fragment
+                and not any(ord(c) <= 32 or ord(c) == 127 for c in url))
+    except (ValueError, TypeError):
+        return False
+
+
+def is_shop_storefront_return(source, target):
+    """Same safe endpoint, preserving source query pairs; opaque additions only."""
+    try:
+        before, after = urlsplit(source), urlsplit(target)
+        if (len(target) > 16384 or after.fragment
+                or any(ord(c) <= 32 or ord(c) == 127 for c in target)
+                or before.scheme != "https" or before.username or before.password
+                or (before.scheme, before.netloc, before.path) != (after.scheme, after.netloc, after.path)
+                or not STOREFRONT_READ_PATH.fullmatch(before.path)):
+            return False
+        original = parse_qsl(before.query, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
+        returned = parse_qsl(after.query, keep_blank_values=True, strict_parsing=True, max_num_fields=32)
+        # Repeated names cannot ambiguously overwrite a variant or source key.
+        if len(dict(original)) != len(original) or len(dict(returned)) != len(returned):
+            return False
+        if not all(dict(returned).get(k) == v for k,v in original):
+            return False
+        return all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,63}", k)
+                   and len(v) <= 8192 and not any(ord(c) < 32 or ord(c) == 127 for c in v)
+                   for k,v in returned)
+    except (ValueError, TypeError):
+        return False
+
+
+class RequestBoundaryError(RuntimeError):
+    category = "REQUEST_BOUNDARY_FAILURE"
+
+    def __init__(self, code, diagnostic=None):
+        self.code, self.diagnostic = code, diagnostic
+        super().__init__(code + (" " + json.dumps(diagnostic, separators=(",", ":")) if diagnostic else ""))
+
+
+class _RedirectRequest:
+    def __init__(self, original, url, method):
+        self.original, self.url, self.method = original, url, method
+
+    def __getattr__(self, name):
+        return getattr(self.original, name)
+
+
+class _DecisionRoute:
+    """Run existing mutation classification without sending a request."""
+    def __init__(self, request):
+        self.request, self.allowed = request, False
+
+    def abort(self):
+        self.allowed = False
+
+    def fallback(self):
+        self.allowed = True
+
+    continue_ = fallback
+
+
+class RequestBoundary:
+    def __init__(self, context):
+        self.context = context
+        self.access_policy = None
+        self.guards = []
+        self.pending = {}
+        self.settled = WeakSet()
+        self.failures = []
+        self.events = []
+        self.bridge_events = []
+        self.transport_errors = []
+        self.closing_cancellation_count = 0
+        self.closing_passive_read_cancellation_count = 0
+        self.closing = False
+        self._handler = self._handle_route
+        context.route("**/*", self._handler)
+
+    def register_guard(self, guard):
+        if guard not in self.guards:
+            self.guards.append(guard)
+
+    def remove_guard(self, guard):
+        if guard in self.guards:
+            self.guards.remove(guard)
+
+    def assert_clean(self):
+        if self.failures:
+            diagnostic = next((event for event in self.events if event["gating_failure"]), None)
+            raise RequestBoundaryError(self.failures[0], diagnostic)
+        if self.pending:
+            raise RequestBoundaryError("REDIRECT_NAVIGATION_NOT_COMPLETED")
+
+    def _drain_pending(self, page, deadline):
+        """Finish a validated script navigation before the next UI action."""
+        for _ in range(11):
+            if not self.pending:
+                return
+            if set(self.pending) != {page} or page is None:
+                raise RequestBoundaryError("REDIRECT_NAVIGATION_CONFLICT")
+            remaining = int((deadline - time.monotonic()) * 1000)
+            if remaining <= 0:
+                raise RequestBoundaryError("REDIRECT_LOOP_OR_LIMIT")
+            target = self.pending.pop(page)
+            try:
+                self.navigate(page, lambda: page.goto(target, wait_until="domcontentloaded", timeout=remaining),
+                              timeout_ms=remaining)
+            except RequestBoundaryError:
+                raise
+            except Exception:
+                self.failures.append("RESUMED_NAVIGATION_FAILED")
+                raise RequestBoundaryError("RESUMED_NAVIGATION_FAILED") from None
+        raise RequestBoundaryError("REDIRECT_LOOP_OR_LIMIT")
+
+    def complete_pending(self):
+        """Explicit end-of-suite navigation barrier; never replay a UI gesture."""
+        if self.failures:
+            self.assert_clean()
+        if self.pending:
+            if len(self.pending) != 1:
+                raise RequestBoundaryError("REDIRECT_NAVIGATION_CONFLICT")
+            self._drain_pending(next(iter(self.pending)), time.monotonic() + 45)
+
+    def summary(self):
+        return {"status": "FAIL" if self.failures or self.pending else "PASS",
+                "failure_count": len(self.failures), "pending_navigation_count": len(self.pending),
+                "events": [dict(event) for event in self.events],
+                "bridge_events": [dict(event) for event in self.bridge_events],
+                "transport_errors": [dict(event) for event in self.transport_errors],
+                "closing_cancellation_count": self.closing_cancellation_count,
+                "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count}
+
+    def _anonymous_shop_return(self, route, target):
+        """Read only the fixed bridge, returning only to the source endpoint.
+
+        No Shop document is rendered or script executed, and no mutation is
+        issued. A non-redirect bridge response fails closed. Only the original
+        storefront response can update the storefront context's cookie jar.
+        """
+        request = route.request
+        if request.method != "GET" or not request.is_navigation_request():
+            return None
+        try:
+            if request.frame.parent_frame is not None:
+                return None
+        except Exception:
+            return None
+        if not STOREFRONT_READ_PATH.fullmatch(urlsplit(request.url).path):
+            return None
+        deadline = time.monotonic() + 15000 / 1000
+        visited = set()
+        # Do not copy Origin, Referer, Cookie, authorization, signing headers,
+        # request bodies, or arbitrary page/SDK headers to Shop.
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() in {"user-agent", "accept", "accept-language"}}
+        # APIRequestContext otherwise loads cookies from the shared jar.
+        headers["Cookie"] = ""
+        # route.fetch merges the browser context's default headers. Use a
+        # separate blank context so signing/authorization defaults cannot enter
+        # the bridge request. Its cookie jar is never exported to the storefront.
+        bridge_context = self._new_bridge_context()
+        try:
+            for _ in range(3):
+                if not is_shop_bridge_target(target) or target in visited or time.monotonic() >= deadline:
+                    return None
+                visited.add(target)
+                event = {"service": "SHOP_APP", "method": "GET", "path": "/accounts/sur",
+                         "signature_headers": "OMITTED", "response_status": None}
+                if len(self.bridge_events) < 100:
+                    self.bridge_events.append(event)
+                response = bridge_context.request.get(target, headers=headers,
+                                         max_redirects=0, max_retries=0,
+                                         timeout=max(1, int((deadline-time.monotonic())*1000)))
+                try:
+                    event["response_status"] = response.status
+                    if response.status not in REDIRECTS:
+                        return None
+                    location = response.headers.get("location")
+                    if not location or any(ord(c) <= 32 or ord(c) == 127 for c in location):
+                        return None
+                    following = urljoin(target, location)
+                    allowed_host = self.access_policy._host_allowed(following)
+                    fingerprint = safe_endpoint_fingerprint(following, "GET", self.access_policy._allowed_hosts)
+                    event.update(return_host_class=fingerprint["host_class"],
+                                 return_path=fingerprint["sanitized_path"],
+                                 return_query_present=fingerprint["query_present"],
+                                 return_relation="OTHER_ENDPOINT")
+                    source_parts, return_parts = urlsplit(request.url), urlsplit(following)
+                    if (source_parts.scheme, source_parts.netloc, source_parts.path) == (
+                            return_parts.scheme, return_parts.netloc, return_parts.path):
+                        event["return_relation"] = "SAME_ENDPOINT_DIFFERENT_QUERY"
+                    if allowed_host and is_shop_storefront_return(request.url, following):
+                        if urldefrag(following)[0] == urldefrag(request.url)[0]:
+                            event["return_relation"] = "EXACT_SOURCE"
+                        event["return_accepted"] = True
+                        return following
+                    event["return_accepted"] = False
+                    target = following
+                finally:
+                    response.dispose()
+            return None
+        finally:
+            bridge_context.close()
+
+    def _new_bridge_context(self):
+        return self.context.browser.new_context(service_workers="block")
+
+    def _reject(self, route, code, *, target=None, status=None, gating=True):
+        if gating:
+            self.failures.append(code)
+        request = route.request
+        if len(self.events) < 100:
+            hosts = getattr(self.access_policy, "_allowed_hosts", ())
+            source = safe_endpoint_fingerprint(request.url, request.method, hosts)
+            destination = safe_endpoint_fingerprint(target, request.method, hosts) if target else {}
+            resource = request.resource_type
+            try:
+                frame_category = "MAIN_FRAME" if request.frame.parent_frame is None else "CHILD_FRAME"
+            except Exception:
+                frame_category = "UNAVAILABLE"
+            self.events.append({
+                "code": code, "resource_type": resource if resource in {
+                    "document", "stylesheet", "script", "image", "font", "xhr", "fetch", "other",
+                    "media", "manifest", "texttrack", "eventsource", "websocket"} else "UNKNOWN",
+                "method": request.method if request.method in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "UNKNOWN",
+                "source_path": source["sanitized_path"],
+                "target_path": destination.get("sanitized_path"),
+                "source_host_class": source["host_class"],
+                "target_host_class": destination.get("host_class"), "http_status": status,
+                "gating_failure": gating, "source_query_present": source["query_present"],
+                "frame_category": frame_category,
+                "source_service": "GOOGLE_MEASUREMENT" if (_conversion_endpoint(request.url, "source")
+                                                           or _conversion_endpoint(request.url, "target")) else "OTHER",
+                "target_service": ("SHOP_APP" if target and urlsplit(target).hostname == "shop.app" else
+                                   "GOOGLE_MEASUREMENT" if target and (_conversion_endpoint(target, "target") or
+                                       _measurement_endpoint(target, {"/.well-known/private-click-measurement/trigger-attribution/02/01"})) else "OTHER"),
+            })
+        if not gating:
+            # Preserve the blocked-response signal. A synthetic 2xx can make
+            # localization clients replace the live document with empty HTML.
+            # The initial POST's real cookie updates remain in the shared jar.
+            route.abort()
+            return
+        try:
+            main_navigation = request.is_navigation_request() and request.frame.parent_frame is None
+        except Exception:
+            main_navigation = request.is_navigation_request()
+        if main_navigation:
+            route.fulfill(status=204, body="")
+        else:
+            route.abort()
+
+    def _handle_route(self, route):
+        request = route.request
+        policy = self.access_policy
+        signed = policy is not None and policy._host_allowed(request.url)
+        clean = {k: v for k, v in request.headers.items() if k.lower() not in SIGNATURE_NAMES}
+        if policy is not None:
+            policy.stats["injected" if signed else "untouched"] += 1
+        if not signed and request.method.upper() not in MUTATION_METHODS:
+            route.continue_(headers=clean)
+            self.settled.add(request)
+            return
+        # fetch merges context defaults for omitted names. Empty overrides stop
+        # stale signing values from reappearing on an unsigned initial POST.
+        cleared = {name: "" for name in SIGNATURE_NAMES
+                   if any(key.lower() == name for key in request.headers)}
+        headers = {**cleared, **clean, **(policy.request_headers(request.url) if signed else {})}
+        response = None
+        transport_phase = "FETCH"
+        try:
+            response = route.fetch(headers=headers, max_redirects=0, max_retries=0, timeout=15000)
+            transport_phase = "RESPONSE"
+            if response.status not in REDIRECTS:
+                route.fulfill(response=response)
+                return
+            location = response.headers.get("location")
+            if not location or any(ord(c) < 32 for c in location):
+                self._reject(route, "REDIRECT_LOCATION_INVALID", status=response.status)
+                return
+            target = urljoin(request.url, location)
+            parsed = urlsplit(target)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.port == 0):
+                self._reject(route, "REDIRECT_LOCATION_INVALID", status=response.status)
+                return
+            method = request.method.upper()
+            if (response.status == 303 and method != "HEAD") or (response.status in {301, 302} and method == "POST"):
+                method = "GET"
+            redirected = _RedirectRequest(request, target, method)
+            allowed = True
+            for guard in self.guards:
+                decision = _DecisionRoute(redirected)
+                guard._handle_route(decision)
+                allowed = allowed and decision.allowed
+            if not allowed:
+                self._reject(route, "REDIRECT_MUTATION_DENIED", target=target, status=response.status)
+                return
+            if signed and not policy._host_allowed(target):
+                returned = self._anonymous_shop_return(route, target) if is_shop_bridge_target(target) else None
+                if returned is None:
+                    self._reject(route, "REDIRECT_ORIGIN_DENIED", target=target, status=response.status)
+                    return
+                target = returned
+                for guard in self.guards:
+                    decision = _DecisionRoute(_RedirectRequest(request, target, method))
+                    guard._handle_route(decision)
+                    if not decision.allowed:
+                        self._reject(route, "REDIRECT_MUTATION_DENIED", target=target, status=response.status)
+                        return
+            if (signed and request.resource_type in {"xhr", "fetch"}
+                    and not request.is_navigation_request()
+                    and is_verified_localization_return(request.url, response.status, target, request)):
+                self._reject(route, "LOCALIZATION_RETURN_READ_SUPPRESSED", target=target,
+                             status=response.status, gating=False)
+                return
+            if not signed and (is_verified_conversion_return(request, response.status, target)
+                               or is_verified_private_click_return(request, response.status, target)):
+                self._reject(route, "GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED", target=target,
+                             status=response.status, gating=False)
+                return
+            if method not in {"GET", "HEAD"} or not request.is_navigation_request():
+                self._reject(route, "REDIRECT_UNSUPPORTED", target=target, status=response.status)
+                return
+            try:
+                frame = request.frame
+            except Exception:
+                # A popup's first request can precede its public Page/Frame.
+                # Associate it with the single new Page after returning 204.
+                frame = None
+            if frame is not None and frame.parent_frame is not None:
+                self._reject(route, "REDIRECT_UNSUPPORTED", target=target, status=response.status)
+                return
+            page = frame.page if frame is not None else None
+            if page in self.pending:
+                self._reject(route, "REDIRECT_NAVIGATION_CONFLICT", target=target, status=response.status)
+                return
+            self.pending[page] = target
+            # A 204 ends this navigation without a Chromium error-page race.
+            # Cookie updates already live in the shared request/context jar.
+            if frame is None:
+                # A 204 would cancel an unopened popup. An inert document
+                # exposes its public Page; the caller then navigates it.
+                route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>Navigation</title>",
+                              headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'"})
+            else:
+                route.fulfill(status=204, body="")
+        except Exception as exc:
+            kind = transport_error_kind(exc)
+            # Closing disposes outstanding asset responses, sometimes through a
+            # generic driver Error. These GET/HEAD resources are no longer used
+            # after the suite barrier. Navigation, XHR and writes stay gating.
+            passive_read = False
+            if self.closing and isinstance(exc, PlaywrightError):
+                try:
+                    passive_read = (request.method in {"GET", "HEAD"}
+                                    and request.resource_type in PASSIVE_RESOURCES
+                                    and not request.is_navigation_request())
+                except Exception:
+                    pass
+            if self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
+                    "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"} or passive_read):
+                self.closing_cancellation_count += 1
+                self.closing_passive_read_cancellation_count += int(passive_read)
+            else:
+                self.failures.append("REQUEST_TRANSPORT_FAILED")
+                if len(self.transport_errors) < 100:
+                    fingerprint = safe_endpoint_fingerprint(request.url, request.method,
+                                                           getattr(policy, "_allowed_hosts", ()))
+                    self.transport_errors.append({"code": "REQUEST_TRANSPORT_FAILED", "error_kind": kind,
+                                                  "closing": self.closing,
+                                                  "method": request.method if request.method in {
+                                                      "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"} else "UNKNOWN",
+                                                  "path": fingerprint["sanitized_path"],
+                                                  "host_class": fingerprint["host_class"],
+                                                  "resource_type": request.resource_type if request.resource_type in {
+                                                      "document", "stylesheet", "script", "image", "font", "xhr", "fetch", "other",
+                                                      "media", "manifest", "texttrack", "eventsource", "websocket"} else "UNKNOWN",
+                                                  "phase": transport_phase})
+            try:
+                route.abort()
+            except Exception:
+                pass
+        finally:
+            if response is not None:
+                try:
+                    response.dispose()
+                except Exception:
+                    if not self.closing:
+                        self.failures.append("RESPONSE_DISPOSAL_FAILED")
+            self.settled.add(request)
+
+    def navigate(self, page, action, *, timeout_ms=45000):
+        """Perform one real UI action, then complete validated GET redirects."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        self._drain_pending(page, deadline)
+        known_pages = set(self.context.pages)
+        visited = set()
+        result = None
+        resuming = False
+        for _ in range(11):
+            previous_errors = len(self.failures)
+            remaining = max(1, int((deadline - time.monotonic()) * 1000))
+            def navigation_request(request):
+                if not request.is_navigation_request():
+                    return False
+                try:
+                    return (request.frame.parent_frame is None
+                            and (request.frame.page is page or request.frame.page not in known_pages))
+                except Exception:
+                    return True
+            try:
+                # WebKit clicks can finish before their navigation is routed.
+                # Subscribe before the gesture and wait for its actual response.
+                with self.context.expect_event("request", predicate=navigation_request, timeout=remaining) as started:
+                    result = action()
+                # Request.response() has no timeout and some WebKit 204 popup
+                # navigations never resolve it. Pump events only until this
+                # boundary has made its decision, with the operation deadline.
+                initial_request = started.value
+                while initial_request not in self.settled:
+                    if time.monotonic() >= deadline:
+                        raise RequestBoundaryError("NAVIGATION_RESPONSE_TIMEOUT")
+                    page.wait_for_timeout(20)
+            except Exception:
+                if not self.pending:
+                    if len(self.failures) > previous_errors:
+                        raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None) from None
+                    if resuming:
+                        self.failures.append("RESUMED_NAVIGATION_FAILED")
+                        raise RequestBoundaryError("RESUMED_NAVIGATION_FAILED") from None
+                    raise
+            if len(self.failures) > previous_errors:
+                raise RequestBoundaryError(self.failures[-1], self.events[-1] if self.events else None)
+            candidates = [p for p in self.pending if p is page or p not in known_pages]
+            if not candidates:
+                return result
+            if len(candidates) != 1:
+                self.failures.append("REDIRECT_NAVIGATION_CONFLICT")
+                raise RequestBoundaryError(self.failures[-1])
+            destination_page = candidates[0]
+            target = self.pending.pop(destination_page)
+            if destination_page is None:
+                while not (created := [p for p in self.context.pages if p not in known_pages]):
+                    if time.monotonic() >= deadline:
+                        self.failures.append("POPUP_NAVIGATION_UNAVAILABLE")
+                        raise RequestBoundaryError(self.failures[-1])
+                    page.wait_for_timeout(20)
+                if len(created) != 1:
+                    self.failures.append("REDIRECT_NAVIGATION_CONFLICT")
+                    raise RequestBoundaryError(self.failures[-1])
+                destination_page = created[0]
+            key = (destination_page, urldefrag(target)[0])
+            if key in visited or time.monotonic() >= deadline:
+                self.failures.append("REDIRECT_LOOP_OR_LIMIT")
+                raise RequestBoundaryError(self.failures[-1])
+            visited.add(key)
+            remaining = max(1, int((deadline - time.monotonic()) * 1000))
+            action = lambda: destination_page.goto(target, wait_until="domcontentloaded", timeout=remaining)
+            resuming = True
+        self.failures.append("REDIRECT_LOOP_OR_LIMIT")
+        raise RequestBoundaryError(self.failures[-1])
+
+
+def ensure_request_boundary(context):
+    boundary = getattr(context, "_shopify_request_boundary", None)
+    if not isinstance(boundary, RequestBoundary):
+        boundary = RequestBoundary(context)
+        context._shopify_request_boundary = boundary
+    return boundary
+
+
+def run_navigation(page, action, *, timeout_ms=45000):
+    boundary = getattr(getattr(page, "context", None), "_shopify_request_boundary", None)
+    return boundary.navigate(page, action, timeout_ms=timeout_ms) if isinstance(boundary, RequestBoundary) else action()
+
+
+def assert_request_boundary_clean(context):
+    boundary = getattr(context, "_shopify_request_boundary", None)
+    if isinstance(boundary, RequestBoundary):
+        boundary.assert_clean()
+
+
+def complete_request_navigation(context):
+    boundary = getattr(context, "_shopify_request_boundary", None)
+    if isinstance(boundary, RequestBoundary):
+        boundary.complete_pending()

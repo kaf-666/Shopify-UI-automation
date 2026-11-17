@@ -308,17 +308,58 @@ class CollectionPage(BasePage):
         total = cards.count()
         if index < 0 or index >= total:
             raise IndexError(f"Product index out of range: {index} (product_count={total})")
-        href = self.product_link(cards.nth(index)).get_attribute("href")
+        link = self.product_link(cards.nth(index))
+        href = link.get_attribute("href")
         if not href:
             raise RuntimeError(f"No product link found on card {index}")
         canonical_href = self._canonical_product_href(href)
-        parsed = urlparse(canonical_href)
-        if parsed.scheme:
-            url = canonical_href
-        else:
-            url = urljoin(f"{self.base_url().rstrip('/')}/", canonical_href)
-        self.page.goto(url, wait_until="domcontentloaded", timeout=PAGE_NAV_TIMEOUT_MS)
-        return self.page.url
+        url = urljoin(f"{self.base_url().rstrip('/')}/", canonical_href)
+        self._validate_product_destination(url)
+        source_page = self.page
+        source_url = source_page.url
+        context = source_page.context
+        created_pages = []
+
+        def capture_page(page):
+            if page is not source_page:
+                created_pages.append(page)
+
+        context.on("page", capture_page)
+        deadline = time.monotonic() + PAGE_NAV_TIMEOUT_MS / 1000
+        try:
+            from utils.request_boundary import run_navigation
+            run_navigation(source_page, lambda: link.click(timeout=PAGE_NAV_TIMEOUT_MS))
+            while time.monotonic() < deadline:
+                actual = created_pages[-1] if created_pages else source_page
+                actual_url = actual.url
+                if actual_url != source_url and urlparse(actual_url).scheme in {"http", "https"}:
+                    self.page = actual
+                    self._validate_product_destination(actual_url)
+                    return actual_url
+                source_page.wait_for_timeout(100)
+            raise RuntimeError("Product click did not navigate to a storefront product")
+        finally:
+            context.remove_listener("page", capture_page)
+
+    def _validate_product_destination(self, url: str) -> None:
+        """Require an explicitly configured storefront host before/after navigation."""
+        base = urlparse(self.base_url())
+        target = urlparse(url)
+        access = self.site_config.get("access") or {}
+        configured = access.get("allowed_hosts") if isinstance(access, dict) else None
+        allowed = {str(host).lower() for host in configured or []}
+        if not allowed and base.hostname:
+            allowed.add(base.hostname.lower())
+        try:
+            base_port = base.port or (443 if base.scheme == "https" else 80)
+            target_port = target.port or (443 if target.scheme == "https" else 80)
+            valid = (target.scheme == base.scheme and not target.username and not target.password
+                     and (target.hostname or "").lower() in allowed and target_port == base_port
+                     and "/products/" in target.path)
+        except ValueError:
+            valid = False
+        if not valid:
+            raise RuntimeError("Product destination is outside the configured storefront")
 
     # ------------------------------------------------------ 商品快照
     @staticmethod

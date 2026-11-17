@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
+import time
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -111,28 +112,37 @@ def test_optional_predictive_ui_does_not_delay_enter_readiness() -> None:
     assert search.predictive_product_count() == 0
 
 
-def test_optional_overlay_is_closed_with_its_real_control_before_search_entry() -> None:
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("appear_ms", [0, 250, None])
+def test_optional_overlay_is_closed_with_its_real_control_before_search_entry(engine, appear_ms) -> None:
     config = deepcopy(load_site_config("mondressy"))
     config["pages"]["search"]["selectors"]["blocking_overlay_dismiss"] = {
         "by": "css", "value": "#modal button"
     }
-    config["pages"]["search"]["blocking_overlay_wait_ms"] = 500
+    config["pages"]["search"]["blocking_overlay_wait_ms"] = 15000
     playwright = sync_playwright().start()
-    browser = playwright.chromium.launch(headless=True)
+    browser = getattr(playwright, engine).launch(headless=True)
     try:
         page = browser.new_page()
-        page.set_content(
-            '<div id="modal" style="display:none"><button onclick="this.parentElement.remove()">No, thanks</button></div>'
-            '<button id="trigger" onclick="document.body.dataset.open = 1">Search</button>'
-            '<script>setTimeout(() => document.querySelector("#modal").style.display = "block", 30)</script>'
-        )
+        page.set_content('''
+            <div id="modal" style="display:none;position:fixed;inset:0;z-index:99;background:white">
+              <button onclick="this.parentElement.remove()">No, thanks</button></div>
+            <button id="trigger" disabled onclick="document.body.dataset.open = 1">Search</button>
+        ''')
+        page.evaluate("""delay => {
+          if (delay !== null) setTimeout(() => document.querySelector('#modal').style.display='block', delay);
+          setTimeout(() => document.querySelector('#trigger').disabled=false, 450);
+        }""", appear_ms)
         search = SearchPage(page, config, "desktop")
         home = SimpleNamespace(
             search_trigger=lambda: page.locator("#trigger"),
             open_search=lambda: page.locator("#trigger").click(),
         )
+        started = time.monotonic()
         search._open_entry(home)
-        assert page.locator("#modal").count() == 0
+        assert time.monotonic() - started < 5
+        if appear_ms is not None:
+            assert page.locator("#modal").count() == 0
         assert page.locator("body").get_attribute("data-open") == "1"
     finally:
         browser.close()

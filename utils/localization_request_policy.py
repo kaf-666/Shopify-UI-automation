@@ -11,7 +11,7 @@ from __future__ import annotations
 from email import policy
 from email.parser import BytesParser
 import re
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urldefrag
 
 
 MONDRESSY_ORIGIN = "https://mondressy.com"
@@ -29,7 +29,7 @@ _STOREFRONT_PATH = re.compile(
 )
 
 
-def _is_storefront_return(value: str) -> bool:
+def _is_storefront_return(value: str, origin: str = MONDRESSY_ORIGIN) -> bool:
     # The inspected script uses window.location.href. Never authorize an
     # external redirect, credentials, alternate port, or checkout/account path.
     if re.search(r"[\\\x00-\x20\x7f]", value):
@@ -37,12 +37,12 @@ def _is_storefront_return(value: str) -> bool:
     parsed = urlsplit(value)
     return (
         parsed.scheme == "https"
-        and parsed.netloc == "mondressy.com"
+        and parsed.netloc == urlsplit(origin).netloc
         and _STOREFRONT_PATH.fullmatch(parsed.path) is not None
     )
 
 
-def _safe_form(request) -> bool:
+def _validated_fields(request, origin: str = MONDRESSY_ORIGIN):
     content_type = request.header_value("content-type")
     body = request.post_data_buffer
     if (
@@ -51,12 +51,12 @@ def _safe_form(request) -> bool:
         or not isinstance(body, bytes)
         or not 0 < len(body) <= 16384
     ):
-        return False
+        return None
     message = BytesParser(policy=policy.default).parsebytes(
         b"Content-Type: " + content_type.encode("ascii") + b"\r\n\r\n" + body
     )
     if message.defects or not message.is_multipart():
-        return False
+        return None
     fields = {}
     for part in message.iter_parts():
         headers = list(part.raw_items())
@@ -74,9 +74,9 @@ def _safe_form(request) -> bool:
             or name not in _REQUIRED_FIELDS | {"language_code"}
             or name in fields
         ):
-            return False
+            return None
         fields[name] = part.get_payload(decode=True).decode("utf-8", errors="strict")
-    return (
+    valid = (
         _REQUIRED_FIELDS <= fields.keys()
         and fields["form_type"] == "localization"
         and fields["_method"] == "put"
@@ -85,8 +85,38 @@ def _safe_form(request) -> bool:
         and ("language_code" not in fields or re.fullmatch(
             r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", fields["language_code"]
         ) is not None)
-        and _is_storefront_return(fields["return_to"])
+        and _is_storefront_return(fields["return_to"], origin)
     )
+    return fields if valid else None
+
+
+def _safe_form(request) -> bool:
+    return _validated_fields(request) is not None
+
+
+def is_verified_localization_return(url, status, target, request) -> bool:
+    """Recognize a locale form's same-origin return-page read in memory.
+
+    The caller must first establish that the source is a permitted signed
+    origin. This rule never authorizes sending the redirect: it only permits
+    suppressing an otherwise redundant return-page GET without failing a run.
+    """
+    try:
+        source = urlsplit(url)
+        origin = f"{source.scheme}://{source.netloc}"
+        fields = _validated_fields(request, origin)
+        return bool(
+            request.method == "POST" and status in {302, 303}
+            and source.scheme == "https" and source.hostname
+            and not source.username and not source.password
+            and source.path == "/localization" and not source.fragment
+            and source.query in {"", _QUERY}
+            and fields is not None
+            and _is_storefront_return(target, origin)
+            and urldefrag(target)[0] == urldefrag(fields["return_to"])[0]
+        )
+    except Exception:
+        return False
 
 
 def is_verified_webrex_localization(url, method, canonical_origin, request) -> bool:

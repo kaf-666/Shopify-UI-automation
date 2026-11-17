@@ -6,14 +6,15 @@ import json
 from types import SimpleNamespace
 
 import scripts.run_website_smoke_v1 as full_cli
+from scripts.validate_result_schema import WEBSITE_CASE_IDS
 from utils.result import CaseResult, iso_now
 
 
 def _full_pass_results() -> list[CaseResult]:
     now = iso_now()
     return [
-        CaseResult(f"FULL-{index:02d}", f"Full {index}", "PASS", now, now, 1)
-        for index in range(1, 16)
+        CaseResult(case_id, case_id, "PASS", now, now, 1)
+        for case_id in WEBSITE_CASE_IDS
     ]
 
 
@@ -28,6 +29,9 @@ def _full_runner() -> SimpleNamespace:
         cleanup_artifact=None,
         search_recovery_used=False,
         cf_interruption=False,
+        mutation_summary=lambda: {"mode": "TRANSACTIONAL_SAFE", "status": "PASS",
+                                  "expected_mutation": 0, "unexpected_mutation": 0,
+                                  "high_risk_mutation": 0, "blocked_mutation": 0, "by_path": []},
     )
 
 

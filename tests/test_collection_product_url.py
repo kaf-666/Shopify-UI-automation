@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from urllib.parse import urljoin
 
 from pages.collection_page import CollectionPage
 
@@ -47,8 +49,9 @@ def test_canonical_product_href_rejects_non_product_url() -> None:
 
 
 class _FakeLink:
-    def __init__(self, href: str) -> None:
+    def __init__(self, href: str, page) -> None:
         self.href = href
+        self.page = page
 
     @property
     def first(self):
@@ -57,10 +60,14 @@ class _FakeLink:
     def get_attribute(self, name: str):
         return self.href if name == "href" else None
 
+    def click(self, **_kwargs):
+        self.page.clicked = True
+        self.page.url = urljoin(self.page.url, self.href)
+
 
 class _FakeCard:
-    def __init__(self, href: str) -> None:
-        self.link = _FakeLink(href)
+    def __init__(self, href: str, page) -> None:
+        self.link = _FakeLink(href, page)
 
     def locator(self, selector: str):
         assert selector == ".product-link"
@@ -68,8 +75,8 @@ class _FakeCard:
 
 
 class _FakeCards:
-    def __init__(self, href: str) -> None:
-        self.card = _FakeCard(href)
+    def __init__(self, href: str, page) -> None:
+        self.card = _FakeCard(href, page)
 
     def count(self) -> int:
         return 1
@@ -85,9 +92,11 @@ class _FakeCards:
 
 class _FakePage:
     def __init__(self, href: str) -> None:
-        self.cards = _FakeCards(href)
+        self.cards = _FakeCards(href, self)
         self.url = "https://shop.example/collections/dresses"
         self.goto_url = None
+        self.clicked = False
+        self.context = SimpleNamespace(on=lambda *_args: None, remove_listener=lambda *_args: None)
 
     def locator(self, selector: str):
         assert selector == ".product-card"
@@ -117,8 +126,8 @@ def test_open_product_navigates_to_canonical_product_route(monkeypatch) -> None:
 
     result = CollectionPage(page, config, "desktop").open_product(0)
 
-    assert page.goto_url == "https://shop.example/products/bar"
-    assert result == "https://shop.example/products/bar"
+    assert page.clicked and page.goto_url is None
+    assert result == "https://shop.example/collections/dresses/products/bar"
 
 
 def test_open_product_keeps_existing_canonical_route(monkeypatch) -> None:
@@ -140,4 +149,19 @@ def test_open_product_keeps_existing_canonical_route(monkeypatch) -> None:
 
     result = CollectionPage(page, config, "desktop").open_product(0)
 
+    assert page.clicked and page.goto_url is None
     assert result == "https://shop.example/products/bar"
+
+
+@pytest.mark.parametrize("href", ["https://evil.example/products/bar", "//evil.example/products/bar",
+                                  "https://shop.example:8443/products/bar",
+                                  "https://user@shop.example/products/bar"])
+def test_open_product_rejects_external_destination_before_navigation(monkeypatch, href):
+    monkeypatch.setattr(CollectionPage, "wait_for_products_ready", lambda self, index=0: {})
+    page = _FakePage(href)
+    config = {"base_url": "https://shop.example", "pages": {"collection": {"selectors": {
+        "product_card": {"by": "css", "value": ".product-card"},
+        "product_link": {"by": "css", "value": ".product-link"}}}}}
+    with pytest.raises(RuntimeError, match="outside the configured storefront"):
+        CollectionPage(page, config, "desktop").open_product(0)
+    assert page.goto_url is None

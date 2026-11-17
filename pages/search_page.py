@@ -18,6 +18,7 @@ from utils.search_url_diagnostics import (
     collection_failure_diagnostic,
     safe_search_home_url_diagnostic,
 )
+from utils.request_boundary import run_navigation
 
 
 class SearchSessionReloaded(Exception):
@@ -81,7 +82,14 @@ class SearchPage(BasePage):
         return str(configured)
 
     def _open_entry(self, home: HomePage) -> None:
-        self._dismiss_blocking_overlay()
+        if (self.page_config().get("selectors") or {}).get("blocking_overlay_dismiss"):
+            dismiss = self.locator("blocking_overlay_dismiss").first
+            # Actionability checks invoke this only when the overlay appears,
+            # including after entry but before typing. No absent-popup wait.
+            self.page.remove_locator_handler(dismiss)
+            self.page.add_locator_handler(
+                dismiss, lambda: self._dismiss_blocking_overlay(), times=1
+            )
         strategy = self.entry_strategy()
         if strategy == "direct_trigger":
             expect(home.search_trigger()).to_be_visible(timeout=10_000)
@@ -96,12 +104,6 @@ class SearchPage(BasePage):
         if not (self.page_config().get("selectors") or {}).get("blocking_overlay_dismiss"):
             return
         dismiss = self.locator("blocking_overlay_dismiss").first
-        wait_ms = int(self.page_config().get("blocking_overlay_wait_ms") or 0)
-        if wait_ms:
-            try:
-                dismiss.wait_for(state="visible", timeout=wait_ms)
-            except PlaywrightTimeoutError:
-                return
         if dismiss.count() and dismiss.is_visible():
             dismiss.click(timeout=3_000)
             expect(dismiss).not_to_be_visible(timeout=3_000)
@@ -152,10 +154,13 @@ class SearchPage(BasePage):
                 self._wait_submit_ready()
                 if not self.input().is_visible():
                     raise SearchSessionReloaded("search input lost visibility")
-                if str(self.page_config().get("submit_strategy") or "enter") == "button":
-                    self.submit_button().click()
-                else:
-                    self.input().press("Enter")
+                try:
+                    if str(self.page_config().get("submit_strategy") or "enter") == "button":
+                        run_navigation(self.page, lambda: self.submit_button().click(), timeout_ms=15000)
+                    else:
+                        run_navigation(self.page, lambda: self.input().press("Enter"), timeout_ms=15000)
+                except PlaywrightTimeoutError:
+                    raise SearchSessionReloaded("search submit did not navigate") from None
                 if self._watch_navigation():
                     try:
                         self.wait_results()
@@ -459,7 +464,7 @@ class SearchPage(BasePage):
         deadline = time.monotonic() + timeout_ms / 1000
         actual_page = None
         try:
-            link.click()
+            run_navigation(current_page, link.click, timeout_ms=timeout_ms)
 
             if created_pages:
                 actual_page = created_pages[-1]

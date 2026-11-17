@@ -57,7 +57,6 @@ pages:
     entry_strategy:
       desktop: direct_trigger
       mobile: navigation_drawer
-    blocking_overlay_wait_ms: 15000
     selectors:
       container:
         desktop:

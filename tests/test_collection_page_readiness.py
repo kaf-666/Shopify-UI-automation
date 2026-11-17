@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from urllib.parse import urljoin
 
 from pages.collection_page import (
     CollectionPage,
@@ -49,8 +51,9 @@ class _Clock:
 
 
 class _Locator:
-    def __init__(self, resolver):
+    def __init__(self, resolver, click=None):
         self._resolver = resolver
+        self._click = click
 
     def _items(self) -> list[dict]:
         return list(self._resolver())
@@ -60,17 +63,17 @@ class _Locator:
         return self.nth(0)
 
     def nth(self, index: int):
-        return _Locator(lambda: self._items()[index : index + 1])
+        return _Locator(lambda: self._items()[index : index + 1], self._click)
 
     def locator(self, selector: str):
         assert selector == ".product-link"
         return _Locator(
-            lambda: [link for item in self._items() for link in item.get("links", [])]
+            lambda: [link for item in self._items() for link in item.get("links", [])], self._click
         )
 
     def filter(self, *, visible: bool):
         assert visible is True
-        return _Locator(lambda: [item for item in self._items() if item.get("visible")])
+        return _Locator(lambda: [item for item in self._items() if item.get("visible")], self._click)
 
     def count(self) -> int:
         return len(self._items())
@@ -84,6 +87,9 @@ class _Locator:
         items = self._items()
         return items[0].get("href") if items else None
 
+    def click(self, **_kwargs):
+        self._click(self._items()[0]["href"])
+
 
 class _Page:
     def __init__(self, states: list[dict], clock: _Clock) -> None:
@@ -94,6 +100,12 @@ class _Page:
         self.goto_url = None
         self.locator_calls = 0
         self.waits: list[int] = []
+        self.context = SimpleNamespace(on=lambda *_args: None, remove_listener=lambda *_args: None)
+        self.clicked = False
+
+    def click_link(self, href):
+        self.clicked = True
+        self.url = urljoin(self.url, href)
 
     @property
     def state(self) -> dict:
@@ -104,7 +116,7 @@ class _Page:
         if selector == ".grid":
             return _Locator(lambda: self.state["grid"])
         if selector == ".card":
-            return _Locator(lambda: self.state["cards"])
+            return _Locator(lambda: self.state["cards"], self.click_link)
         raise AssertionError(f"unexpected selector: {selector}")
 
     def evaluate(self, expression: str):
@@ -298,5 +310,5 @@ def test_open_product_waits_then_requeries_target_link(monkeypatch) -> None:
 
     result = collection.open_product(0)
 
-    assert page.goto_url == "https://shop.example/products/final"
-    assert result == "https://shop.example/products/final"
+    assert page.clicked and page.goto_url is None
+    assert result == "https://shop.example/collections/dresses/products/final"

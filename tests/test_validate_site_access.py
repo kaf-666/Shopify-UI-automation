@@ -15,7 +15,8 @@ class _FakeRequest:
     def __init__(self) -> None:
         self.calls = []
 
-    def get(self, url, headers, timeout):
+    def get(self, url, headers, timeout, max_redirects):
+        assert max_redirects == 0
         self.calls.append((url, headers, timeout))
         return SimpleNamespace(status=200)
 
@@ -144,6 +145,13 @@ def test_signed_request_credential_self_checks_remain_active() -> None:
     assert any("SIGNED_REQUEST_INCOMPLETE" in line for line in checks)
     assert any("SIGNED_REQUEST_EXPIRED" in line for line in checks)
     assert all("PASS" in line for line in checks)
+
+
+def test_signed_policy_refuses_http_and_unexpected_ports():
+    policy = SignedRequestPolicy({"Signature": "dummy"}, ["shop.example"])
+    assert policy.request_headers("https://shop.example/cart.js") == {"Signature": "dummy"}
+    assert policy.request_headers("http://shop.example/cart.js") == {}
+    assert policy.request_headers("https://shop.example:8443/cart.js") == {}
 
 
 def test_lavetir_config_uses_signed_request_policy(monkeypatch) -> None:

@@ -8,7 +8,7 @@ Examples:
     python scripts/summarize_stability.py --history path/to/stability-history.jsonl
 
 The summary selects one baseline commit (the newest commit in the available
-records unless ``--baseline-commit`` is supplied).  Older commits are never
+eligible records unless ``--baseline-commit`` is supplied). Older commits are never
 combined into the active window.
 """
 
@@ -63,6 +63,11 @@ def render_summary(summary: dict) -> None:
     if summary.get("all_sites"):
         print(f"Observed Sites: {', '.join(summary['all_sites'])}")
     print(f"Baseline Commit: {summary['baseline_commit'] or 'UNKNOWN'}")
+    latest = summary.get("latest_execution")
+    if latest:
+        print(f"Latest Execution Commit: {latest['commit_sha'] or 'UNKNOWN'}")
+        print(f"Latest Execution Result: {latest['jenkins_result']}")
+        print(f"Latest Execution Eligible: {latest['eligible']}")
     print(f"Eligible Builds: {summary['eligible_builds']}")
     print(f"Eligible Builds On Baseline: {summary['eligible_builds_on_baseline']}")
     if summary.get("mixed_commits_ignored"):
