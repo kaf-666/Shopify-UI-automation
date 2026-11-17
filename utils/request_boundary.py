@@ -465,16 +465,19 @@ class RequestBoundary:
             kind = transport_error_kind(exc)
             # Closing disposes outstanding asset responses, sometimes through a
             # generic driver Error. These GET/HEAD resources are no longer used
-            # after the suite barrier. Navigation, XHR and writes stay gating.
+            # after the suite barrier. Third-party fetch/xhr POSTs are
+            # monitoring/analytics traffic; the mutation guard owns business
+            # writes. Navigation and first-party writes stay gating.
             passive_read = False
             telemetry_post = False
-            if self.closing and isinstance(exc, PlaywrightError):
-                try:
-                    passive_read = (request.method in {"GET", "HEAD"}
-                                    and request.resource_type in PASSIVE_RESOURCES
-                                    and not request.is_navigation_request())
-                except Exception:
-                    pass
+            if isinstance(exc, PlaywrightError):
+                if self.closing:
+                    try:
+                        passive_read = (request.method in {"GET", "HEAD"}
+                                        and request.resource_type in PASSIVE_RESOURCES
+                                        and not request.is_navigation_request())
+                    except Exception:
+                        pass
                 try:
                     path = urlsplit(request.url).path
                     first_party = policy is not None and policy._host_allowed(request.url)
@@ -485,14 +488,14 @@ class RequestBoundary:
                         and not request.is_navigation_request()
                         and (
                             not first_party
-                            or path in CLOSING_TELEMETRY_POST_PATHS
+                            or (self.closing and path in CLOSING_TELEMETRY_POST_PATHS)
                         )
                     )
                 except Exception:
                     telemetry_post = False
-            if self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
+            if (self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
                     "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}
-                    or passive_read or telemetry_post):
+                    or passive_read)) or telemetry_post:
                 self.closing_cancellation_count += 1
                 self.closing_passive_read_cancellation_count += int(passive_read)
                 self.closing_telemetry_post_cancellation_count += int(telemetry_post)

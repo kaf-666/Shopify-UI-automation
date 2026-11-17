@@ -148,7 +148,7 @@ def test_third_party_monorail_is_covered_by_the_generic_telemetry_rule():
     assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
 
 
-def test_third_party_events_cancellation_is_ignored_only_during_close():
+def test_third_party_events_cancellation_is_non_gating():
     boundary, route = _monorail_route(
         url="https://analytics.invalid/events", first_party=False
     )
@@ -160,8 +160,8 @@ def test_third_party_events_cancellation_is_ignored_only_during_close():
         url="https://analytics.invalid/events", first_party=False, closing=False
     )
     boundary._handle_route(route)
-    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
-        boundary.assert_clean()
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
 
 
 def test_third_party_metrics_cancellation_is_also_ignored_during_close():
