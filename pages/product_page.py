@@ -27,6 +27,10 @@ FREE_SIZE_MARKER = DEFAULT_FREE_SIZE_MARKER
 # A short per-node probe keeps readiness bounded while allowing a busy
 # storefront to resolve a freshly hydrated Locator under CI load.
 READINESS_SNAPSHOT_PROBE_TIMEOUT_MS = 250
+# Theme instance checks run JS on a hydrating storefront. A quarter second is
+# too tight when the main thread is busy; keep the probe bounded but allow it
+# to span a short long-task burst.
+THEME_READINESS_PROBE_TIMEOUT_MS = 2_000
 READINESS_POLL_QUANTUM_MS = 250
 
 
@@ -270,7 +274,8 @@ class ProductPage(BasePage):
                     instance.variants?.container === root &&
                     instance.cache?.form === form);
                 return matches.length === 1;
-            }""", config, timeout=timeout_ms or self._readiness_probe_timeout_ms())
+            }""", config, timeout=timeout_ms or self._readiness_probe_timeout_ms(
+                max_ms=THEME_READINESS_PROBE_TIMEOUT_MS))
             return {"theme_ready_status": "READY" if ready else "INITIALIZING"}
         except Exception:
             return {"theme_ready_status": "DOM_READ_ERROR"}
@@ -609,11 +614,13 @@ class ProductPage(BasePage):
             return None
         return max(0, int((deadline - time.monotonic()) * 1000))
 
-    def _readiness_probe_timeout_ms(self) -> int:
+    def _readiness_probe_timeout_ms(
+        self, max_ms: int = READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
+    ) -> int:
         remaining_ms = self._readiness_remaining_ms()
         if remaining_ms is None:
-            return READINESS_SNAPSHOT_PROBE_TIMEOUT_MS
-        return max(1, min(READINESS_SNAPSHOT_PROBE_TIMEOUT_MS, remaining_ms))
+            return max_ms
+        return max(1, min(max_ms, remaining_ms))
 
     def _readiness_snapshot(self) -> dict:
         """Read a cheap, bounded, live-DOM readiness snapshot.
