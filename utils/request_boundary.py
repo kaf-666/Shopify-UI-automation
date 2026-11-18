@@ -26,6 +26,12 @@ PASSIVE_PATH_PREFIXES = ("/cdn/",)
 # A driver cancellation while fulfilling its response after an intentional
 # close must not turn a passed suite into a runtime failure.
 CLOSING_TELEMETRY_POST_PATHS = frozenset({"/.well-known/shopify/monorail/unstable/produce_batch"})
+# Shopify's web-pixel sandbox document is analytics infrastructure, normally a
+# hidden child frame. It is not a storefront navigation even though Playwright
+# reports it as a document request; an intentional close may cancel its read.
+WEB_PIXEL_SANDBOX_PATH = re.compile(
+    r"^/web-pixels@[^/]+/app/web-pixel-[0-9]+@[^/]+/sandbox/"
+)
 # Third-party fetch/xhr POSTs observed in these suites are analytics, conversion
 # and logging traffic (Google, Bing, Meta, Clarity, OTLP, Monorail, PayPal
 # logger, popup/variant apps). During intentional close their responses can be
@@ -505,10 +511,18 @@ class RequestBoundary:
                 if self.closing:
                     try:
                         path = urlsplit(request.url).path
+                        first_party = policy is not None and policy._host_allowed(request.url)
                         passive_read = (request.method in {"GET", "HEAD"}
                                         and not request.is_navigation_request()
                                         and (request.resource_type in PASSIVE_RESOURCES
                                              or path.startswith(PASSIVE_PATH_PREFIXES)))
+                        # The web-pixel sandbox document is analytics, often a
+                        # child-frame navigation, so the plain passive rule does
+                        # not cover it. Match only the fixed first-party path.
+                        passive_read = passive_read or (
+                            first_party
+                            and request.method in {"GET", "HEAD"}
+                            and WEB_PIXEL_SANDBOX_PATH.match(path) is not None)
                     except Exception:
                         pass
                 try:
