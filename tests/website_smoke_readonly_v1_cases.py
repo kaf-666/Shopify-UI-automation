@@ -57,6 +57,7 @@ class WebsiteSmokeReadonlyV1Runner:
         self.viewport = viewport
         self.artifact_dir = Path(artifact_dir) if artifact_dir else None
         self.page = runtime.page
+        self._context = getattr(runtime, "context", None)
         self.site_config = site_config
         self.positive_query = str(((site_config.get("pages") or {}).get("search") or {}).get("smoke_query") or "")
         self.state: dict = {}

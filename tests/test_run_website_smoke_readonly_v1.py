@@ -38,6 +38,18 @@ def _pass_results():
     ]
 
 
+def test_runner_keeps_runtime_context_for_finalization() -> None:
+    context = SimpleNamespace(route=lambda *_args: None, unroute=lambda *_args: None)
+    runner = WebsiteSmokeReadonlyV1Runner(
+        SimpleNamespace(page=object(), context=context),
+        {},
+        "desktop",
+        mutation_guard=ReadonlyMutationGuard(),
+    )
+
+    assert runner._context is context
+
+
 def test_case_pass_is_overridden_by_mutation_violation() -> None:
     guard = ReadonlyMutationGuard()
     runner = WebsiteSmokeReadonlyV1Runner(
