@@ -311,12 +311,22 @@ class WebsiteSmokeReadonlyV1Runner:
             self._run_case(case_id, name, deps, fn)
 
     def _close_extra_pages(self) -> None:
-        for page in self._extra_pages:
-            try:
-                page.close()
-            except Exception:
-                pass
-        self._extra_pages = []
+        if not self._extra_pages:
+            return
+        from utils.request_boundary import ensure_request_boundary
+        boundary = ensure_request_boundary(self._context) if self._context is not None else None
+        if boundary is not None:
+            boundary.begin_page_disposal(self._extra_pages)
+        try:
+            for page in self._extra_pages:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+        finally:
+            if boundary is not None:
+                boundary.end_page_disposal(self._extra_pages)
+            self._extra_pages = []
 
     def _wait_purchase_ready(
         self, prod: ProductPage, phase: str, expected_color=None, expected_size=None,
@@ -589,5 +599,8 @@ class WebsiteSmokeReadonlyV1Runner:
         self._run_journey("direct")
         self._run_journey("search")
         self._run_journey("browse")
+        if self._context is not None:
+            from utils.request_boundary import ensure_request_boundary
+            ensure_request_boundary(self._context).begin_finalization()
         self._close_extra_pages()
         return [self.results[case_id] for case_id in self._cases]

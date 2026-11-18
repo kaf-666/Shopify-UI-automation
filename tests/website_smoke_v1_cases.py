@@ -546,13 +546,27 @@ class WebsiteSmokeV1Runner:
         finally:
             self.finalize_cleanup()
 
-        # 关闭多余旧页面，保持单 active business page
-        for p in self._extra_pages:
+        # 关闭多余旧页面，保持单 active business page。Disposal is intentional
+        # and its in-flight requests must not be reported as business failures.
+        if self._context is not None:
+            from utils.request_boundary import ensure_request_boundary
+            ensure_request_boundary(self._context).begin_finalization()
+        if self._extra_pages:
+            from utils.request_boundary import ensure_request_boundary
+            boundary = (ensure_request_boundary(self._context)
+                        if self._context is not None else None)
+            if boundary is not None:
+                boundary.begin_page_disposal(self._extra_pages)
             try:
-                p.close()
-            except Exception:
-                pass
-        self._extra_pages = []
+                for p in self._extra_pages:
+                    try:
+                        p.close()
+                    except Exception:
+                        pass
+            finally:
+                if boundary is not None:
+                    boundary.end_page_disposal(self._extra_pages)
+                self._extra_pages = []
         return list(self.results.values())
 
     def _block_all_cases(self, blocked_by: str) -> None:
