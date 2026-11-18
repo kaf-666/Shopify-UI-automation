@@ -534,42 +534,26 @@ class ProductPage(BasePage):
         except SizeGroupNotFoundError:
             return 0
 
-    def is_purchase_candidate(self, timeout_ms: int = 12_000) -> bool:
-        """Return whether this PDP exposes colour, size and enabled ATC.
+    def has_visible_color_control(self, timeout_ms: int = 1_000) -> bool:
+        """Return whether the PDP exposes a visible colour radio/label.
 
-        Collection ordering is dynamic; callers use this only to choose a
-        representative purchasable product. Every probe shares one hard
-        deadline because inspecting a replaced/hidden option group with page
-        defaults can otherwise block for tens of seconds per option.
+        Browse uses this cheap check to skip genuinely single-colour products
+        before the formal PDP readiness phase. Size and ATC remain assertions in
+        RSMOKE/WSMOKE-PDP-01 and are not pre-validated here.
         """
-        timeout_ms = max(1, int(timeout_ms))
-        deadline = time.monotonic() + timeout_ms / 1000.0
-
-        def remaining() -> int:
-            return max(0, int((deadline - time.monotonic()) * 1000))
-
         try:
-            title = self.title()
-            remaining_ms = remaining()
-            if remaining_ms <= 0:
+            group = self.color_group()
+            if not group.count() or not group.is_visible(timeout=max(1, timeout_ms)):
                 return False
-            title.wait_for(state="visible", timeout=remaining_ms)
-            if not title.inner_text(timeout=max(1, remaining())).strip():
-                return False
-            if remaining() <= 0 or not self.has_actionable_color(deadline=deadline):
-                return False
-            if remaining() <= 0:
-                return False
-            state = self._size_resolver().readiness_snapshot(deadline=deadline)
-            if not state.get("normal_size_available", 0):
-                return False
-            button = self.add_to_cart_button()
-            remaining_ms = remaining()
-            if remaining_ms <= 0 or not button.count():
-                return False
-            if not button.is_visible(timeout=max(1, remaining())):
-                return False
-            return bool(button.is_enabled(timeout=max(1, remaining())))
+            return bool(self.color_options().evaluate_all(r"""(radios) => radios.some(radio => {
+                const label = radio.labels && radio.labels[0];
+                const control = label || radio;
+                if (!control || !control.isConnected) return false;
+                const rect = control.getBoundingClientRect();
+                const style = getComputedStyle(control);
+                return rect.width > 0 && rect.height > 0 &&
+                    style.display !== 'none' && style.visibility !== 'hidden';
+            })"""))
         except Exception:
             return False
 
