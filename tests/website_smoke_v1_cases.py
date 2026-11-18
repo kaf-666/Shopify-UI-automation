@@ -828,13 +828,17 @@ class WebsiteSmokeV1Runner:
         return f"mode={mode} path={target_path} grid=True"
 
     def _c_plp01(self) -> str:
-        """Collection Product Opens PDP：第一个稳定商品卡真实点击进入 PDP。"""
+        """Collection Product Opens PDP：第一个有颜色/尺码/ATC 的商品卡进入 PDP。"""
         coll = self.state["coll"]
         try:
-            url = coll.open_product(0)
-            actual_page = getattr(coll, "page", self.page)
-            if actual_page is not self.page:
-                self._adopt_business_page(actual_page)
+            index, actual_page = coll.open_suitable_product(
+                lambda page: ProductPage(
+                    page, self.site_config, self.viewport
+                ).is_purchase_candidate(),
+                max_candidates=5,
+            )
+            self._adopt_business_page(actual_page)
+            url = self.page.url
         except Exception as exc:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         if "/products/" not in url:
@@ -849,7 +853,7 @@ class WebsiteSmokeV1Runner:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", "title empty")
         self.state["browse_prod"] = prod
         self.state["browse_stored_title"] = self._stored_title(prod, title)
-        return f"url={url[:80]} title={title[:50]!r}"
+        return f"url={url[:80]} title={title[:50]!r} card_index={index}"
 
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪，真实选择 Color + Size。"""

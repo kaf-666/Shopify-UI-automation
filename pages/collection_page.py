@@ -341,6 +341,60 @@ class CollectionPage(BasePage):
         finally:
             context.remove_listener("page", capture_page)
 
+    def open_suitable_product(self, suitable, max_candidates: int = 5):
+        """Open the first card whose PDP satisfies a caller-supplied predicate.
+
+        Collection ordering and product content are dynamic. A single-colour or
+        otherwise unsuitable first card must not make the Browse journey fail
+        before the PDP contract can be evaluated. The caller decides suitability
+        from the live PDP, as the legacy ShoppingFlow candidate fallback does.
+        """
+        cards = self.visible_product_cards()
+        total = cards.count()
+        if total <= 0:
+            raise RuntimeError("collection has no visible product cards")
+        candidates = min(max(1, int(max_candidates)), total)
+        collection_page = self.page
+        collection_url = collection_page.url
+        for index in range(candidates):
+            self.open_product(index)
+            actual_page = self.page
+            try:
+                if bool(suitable(actual_page)):
+                    return index, actual_page
+            except Exception:
+                pass
+            if index + 1 >= candidates:
+                break
+            if actual_page is not collection_page:
+                try:
+                    from utils.request_boundary import ensure_request_boundary
+                    boundary = ensure_request_boundary(actual_page.context)
+                    boundary.begin_page_disposal([actual_page])
+                    try:
+                        actual_page.close()
+                    finally:
+                        boundary.end_page_disposal([actual_page])
+                except Exception:
+                    try:
+                        actual_page.close()
+                    except Exception:
+                        pass
+                self.page = collection_page
+            if self.page.url != collection_url:
+                from utils.request_boundary import run_navigation
+                run_navigation(
+                    self.page,
+                    lambda: self.page.goto(
+                        collection_url, wait_until="domcontentloaded",
+                        timeout=PAGE_NAV_TIMEOUT_MS,
+                    ),
+                )
+        raise RuntimeError(
+            f"No suitable product among first {candidates} cards "
+            f"(collection={collection_url.split('?', 1)[0]})"
+        )
+
     def _validate_product_destination(self, url: str) -> None:
         """Require an explicitly configured storefront host before/after navigation."""
         base = urlparse(self.base_url())

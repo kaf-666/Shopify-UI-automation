@@ -534,6 +534,24 @@ class ProductPage(BasePage):
         except SizeGroupNotFoundError:
             return 0
 
+    def is_purchase_candidate(self) -> bool:
+        """Return whether this PDP exposes colour, size and enabled ATC.
+
+        Collection ordering is dynamic; callers use this only to choose a
+        representative purchasable product, not as a business assertion.
+        """
+        try:
+            if not self.get_title().strip():
+                return False
+            if self.available_color_count() <= 0:
+                return False
+            if self.available_size_count() <= 0:
+                return False
+            button = self.add_to_cart_button()
+            return bool(button.is_visible() and button.is_enabled())
+        except Exception:
+            return False
+
     @staticmethod
     def _safe_state(check, default=False):
         try:
