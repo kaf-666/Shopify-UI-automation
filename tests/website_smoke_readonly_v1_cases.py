@@ -547,7 +547,7 @@ class WebsiteSmokeReadonlyV1Runner:
             index, actual_page = coll.open_suitable_product(
                 lambda page: ProductPage(
                     page, self.site_config, self.viewport
-                ).is_purchase_candidate(),
+                ).has_visible_color_control(),
                 max_candidates=5,
             )
             self._adopt_business_page(actual_page)
