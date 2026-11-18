@@ -486,9 +486,9 @@ class RequestBoundary:
             kind = transport_error_kind(exc)
             # Closing disposes outstanding asset responses, sometimes through a
             # generic driver Error. These GET/HEAD resources are no longer used
-            # after the suite barrier. Third-party fetch/xhr POSTs are
-            # monitoring/analytics traffic; the mutation guard owns business
-            # writes. Navigation and first-party writes stay gating.
+            # after the suite barrier. The exact first-party Shopify Monorail
+            # telemetry POST and third-party fetch/xhr POST monitoring traffic
+            # are non-gating; the mutation guard owns business writes.
             passive_read = False
             telemetry_post = False
             page_disposal = False
@@ -517,11 +517,10 @@ class RequestBoundary:
                     telemetry_post = (
                         policy is not None
                         and request.method == "POST"
-                        and request.resource_type in {"fetch", "xhr"}
                         and not request.is_navigation_request()
                         and (
-                            not first_party
-                            or (self.closing and path in CLOSING_TELEMETRY_POST_PATHS)
+                            (first_party and path in CLOSING_TELEMETRY_POST_PATHS)
+                            or (not first_party and request.resource_type in {"fetch", "xhr"})
                         )
                     )
                 except Exception:

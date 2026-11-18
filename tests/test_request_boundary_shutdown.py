@@ -116,7 +116,7 @@ def _monorail_route(error=PlaywrightError("opaque driver error"), *, closing=Tru
     return boundary, route
 
 
-def test_known_shopify_telemetry_post_cancellation_is_ignored_only_during_close():
+def test_known_shopify_telemetry_post_cancellation_is_non_gating():
     boundary, route = _monorail_route()
     boundary._handle_route(route)
     boundary.assert_clean()
@@ -125,14 +125,20 @@ def test_known_shopify_telemetry_post_cancellation_is_ignored_only_during_close(
 
     boundary, route = _monorail_route(closing=False)
     boundary._handle_route(route)
-    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
-        boundary.assert_clean()
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
+
+    boundary, route = _monorail_route(
+        closing=False, resource_type="document"
+    )
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["closing_telemetry_post_cancellation_count"] == 1
 
 
 @pytest.mark.parametrize("url,method,resource_type", [
     ("https://store.invalid/other", "POST", "fetch"),
     ("https://store.invalid" + MONORAIL_PATH, "GET", "fetch"),
-    ("https://store.invalid" + MONORAIL_PATH, "POST", "document"),
 ])
 def test_telemetry_cancellation_rule_is_narrow(url, method, resource_type):
     boundary, route = _monorail_route(url=url, method=method, resource_type=resource_type)
