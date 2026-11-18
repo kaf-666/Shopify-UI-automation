@@ -544,8 +544,14 @@ class WebsiteSmokeReadonlyV1Runner:
         """Collection Product Opens PDP：打开第一个商品卡并读取标题。"""
         coll = self.state["coll"]
         try:
-            url = coll.open_product(0)
-            self._adopt_business_page(getattr(coll, "page", self.page))
+            index, actual_page = coll.open_suitable_product(
+                lambda page: ProductPage(
+                    page, self.site_config, self.viewport
+                ).is_purchase_candidate(),
+                max_candidates=5,
+            )
+            self._adopt_business_page(actual_page)
+            url = self.page.url
         except Exception as exc:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", f"{type(exc).__name__}: {exc}") from exc
         if "/products/" not in urlparse(url).path:
@@ -561,7 +567,7 @@ class WebsiteSmokeReadonlyV1Runner:
         if not title:
             raise FlowError("PLP_PRODUCT_OPEN_FAILURE", "title empty")
         self.state["browse_prod"] = prod
-        return f"url={url[:80]} title={title[:50]!r}"
+        return f"url={url[:80]} title={title[:50]!r} card_index={index}"
 
     def _c_pdp01(self) -> str:
         """Purchase Variant Available：购买区就绪并选择合法 Color + Size。"""

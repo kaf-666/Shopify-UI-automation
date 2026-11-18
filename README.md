@@ -101,8 +101,10 @@ Both CLIs accept `--site mondressy|lavetir|shirees` and
 `settings.default_site`. Explicit `--run-id` must be unique. CI also supplies
 `--run-context`, reserved before smoke. Existing run directories are never reused.
 Full has 3 Direct, 4 Search and 8 Browse cases per viewport; Readonly has 2 Direct,
-4 Search and 5 Browse cases. A partial/fatal run retains executed state without
-inventing missing cases.
+4 Search and 5 Browse cases. Browse evaluates up to five visible collection
+cards and opens the first PDP with colour, a normal size and enabled ATC, so a
+single-colour first card does not block the purchase contract. A partial/fatal
+run retains executed state without inventing missing cases.
 
 | Exit | Meaning |
 | --- | --- |
