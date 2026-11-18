@@ -534,7 +534,7 @@ class ProductPage(BasePage):
         except SizeGroupNotFoundError:
             return 0
 
-    def is_purchase_candidate(self, timeout_ms: int = 5_000) -> bool:
+    def is_purchase_candidate(self, timeout_ms: int = 12_000) -> bool:
         """Return whether this PDP exposes colour, size and enabled ATC.
 
         Collection ordering is dynamic; callers use this only to choose a
