@@ -198,6 +198,55 @@ def test_telemetry_cancellation_without_policy_remains_gating():
         boundary.assert_clean()
 
 
+def test_intentional_page_disposal_cancellation_is_non_gating():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/api/2026-01/graphql.json",
+        method="POST", resource_type="fetch", closing=False,
+    )
+    page = object()
+    route.request.frame = SimpleNamespace(page=page)
+    boundary.begin_page_disposal([page])
+    try:
+        boundary._handle_route(route)
+    finally:
+        boundary.end_page_disposal([page])
+    boundary.assert_clean()
+    assert boundary.summary()["page_disposal_cancellation_count"] == 1
+
+
+def test_first_party_cdn_asset_cancellation_is_passive_during_close():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/cdn/shopifycloud/checkout-web/assets/c1/x.js",
+        method="GET", resource_type="other", closing=True, first_party=True,
+    )
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["closing_passive_read_cancellation_count"] == 1
+
+
+def test_finalization_ignores_non_navigation_transport_noise():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/api/2026-01/graphql.json",
+        method="POST", resource_type="fetch", closing=False,
+    )
+    boundary.begin_finalization()
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["finalization_cancellation_count"] == 1
+
+
+def test_finalization_does_not_hide_navigation_failure():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/products/example",
+        method="GET", resource_type="document", closing=False,
+    )
+    route.request.is_navigation_request = lambda: True
+    boundary.begin_finalization()
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
 def test_telemetry_cancellation_does_not_erase_prior_safety_denial():
     boundary, route = _monorail_route()
     boundary.failures.append("REDIRECT_MUTATION_DENIED")

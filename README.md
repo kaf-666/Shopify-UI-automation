@@ -35,12 +35,15 @@ aborted and separately audited as `GOOGLE_CONVERSION_RETURN_READ_SUPPRESSED`.
 This exact HTTPS provider/endpoint rule sends no follow-up request; unknown
 providers, paths and writing redirects still fail. The Google pagead
 viewthrough-to-1p family additionally requires an identical numeric ad ID.
-During intentional browser disposal, in-flight passive asset reads and the exact
-first-party Shopify Monorail telemetry POST
+During intentional browser disposal, in-flight passive asset reads (including
+first-party `/cdn/` resources) and the exact first-party Shopify Monorail
+telemetry POST
 (`/.well-known/shopify/monorail/unstable/produce_batch`) may be canceled without
 gating the run. Third-party fetch/xhr POST monitoring traffic is also non-gating
-because the mutation guard owns business writes; first-party navigation and
-writes remain gating.
+because the mutation guard owns business writes. After all cases are complete,
+remaining non-navigation transport noise during finalization is counted as
+non-gating; navigation remains gating and business writes remain covered by the
+mutation audit.
 The observed main-frame Shop `/accounts/sur` bridge has a separate bounded GET
 path: no signing, authorization, referral headers or cookies are sent; only 3xx
 responses returning to the same original storefront endpoint are accepted. Source

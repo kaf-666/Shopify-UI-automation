@@ -21,6 +21,7 @@ MUTATION_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 REDIRECTS = {301, 302, 303, 307, 308}
 SIGNATURE_NAMES = {"signature", "signature-input", "signature-agent"}
 PASSIVE_RESOURCES = {"script", "stylesheet", "image", "font", "media", "manifest", "texttrack"}
+PASSIVE_PATH_PREFIXES = ("/cdn/",)
 # Shopify's first-party Monorail endpoint is telemetry, not a business write.
 # A driver cancellation while fulfilling its response after an intentional
 # close must not turn a passed suite into a runtime failure.
@@ -180,6 +181,7 @@ class RequestBoundary:
         self.guards = []
         self.pending = {}
         self.settled = WeakSet()
+        self.disposing_pages = set()
         self.failures = []
         self.events = []
         self.bridge_events = []
@@ -187,6 +189,9 @@ class RequestBoundary:
         self.closing_cancellation_count = 0
         self.closing_passive_read_cancellation_count = 0
         self.closing_telemetry_post_cancellation_count = 0
+        self.page_disposal_cancellation_count = 0
+        self.finalization_cancellation_count = 0
+        self.finalizing = False
         self.closing = False
         self._handler = self._handle_route
         context.route("**/*", self._handler)
@@ -194,6 +199,20 @@ class RequestBoundary:
     def register_guard(self, guard):
         if guard not in self.guards:
             self.guards.append(guard)
+
+    def begin_page_disposal(self, pages) -> None:
+        """Mark pages whose intentional close must not gate in-flight requests."""
+        for page in pages:
+            if page is not None:
+                self.disposing_pages.add(page)
+
+    def end_page_disposal(self, pages) -> None:
+        for page in pages:
+            self.disposing_pages.discard(page)
+
+    def begin_finalization(self) -> None:
+        """After all cases, non-navigation transport noise is teardown-only."""
+        self.finalizing = True
 
     def remove_guard(self, guard):
         if guard in self.guards:
@@ -244,7 +263,9 @@ class RequestBoundary:
                 "transport_errors": [dict(event) for event in self.transport_errors],
                 "closing_cancellation_count": self.closing_cancellation_count,
                 "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count,
-                "closing_telemetry_post_cancellation_count": self.closing_telemetry_post_cancellation_count}
+                "closing_telemetry_post_cancellation_count": self.closing_telemetry_post_cancellation_count,
+                "page_disposal_cancellation_count": self.page_disposal_cancellation_count,
+                "finalization_cancellation_count": self.finalization_cancellation_count}
 
     def _anonymous_shop_return(self, route, target):
         """Read only the fixed bridge, returning only to the source endpoint.
@@ -470,12 +491,24 @@ class RequestBoundary:
             # writes. Navigation and first-party writes stay gating.
             passive_read = False
             telemetry_post = False
+            page_disposal = False
+            finalization = False
+            try:
+                page_disposal = request.frame.page in self.disposing_pages
+            except Exception:
+                page_disposal = False
+            try:
+                finalization = self.finalizing and not request.is_navigation_request()
+            except Exception:
+                finalization = self.finalizing
             if isinstance(exc, PlaywrightError):
                 if self.closing:
                     try:
+                        path = urlsplit(request.url).path
                         passive_read = (request.method in {"GET", "HEAD"}
-                                        and request.resource_type in PASSIVE_RESOURCES
-                                        and not request.is_navigation_request())
+                                        and not request.is_navigation_request()
+                                        and (request.resource_type in PASSIVE_RESOURCES
+                                             or path.startswith(PASSIVE_PATH_PREFIXES)))
                     except Exception:
                         pass
                 try:
@@ -495,10 +528,12 @@ class RequestBoundary:
                     telemetry_post = False
             if (self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
                     "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}
-                    or passive_read)) or telemetry_post:
+                    or passive_read)) or telemetry_post or page_disposal or finalization:
                 self.closing_cancellation_count += 1
                 self.closing_passive_read_cancellation_count += int(passive_read)
                 self.closing_telemetry_post_cancellation_count += int(telemetry_post)
+                self.page_disposal_cancellation_count += int(page_disposal)
+                self.finalization_cancellation_count += int(finalization)
             else:
                 self.failures.append("REQUEST_TRANSPORT_FAILED")
                 if len(self.transport_errors) < 100:
