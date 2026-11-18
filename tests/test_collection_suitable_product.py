@@ -49,3 +49,37 @@ def test_unsuitable_candidates_raise_after_bound():
         raise AssertionError("expected a bounded candidate failure")
     assert collection.opened == [0, 1]
     assert collection.navigations == [collection.collection]
+
+
+def test_candidate_return_keeps_disposal_mark_until_grace(monkeypatch):
+    from utils.request_boundary import RequestBoundary
+
+    collection = _FakeCollection()
+    context = SimpleNamespace(route=lambda *_: None, pages=[])
+    collection.page.context = context
+    boundary = RequestBoundary(context)
+    context._shopify_request_boundary = boundary
+    events = []
+    boundary.begin_page_disposal = lambda pages: events.append(("begin", list(pages)))
+    boundary.end_page_disposal = lambda pages: events.append(("end", list(pages)))
+    collection.page.wait_for_timeout = lambda ms: events.append(("wait", ms))
+
+    def fake_navigation(page, action, **_kwargs):
+        events.append(("navigate", page.url))
+        return action()
+
+    monkeypatch.setattr("utils.request_boundary.run_navigation", fake_navigation)
+
+    try:
+        collection.open_suitable_product(lambda _current: False, max_candidates=2)
+    except RuntimeError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected a bounded candidate failure")
+
+    assert events == [
+        ("begin", [collection.page]),
+        ("navigate", "https://shop.example/products/0"),
+        ("wait", 1_500),
+        ("end", [collection.page]),
+    ]

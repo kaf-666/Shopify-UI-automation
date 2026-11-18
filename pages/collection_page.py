@@ -18,6 +18,10 @@ from utils.browser import PAGE_NAV_TIMEOUT_MS
 COLLECTION_PRODUCTS_TIMEOUT_MS = 15_000
 COLLECTION_PRODUCTS_POLL_MS = 250
 COLLECTION_PRODUCTS_STABLE_SNAPSHOTS = 2
+# A closed/navigated-away candidate can still deliver route callback
+# cancellations after the disposal call returns. Keep the page marked for a
+# short grace so intentional candidate cleanup never becomes a transport gate.
+CANDIDATE_DISPOSAL_GRACE_MS = 1_500
 
 
 class CollectionProductsReadinessError(TimeoutError):
@@ -341,6 +345,57 @@ class CollectionPage(BasePage):
         finally:
             context.remove_listener("page", capture_page)
 
+    @staticmethod
+    def _request_boundary(page):
+        from utils.request_boundary import RequestBoundary
+        boundary = getattr(
+            getattr(page, "context", None), "_shopify_request_boundary", None
+        )
+        return boundary if isinstance(boundary, RequestBoundary) else None
+
+    def _close_candidate_page(self, page, collection_page) -> None:
+        boundary = self._request_boundary(page)
+        if boundary is None:
+            try:
+                page.close()
+            except Exception:
+                pass
+            return
+        boundary.begin_page_disposal([page])
+        try:
+            page.close()
+            # In-flight route callbacks for a closed page can surface after
+            # close() returns; stay marked until they have drained.
+            collection_page.wait_for_timeout(CANDIDATE_DISPOSAL_GRACE_MS)
+        except Exception:
+            pass
+        finally:
+            boundary.end_page_disposal([page])
+
+    def _return_to_collection(self, page, collection_url) -> None:
+        from utils.request_boundary import run_navigation
+        boundary = self._request_boundary(page)
+        if boundary is None:
+            page.goto(
+                collection_url, wait_until="domcontentloaded",
+                timeout=PAGE_NAV_TIMEOUT_MS,
+            )
+            return
+        boundary.begin_page_disposal([page])
+        try:
+            run_navigation(
+                page,
+                lambda: page.goto(
+                    collection_url, wait_until="domcontentloaded",
+                    timeout=PAGE_NAV_TIMEOUT_MS,
+                ),
+            )
+            # The return navigation cancels the rejected PDP's outstanding
+            # assets. Keep them non-gating until their callbacks settle.
+            page.wait_for_timeout(CANDIDATE_DISPOSAL_GRACE_MS)
+        finally:
+            boundary.end_page_disposal([page])
+
     def open_suitable_product(self, suitable, max_candidates: int = 5):
         """Open the first card whose PDP satisfies a caller-supplied predicate.
 
@@ -369,34 +424,10 @@ class CollectionPage(BasePage):
             if index + 1 >= candidates:
                 break
             if actual_page is not collection_page:
-                try:
-                    from utils.request_boundary import RequestBoundary
-                    boundary = getattr(
-                        actual_page.context, "_shopify_request_boundary", None
-                    )
-                    if isinstance(boundary, RequestBoundary):
-                        boundary.begin_page_disposal([actual_page])
-                        try:
-                            actual_page.close()
-                        finally:
-                            boundary.end_page_disposal([actual_page])
-                    else:
-                        actual_page.close()
-                except Exception:
-                    try:
-                        actual_page.close()
-                    except Exception:
-                        pass
+                self._close_candidate_page(actual_page, collection_page)
                 self.page = collection_page
             if self.page.url != collection_url:
-                from utils.request_boundary import run_navigation
-                run_navigation(
-                    self.page,
-                    lambda: self.page.goto(
-                        collection_url, wait_until="domcontentloaded",
-                        timeout=PAGE_NAV_TIMEOUT_MS,
-                    ),
-                )
+                self._return_to_collection(self.page, collection_url)
         raise RuntimeError(
             f"No suitable product among first {candidates} cards "
             f"(collection={collection_url.split('?', 1)[0]}, last_card={last_card[:80]})"
