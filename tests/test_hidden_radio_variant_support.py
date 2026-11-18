@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -372,3 +373,48 @@ def test_selection_return_value_matches_final_checked_color(page) -> None:
     assert selected == "Dusty Pink"
     assert product.get_selected_color() == selected
     assert _color_click_count(page, selected) == 1
+
+
+def test_browse_candidate_waits_for_delayed_color_hydration(page) -> None:
+    page.set_content(
+        """
+        <form id="purchase">
+          <h1 id="title">Synthetic Product</h1>
+          <div id="colors"></div>
+          <button id="atc" type="button">Add to cart</button>
+        </form>
+        <script>
+          setTimeout(() => {
+            document.getElementById('colors').innerHTML =
+              '<label for="color-blue">Blue</label>' +
+              '<input id="color-blue" type="radio" name="Color" value="Blue">';
+          }, 600);
+        </script>
+        """
+    )
+    product = ProductPage(
+        page,
+        _product_config(color_control={"strategy": "associated_label"}),
+        "desktop",
+    )
+
+    started = time.monotonic()
+    assert product.has_visible_color_control(timeout_ms=5_000) is True
+    assert time.monotonic() - started >= 0.5
+
+
+def test_browse_candidate_rejects_missing_color_within_bound(page) -> None:
+    page.set_content(
+        """
+        <form id="purchase">
+          <h1 id="title">Synthetic Product</h1>
+          <div id="colors"></div>
+          <button id="atc" type="button">Add to cart</button>
+        </form>
+        """
+    )
+    product = ProductPage(page, _product_config(), "desktop")
+
+    started = time.monotonic()
+    assert product.has_visible_color_control(timeout_ms=300) is False
+    assert time.monotonic() - started < 5

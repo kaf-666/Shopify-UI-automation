@@ -48,16 +48,26 @@ def product(browser):
 
 
 def test_waits_for_delayed_master_variant_before_cart_click(product):
-    # Native checked changes immediately; the theme finishes asynchronously.
-    product.page.evaluate('''pink.onchange=()=>setTimeout(()=>{
-      document.querySelector('[name=id]').value='22';
-      document.querySelector('[data-variant-color-label]').textContent='Pink';
-    },700)''')
+    # The theme updates the master variant asynchronously. Release that update
+    # only after readiness has observed the checked/label mismatch, so the test
+    # does not depend on how long select_color itself takes.
     assert product.select_color("Pink") == "Pink"
     timeline = []
+    released = [False]
+
+    def release_after_mismatch(snapshot):
+        timeline.append(snapshot)
+        if released[0] or snapshot.get("variant_sync_status") != "MISMATCH":
+            return
+        released[0] = True
+        product.page.evaluate('''() => {
+          document.querySelector('[name=id]').value='22';
+          document.querySelector('[data-variant-color-label]').textContent='Pink';
+        }''')
+
     product.wait_purchase_ready(timeout_ms=2500, phase="post_selection",
                                 expected_color="Pink", expected_size="M",
-                                diagnostics_hook=timeline.append)
+                                diagnostics_hook=release_after_mismatch)
     product.add_to_cart()
     assert product.page.evaluate("window.added") == ["22"]
     assert any(s.get("variant_sync_status") == "MISMATCH" for s in timeline)
@@ -102,7 +112,7 @@ def test_theme_binds_handlers_before_first_color_click(product):
     enable_theme_gate(product)
     product.page.evaluate('''() => {
       window.changes=[];
-      setTimeout(()=>{
+      window.initializeTheme=()=>{
         pink.onchange=()=>{
           window.changes.push(pink.value);
           document.querySelector('[name=id]').value='22';
@@ -111,11 +121,19 @@ def test_theme_binds_handlers_before_first_color_click(product):
         const form=document.querySelector('#purchase'), root=form.closest('[data-product-id]');
         window.theme={sections:{instances:[{type:'product', container:root,
           cache:{form}, variants:{container:root}}]}};
-      },700);
+      };
     }''')
     observations=[]
+    initialized=[False]
+
+    def initialize_once(snapshot):
+        observations.append(snapshot)
+        if not initialized[0]:
+            initialized[0] = True
+            product.page.evaluate("window.initializeTheme()")
+
     product.wait_purchase_ready(timeout_ms=2500, phase="pre_selection",
-                                diagnostics_hook=observations.append)
+                                diagnostics_hook=initialize_once)
     assert any(s["theme_ready_status"] == "INITIALIZING" for s in observations)
     assert observations[-1]["theme_ready_status"] == "READY"
     product.select_color("Pink")

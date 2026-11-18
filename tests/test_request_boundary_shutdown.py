@@ -230,6 +230,40 @@ def test_first_party_cdn_asset_cancellation_is_passive_during_close():
     assert boundary.summary()["closing_passive_read_cancellation_count"] == 1
 
 
+WEB_PIXEL_PATH = (
+    "/web-pixels@997a76bdw6b2572e2pb4e93427m632f4b2a/app/"
+    "web-pixel-1807647029@f529b794e365d392723141141e99dd15/sandbox/modern/"
+    "collections/wedding-guest-dresses/products/example"
+)
+
+
+def test_first_party_web_pixel_sandbox_read_is_passive_during_close():
+    boundary, route = _monorail_route(
+        url="https://store.invalid" + WEB_PIXEL_PATH,
+        method="GET", resource_type="document", closing=True, first_party=True,
+    )
+    route.request.is_navigation_request = lambda: True
+    boundary._handle_route(route)
+    boundary.assert_clean()
+    assert boundary.summary()["closing_passive_read_cancellation_count"] == 1
+
+
+@pytest.mark.parametrize("closing,first_party,method,path", [
+    (False, True, "GET", WEB_PIXEL_PATH),
+    (True, True, "POST", WEB_PIXEL_PATH),
+    (True, True, "GET", "/collections/wedding-guest-dresses/products/example"),
+])
+def test_web_pixel_sandbox_rule_is_narrow(closing, first_party, method, path):
+    boundary, route = _monorail_route(
+        url="https://store.invalid" + path,
+        method=method, resource_type="document", closing=closing,
+        first_party=first_party,
+    )
+    boundary._handle_route(route)
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
 def test_finalization_ignores_non_navigation_transport_noise():
     boundary, route = _monorail_route(
         url="https://store.invalid/api/2026-01/graphql.json",

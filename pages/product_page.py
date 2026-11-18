@@ -534,26 +534,41 @@ class ProductPage(BasePage):
         except SizeGroupNotFoundError:
             return 0
 
-    def has_visible_color_control(self, timeout_ms: int = 1_000) -> bool:
+    def has_visible_color_control(self, timeout_ms: int = 15_000) -> bool:
         """Return whether the PDP exposes a visible colour radio/label.
 
         Browse uses this cheap check to skip genuinely single-colour products
         before the formal PDP readiness phase. Size and ATC remain assertions in
         RSMOKE/WSMOKE-PDP-01 and are not pre-validated here.
+
+        Candidate pages are inspected as soon as navigation commits, before the
+        theme has necessarily hydrated its variant controls. Wait within one
+        bounded deadline for the colour group and its radios instead of treating
+        the first empty DOM snapshot as a single-colour product.
         """
+        timeout_ms = max(1, int(timeout_ms))
+        deadline = time.monotonic() + timeout_ms / 1000.0
         try:
             group = self.color_group()
-            if not group.count() or not group.is_visible(timeout=max(1, timeout_ms)):
-                return False
-            return bool(self.color_options().evaluate_all(r"""(radios) => radios.some(radio => {
-                const label = radio.labels && radio.labels[0];
-                const control = label || radio;
-                if (!control || !control.isConnected) return false;
-                const rect = control.getBoundingClientRect();
-                const style = getComputedStyle(control);
-                return rect.width > 0 && rect.height > 0 &&
-                    style.display !== 'none' && style.visibility !== 'hidden';
-            })"""))
+            group.wait_for(state="attached", timeout=timeout_ms)
+            while True:
+                try:
+                    if group.is_visible() and bool(self.color_options().evaluate_all(r"""(radios) => radios.some(radio => {
+                        const label = radio.labels && radio.labels[0];
+                        const control = label || radio;
+                        if (!control || !control.isConnected) return false;
+                        const rect = control.getBoundingClientRect();
+                        const style = getComputedStyle(control);
+                        return rect.width > 0 && rect.height > 0 &&
+                            style.display !== 'none' && style.visibility !== 'hidden';
+                    })""")):
+                        return True
+                except Exception:
+                    pass
+                remaining = int((deadline - time.monotonic()) * 1000)
+                if remaining <= 0:
+                    return False
+                self.page.wait_for_timeout(min(200, remaining))
         except Exception:
             return False
 
