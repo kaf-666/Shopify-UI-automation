@@ -534,21 +534,42 @@ class ProductPage(BasePage):
         except SizeGroupNotFoundError:
             return 0
 
-    def is_purchase_candidate(self) -> bool:
+    def is_purchase_candidate(self, timeout_ms: int = 5_000) -> bool:
         """Return whether this PDP exposes colour, size and enabled ATC.
 
         Collection ordering is dynamic; callers use this only to choose a
-        representative purchasable product, not as a business assertion.
+        representative purchasable product. Every probe shares one hard
+        deadline because inspecting a replaced/hidden option group with page
+        defaults can otherwise block for tens of seconds per option.
         """
+        timeout_ms = max(1, int(timeout_ms))
+        deadline = time.monotonic() + timeout_ms / 1000.0
+
+        def remaining() -> int:
+            return max(0, int((deadline - time.monotonic()) * 1000))
+
         try:
-            if not self.get_title().strip():
+            title = self.title()
+            remaining_ms = remaining()
+            if remaining_ms <= 0:
                 return False
-            if self.available_color_count() <= 0:
+            title.wait_for(state="visible", timeout=remaining_ms)
+            if not title.inner_text(timeout=max(1, remaining())).strip():
                 return False
-            if self.available_size_count() <= 0:
+            if remaining() <= 0 or not self.has_actionable_color(deadline=deadline):
+                return False
+            if remaining() <= 0:
+                return False
+            state = self._size_resolver().readiness_snapshot(deadline=deadline)
+            if not state.get("normal_size_available", 0):
                 return False
             button = self.add_to_cart_button()
-            return bool(button.is_visible() and button.is_enabled())
+            remaining_ms = remaining()
+            if remaining_ms <= 0 or not button.count():
+                return False
+            if not button.is_visible(timeout=max(1, remaining())):
+                return False
+            return bool(button.is_enabled(timeout=max(1, remaining())))
         except Exception:
             return False
 
