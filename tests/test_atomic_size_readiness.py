@@ -124,6 +124,19 @@ def test_initial_candidate_scan_waits_for_transient_disabled_sizes_without_click
     assert size.selected_value() == '4'
 
 
+def test_initial_candidate_scan_waits_for_transiently_removed_size_group(page):
+    size=resolver(page)
+    page.evaluate('''() => {
+      const group=document.querySelector('.my-infiniteoptions-container.sizeoption');
+      const parent=group.parentElement;
+      group.remove();
+      setTimeout(()=>parent.appendChild(group),1400);
+    }''')
+    candidate=size.first_available_value()
+    assert candidate in {'2','4'}
+    assert any(o.value == candidate and o.available for o in size.options())
+
+
 def test_native_candidate_scan_survives_visibility_transition_outside_purchase_form(page):
     size=resolver(page,model='SIZE_MODEL_02',markup='''<form id="purchase"><input name="id" value="fixture"></form>
       <fieldset name="Size" data-handle="size"><legend>Size</legend>

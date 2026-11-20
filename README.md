@@ -102,9 +102,10 @@ Both CLIs accept `--site mondressy|lavetir|shirees` and
 `settings.default_site`. Explicit `--run-id` must be unique. CI also supplies
 `--run-context`, reserved before smoke. Existing run directories are never reused.
 Full has 3 Direct, 4 Search and 8 Browse cases per viewport; Readonly has 2 Direct,
-4 Search and 5 Browse cases. Browse evaluates up to five visible collection
-cards and opens the first PDP with a visible colour control; size and ATC are
-then asserted by the PDP case, so a single-colour first card does not block the
+4 Search and 5 Browse cases. Browse waits for the collection's first product link
+to become stably actionable, then evaluates up to five visible cards and opens
+the first PDP with a visible colour control; size and ATC are then asserted by
+the PDP case, so a single-colour or late-hydrating first card does not block the
 purchase contract. A partial/fatal run retains executed state without inventing
 missing cases.
 
@@ -123,8 +124,9 @@ observe separate APIRequestContext traffic. Offline validation:
 
 Product size models, shared readiness phases, the single 15-second budget and
 bounded diagnostics are documented in [purchase readiness](docs/purchase-readiness.md).
-Normal-size selection excludes custom measurements. A passing rerun does not
-replace an earlier failed observation.
+Normal-size selection excludes custom measurements and waits up to five seconds
+for a transiently replaced size group after a colour change. A passing rerun does
+not replace an earlier failed observation.
 
 ## Current-run artifacts and summary
 

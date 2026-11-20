@@ -404,6 +404,10 @@ class CollectionPage(BasePage):
         before the PDP contract can be evaluated. The caller decides suitability
         from the live PDP, as the legacy ShoppingFlow candidate fallback does.
         """
+        # The collection grid can be visible before its cards hydrate, especially
+        # on mobile after a navigation. Wait for the first stable link instead of
+        # treating a transient empty grid as an empty collection.
+        self.wait_for_products_ready(0)
         cards = self.visible_product_cards()
         total = cards.count()
         if total <= 0:
