@@ -10,10 +10,15 @@ class _FakeCollection(CollectionPage):
         self.page = SimpleNamespace(url=self.collection, goto=self._goto)
         self.opened = []
         self.navigations = []
+        self.wait_calls = []
 
     def _goto(self, url, **_kwargs):
         self.navigations.append(url)
         self.page.url = url
+
+    def wait_for_products_ready(self, index=0, **_kwargs):
+        self.wait_calls.append(index)
+        return {"target_index": index}
 
     def visible_product_cards(self):
         return SimpleNamespace(count=lambda: 3)
@@ -83,3 +88,30 @@ def test_candidate_return_keeps_disposal_mark_until_grace(monkeypatch):
         ("wait", 1_500),
         ("end", [collection.page]),
     ]
+
+
+class _DelayedCardsCollection(_FakeCollection):
+    def __init__(self):
+        super().__init__()
+        self.card_count = 0
+
+    def wait_for_products_ready(self, index=0, **_kwargs):
+        self.wait_calls.append(index)
+        self.card_count = 3
+        return {"target_index": index}
+
+    def visible_product_cards(self):
+        return SimpleNamespace(count=lambda: self.card_count)
+
+
+def test_waits_for_collection_cards_before_counting():
+    collection = _DelayedCardsCollection()
+
+    index, page = collection.open_suitable_product(
+        lambda _current: True, max_candidates=1
+    )
+
+    assert index == 0
+    assert page is collection.page
+    assert collection.wait_calls == [0]
+    assert collection.opened == [0]
