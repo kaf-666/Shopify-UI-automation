@@ -111,6 +111,30 @@ def test_promotion_gift_dialog_is_dismissed_and_drawer_reopened(page):
     assert page.locator(".item .qty").input_value() == "1"
 
 
+def test_promotion_visible_close_control_is_preferred(page):
+    _set_promotion_page(page)
+    page.evaluate(
+        """() => {
+          const dialog = document.querySelector('[data-promotion-gift-dialog]');
+          const close = document.createElement('button');
+          close.setAttribute('data-gift-close', '');
+          close.textContent = 'Close';
+          close.addEventListener('click', () => dialog.close());
+          dialog.prepend(close);
+          window.__giftBusy = false;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            dialog.showModal();
+          }, 100);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+
+
 def test_promotion_gift_click_falls_back_when_pointer_is_intercepted(page):
     _set_promotion_page(page, cover_dialog=True)
     page.evaluate(
@@ -165,6 +189,24 @@ def test_late_promotion_dialog_is_observed_when_busy_is_already_idle(page):
     drawer = CartDrawer(page, _shirees_config(), "desktop")
 
     assert drawer.settle_quantity_promotion(timeout_ms=3_000) is True
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+
+
+def test_promotion_dialog_beyond_one_second_is_still_observed(page):
+    _set_promotion_page(page)
+    page.evaluate(
+        """() => {
+          window.__giftBusy = false;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 2000);
+        }"""
+    )
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+
+    assert drawer.settle_quantity_promotion(timeout_ms=6_000) is True
     assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
     assert page.locator("#drawer.open").count() == 1
 

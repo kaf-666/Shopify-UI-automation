@@ -21,7 +21,7 @@ DRAWER_OPEN_TIMEOUT_MS = 15_000
 # Themes can schedule the promotion dialog one or more frames after the cart
 # change response. Observe one bounded grace window before deciding that no
 # dialog will appear; this is not a fixed sleep on sites without the selector.
-PROMOTION_GIFT_APPEARANCE_GRACE_MS = 1_000
+PROMOTION_GIFT_APPEARANCE_GRACE_MS = 5_000
 PROMOTION_GIFT_POLL_MS = 50
 
 
