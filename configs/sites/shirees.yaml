@@ -206,9 +206,11 @@ pages:
         value: '#slideout-ajax-cart:popover-open'
       # The theme opens a native gift-choice dialog after quantity changes;
       # decline it so the cart drawer can be reopened and assertions continue.
+      # Prefer the always-visible close control; fall back to the bottom "No
+      # thanks" button when a theme variant only renders the skip action.
       promotion_gift_dismiss:
         by: css
-        value: '[data-promotion-gift-dialog][open] [data-gift-skip]'
+        value: '[data-promotion-gift-dialog][open] [data-gift-close], [data-promotion-gift-dialog][open] [data-gift-skip]'
       cart_item:
         by: css
         value: '.ajax-cart__cart-item:visible'
