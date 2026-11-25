@@ -264,6 +264,45 @@ def test_web_pixel_sandbox_rule_is_narrow(closing, first_party, method, path):
         boundary.assert_clean()
 
 
+def test_navigation_read_cancellation_is_non_gating_while_marked():
+    boundary, route = _monorail_route(
+        url="https://store.invalid/products/example-dress?variant=1",
+        method="GET", resource_type="fetch", closing=False, first_party=True,
+    )
+    page = object()
+    route.request.frame = SimpleNamespace(page=page)
+    boundary.begin_navigation_reads([page])
+    try:
+        boundary._handle_route(route)
+    finally:
+        boundary.end_navigation_reads([page])
+    boundary.assert_clean()
+    assert boundary.summary()["navigation_read_cancellation_count"] == 1
+
+
+@pytest.mark.parametrize("method,resource_type,navigation", [
+    ("POST", "fetch", False),
+    ("GET", "document", True),
+    ("GET", "fetch", True),
+])
+def test_navigation_read_rule_is_narrow(method, resource_type, navigation):
+    boundary, route = _monorail_route(
+        url="https://store.invalid/products/example-dress",
+        method=method, resource_type=resource_type, closing=False,
+        first_party=True,
+    )
+    page = object()
+    route.request.frame = SimpleNamespace(page=page)
+    route.request.is_navigation_request = lambda: navigation
+    boundary.begin_navigation_reads([page])
+    try:
+        boundary._handle_route(route)
+    finally:
+        boundary.end_navigation_reads([page])
+    with pytest.raises(RequestBoundaryError, match="REQUEST_TRANSPORT_FAILED"):
+        boundary.assert_clean()
+
+
 def test_finalization_ignores_non_navigation_transport_noise():
     boundary, route = _monorail_route(
         url="https://store.invalid/api/2026-01/graphql.json",

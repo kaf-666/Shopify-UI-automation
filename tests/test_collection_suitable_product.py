@@ -67,6 +67,8 @@ def test_candidate_return_keeps_disposal_mark_until_grace(monkeypatch):
     events = []
     boundary.begin_page_disposal = lambda pages: events.append(("begin", list(pages)))
     boundary.end_page_disposal = lambda pages: events.append(("end", list(pages)))
+    boundary.begin_navigation_reads = lambda pages: events.append(("nav_begin", list(pages)))
+    boundary.end_navigation_reads = lambda pages: events.append(("nav_end", list(pages)))
     collection.page.wait_for_timeout = lambda ms: events.append(("wait", ms))
 
     def fake_navigation(page, action, **_kwargs):
@@ -83,10 +85,13 @@ def test_candidate_return_keeps_disposal_mark_until_grace(monkeypatch):
         raise AssertionError("expected a bounded candidate failure")
 
     assert events == [
+        ("nav_begin", [collection.page]),
         ("begin", [collection.page]),
         ("navigate", "https://shop.example/products/0"),
         ("wait", 1_500),
         ("end", [collection.page]),
+        ("wait", 1_500),
+        ("nav_end", [collection.page]),
     ]
 
 

@@ -188,6 +188,7 @@ class RequestBoundary:
         self.pending = {}
         self.settled = WeakSet()
         self.disposing_pages = set()
+        self.navigation_read_pages = set()
         self.failures = []
         self.events = []
         self.bridge_events = []
@@ -195,6 +196,7 @@ class RequestBoundary:
         self.closing_cancellation_count = 0
         self.closing_passive_read_cancellation_count = 0
         self.closing_telemetry_post_cancellation_count = 0
+        self.navigation_read_cancellation_count = 0
         self.page_disposal_cancellation_count = 0
         self.finalization_cancellation_count = 0
         self.finalizing = False
@@ -215,6 +217,21 @@ class RequestBoundary:
     def end_page_disposal(self, pages) -> None:
         for page in pages:
             self.disposing_pages.discard(page)
+
+    def begin_navigation_reads(self, pages) -> None:
+        """Mark pages whose background reads may be cancelled by a navigation.
+
+        Unlike an intentional page close, an active page may still issue a real
+        navigation request. Only non-navigation GET/HEAD fetch/xhr reads from
+        the marked pages become non-gating.
+        """
+        for page in pages:
+            if page is not None:
+                self.navigation_read_pages.add(page)
+
+    def end_navigation_reads(self, pages) -> None:
+        for page in pages:
+            self.navigation_read_pages.discard(page)
 
     def begin_finalization(self) -> None:
         """After all cases, non-navigation transport noise is teardown-only."""
@@ -270,6 +287,7 @@ class RequestBoundary:
                 "closing_cancellation_count": self.closing_cancellation_count,
                 "closing_passive_read_cancellation_count": self.closing_passive_read_cancellation_count,
                 "closing_telemetry_post_cancellation_count": self.closing_telemetry_post_cancellation_count,
+                "navigation_read_cancellation_count": self.navigation_read_cancellation_count,
                 "page_disposal_cancellation_count": self.page_disposal_cancellation_count,
                 "finalization_cancellation_count": self.finalization_cancellation_count}
 
@@ -497,6 +515,7 @@ class RequestBoundary:
             # are non-gating; the mutation guard owns business writes.
             passive_read = False
             telemetry_post = False
+            navigation_read = False
             page_disposal = False
             finalization = False
             try:
@@ -539,12 +558,22 @@ class RequestBoundary:
                     )
                 except Exception:
                     telemetry_post = False
+                try:
+                    navigation_read = (
+                        request.frame.page in self.navigation_read_pages
+                        and request.method in {"GET", "HEAD"}
+                        and not request.is_navigation_request()
+                        and request.resource_type in {"fetch", "xhr"}
+                    )
+                except Exception:
+                    navigation_read = False
             if (self.closing and (type(exc).__name__ == "TargetClosedError" or kind in {
                     "REQUEST_CONTEXT_DISPOSED", "TARGET_CLOSED", "CONTEXT_CLOSED"}
-                    or passive_read)) or telemetry_post or page_disposal or finalization:
+                    or passive_read)) or telemetry_post or navigation_read or page_disposal or finalization:
                 self.closing_cancellation_count += 1
                 self.closing_passive_read_cancellation_count += int(passive_read)
                 self.closing_telemetry_post_cancellation_count += int(telemetry_post)
+                self.navigation_read_cancellation_count += int(navigation_read)
                 self.page_disposal_cancellation_count += int(page_disposal)
                 self.finalization_cancellation_count += int(finalization)
             else:

@@ -415,27 +415,41 @@ class CollectionPage(BasePage):
         candidates = min(max(1, int(max_candidates)), total)
         collection_page = self.page
         collection_url = collection_page.url
+        boundary = self._request_boundary(collection_page)
+        if boundary is not None:
+            # Theme quick-view/prefetch reads can be cancelled when a card
+            # navigation starts. They are background reads, not navigation or
+            # writes, so keep them non-gating for the candidate exploration.
+            boundary.begin_navigation_reads([collection_page])
         last_card = ""
-        for index in range(candidates):
-            self.open_product(index)
-            actual_page = self.page
-            last_card = urlparse(actual_page.url).path
-            try:
-                if bool(suitable(actual_page)):
-                    return index, actual_page
-            except Exception:
-                pass
-            if index + 1 >= candidates:
-                break
-            if actual_page is not collection_page:
-                self._close_candidate_page(actual_page, collection_page)
-                self.page = collection_page
-            if self.page.url != collection_url:
-                self._return_to_collection(self.page, collection_url)
-        raise RuntimeError(
-            f"No suitable product among first {candidates} cards "
-            f"(collection={collection_url.split('?', 1)[0]}, last_card={last_card[:80]})"
-        )
+        try:
+            for index in range(candidates):
+                self.open_product(index)
+                actual_page = self.page
+                last_card = urlparse(actual_page.url).path
+                try:
+                    if bool(suitable(actual_page)):
+                        return index, actual_page
+                except Exception:
+                    pass
+                if index + 1 >= candidates:
+                    break
+                if actual_page is not collection_page:
+                    self._close_candidate_page(actual_page, collection_page)
+                    self.page = collection_page
+                if self.page.url != collection_url:
+                    self._return_to_collection(self.page, collection_url)
+            raise RuntimeError(
+                f"No suitable product among first {candidates} cards "
+                f"(collection={collection_url.split('?', 1)[0]}, last_card={last_card[:80]})"
+            )
+        finally:
+            if boundary is not None:
+                try:
+                    collection_page.wait_for_timeout(CANDIDATE_DISPOSAL_GRACE_MS)
+                except Exception:
+                    pass
+                boundary.end_navigation_reads([collection_page])
 
     def _validate_product_destination(self, url: str) -> None:
         """Require an explicitly configured storefront host before/after navigation."""

@@ -211,6 +211,27 @@ def test_promotion_dialog_beyond_one_second_is_still_observed(page):
     assert page.locator("#drawer.open").count() == 1
 
 
+def test_page_observer_dismisses_dialog_that_appears_during_a_blocked_read(page):
+    _set_promotion_page(page)
+    drawer = CartDrawer(page, _shirees_config(), "desktop")
+    drawer._install_promotion_auto_dismiss()
+    page.evaluate(
+        """() => {
+          window.__giftBusy = false;
+          setTimeout(() => {
+            document.querySelector('#drawer').classList.remove('open');
+            document.querySelector('[data-promotion-gift-dialog]').showModal();
+          }, 500);
+        }"""
+    )
+
+    page.wait_for_timeout(2000)
+
+    assert page.locator("[data-promotion-gift-dialog][open]").count() == 0
+    assert page.locator("#drawer.open").count() == 1
+    assert page.locator(".item .qty").input_value() == "1"
+
+
 def test_ensure_drawer_ready_recovers_after_a_late_dialog(page):
     _set_promotion_page(page)
     page.evaluate(

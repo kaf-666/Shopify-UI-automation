@@ -37,8 +37,10 @@ providers, paths and writing redirects still fail. The Google pagead
 viewthrough-to-1p family additionally requires an identical numeric ad ID.
 During intentional browser disposal, in-flight passive asset reads (including
 first-party `/cdn/` resources and the first-party Shopify web-pixel sandbox
-document) may be canceled without gating the run. The exact
-first-party Shopify Monorail telemetry POST
+document) may be canceled without gating the run. During an intentional Browse
+candidate navigation, non-navigation GET/HEAD fetch/xhr reads from the
+collection page (theme quick-view/prefetch) are counted as navigation-read
+noise. The exact first-party Shopify Monorail telemetry POST
 (`/.well-known/shopify/monorail/unstable/produce_batch`) is non-gating in any
 phase. Third-party fetch/xhr POST monitoring traffic is also non-gating because
 the mutation guard owns business writes. After all cases are complete, remaining
