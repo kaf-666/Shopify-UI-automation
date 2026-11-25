@@ -521,9 +521,38 @@ class CartDrawer(BasePage):
             except PlaywrightTimeoutError:
                 # WebKit can report the native modal backdrop as <html>
                 # intercepting pointer events even though the real control is
-                # visible and enabled. Dispatch the control's own click path
-                # instead of retrying a blocked pointer action for 30 seconds.
-                dismiss.evaluate("element => element.click()")
+                # visible and enabled. The page-side observer or the theme may
+                # also have closed the dialog between detection and the click;
+                # only dispatch a DOM click if the control still exists.
+                selector = (
+                    self.resolve_selector("promotion_gift_dismiss") or {}
+                ).get("value") or ""
+                try:
+                    still_open = bool(
+                        self.page.evaluate(
+                            """(selector) => {
+                                try {
+                                    return !!document.querySelector(selector);
+                                } catch (e) {
+                                    return false;
+                                }
+                            }""",
+                            selector,
+                        )
+                    )
+                except Exception:
+                    still_open = False
+                if still_open:
+                    try:
+                        self.page.evaluate(
+                            """(selector) => {
+                                const element = document.querySelector(selector);
+                                if (element) element.click();
+                            }""",
+                            selector,
+                        )
+                    except Exception:
+                        pass
             try:
                 expect(self.locator("promotion_gift_dismiss")).to_have_count(
                     0, timeout=5_000
