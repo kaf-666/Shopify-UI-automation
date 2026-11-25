@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 from urllib.parse import parse_qs, urlparse
@@ -360,6 +361,86 @@ class CartDrawer(BasePage):
         except Exception:
             return False
 
+    @staticmethod
+    def _native_selector(selector: str) -> str:
+        """Strip Playwright-only pseudo classes before browser DOM queries."""
+        return re.sub(r":(?:visible|hidden)\b", "", str(selector or "")).strip()
+
+    def _install_promotion_auto_dismiss(self) -> None:
+        """Dismiss a late gift dialog from the page itself.
+
+        A fixed Python-side grace can miss a dialog the theme schedules later,
+        leaving the next locator read blocked for the full driver timeout. A
+        page-side observer reacts as soon as the native dialog opens, dismisses
+        it, and reopens the configured drawer.
+        """
+        selectors = self.page_config().get("selectors") or {}
+        dismiss = (selectors.get("promotion_gift_dismiss") or {}).get("value")
+        if not dismiss:
+            return
+        drawer_open = self._native_selector(
+            (selectors.get("drawer_open") or {}).get("value") or ""
+        )
+        home_selectors = (
+            (getattr(self, "site_config", {}) or {}).get("pages", {})
+            .get("home", {}).get("selectors", {})
+        )
+        trigger = self._native_selector(
+            (home_selectors.get("cart") or {}).get("value") or ""
+        )
+        try:
+            self.page.evaluate(
+                """([dismissSelector, drawerOpenSelector, triggerSelector]) => {
+                    if (window.__shopifySmokePromotionObserver) return true;
+                    window.__shopifySmokePromotionObserver = true;
+                    let scheduled = false;
+                    const dismissLateDialog = () => {
+                        const dialog = document.querySelector(
+                            '[data-promotion-gift-dialog][open]');
+                        if (!dialog) return;
+                        let close = null;
+                        try {
+                            close = document.querySelector(dismissSelector);
+                        } catch (e) {
+                            return;
+                        }
+                        if (!close) return;
+                        try { close.click(); } catch (e) {}
+                        setTimeout(() => {
+                            let open = false;
+                            try {
+                                open = !drawerOpenSelector ||
+                                    !!document.querySelector(drawerOpenSelector);
+                            } catch (e) { open = false; }
+                            if (open) return;
+                            try {
+                                const cartTrigger = triggerSelector
+                                    ? document.querySelector(triggerSelector)
+                                    : null;
+                                if (cartTrigger) cartTrigger.click();
+                            } catch (e) {}
+                        }, 500);
+                    };
+                    const observer = new MutationObserver(() => {
+                        if (scheduled) return;
+                        scheduled = true;
+                        setTimeout(() => {
+                            scheduled = false;
+                            dismissLateDialog();
+                        }, 0);
+                    });
+                    observer.observe(document.documentElement, {
+                        subtree: true, childList: true, attributes: true,
+                        attributeFilter: ['open']
+                    });
+                    dismissLateDialog();
+                    return true;
+                }""",
+                [str(dismiss), drawer_open, trigger],
+            )
+        except Exception:
+            pass
+
     def ensure_drawer_ready(self) -> None:
         """Dismiss an outstanding promotion and make the drawer usable again.
 
@@ -368,6 +449,7 @@ class CartDrawer(BasePage):
         quantity/checkout interaction re-checks this recovery condition instead
         of assuming the previous settle finished before the dialog was shown.
         """
+        self._install_promotion_auto_dismiss()
         selectors = self.page_config().get("selectors") or {}
         if selectors.get("promotion_gift_dismiss"):
             # Observe the same bounded grace window used after a quantity
